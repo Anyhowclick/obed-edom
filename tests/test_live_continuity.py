@@ -164,19 +164,6 @@ def _with_object_id(object_id: str, data):
     return data
 
 
-def test_a_second_destination_instance_pairs_by_centre_distance(tmp_path):
-    """With a fresh objectID the same clone is not ambiguous: each slide-1 instance pairs with its
-    geometry-equal twin by minimum total centre distance (plan section 2.2)."""
-    tmp = _mutate_slide(tmp_path, SLIDE2, lambda data: _with_object_id("CLONE", _clone_second_instance_onto_slide2(data)))
-    plan = derive_plan(tmp, SLIDES, resolver=_resolver)
-    assert isinstance(plan, ContinuityPlan)
-    pairs = {(m.src_object_id, m.dst_object_id, m.action) for m in plan.boundaries[0].movies}
-    assert pairs == {
-        (P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"], "pin"),
-        (P2_OBJECT_IDS["slide1_small"], "CLONE", "pin"),
-    }
-
-
 def _move_slide2_movie_centre(x: float, y: float):
     def move(node):
         node["baseLayer"]["initialState"]["position"] = {"pointX": x, "pointY": y}
@@ -191,28 +178,6 @@ def _slide1_centres() -> tuple[tuple[float, float], tuple[float, float]]:
     )
 
 
-@pytest.mark.parametrize("offset, refused", [(0.0, True), (7.9, True), (8.1, False)])
-def test_r1_a_runner_up_pairing_within_16_px_refuses_the_boundary(offset, refused, tmp_path):
-    """Slide 2's one instance sits `offset` px from the midpoint of slide 1's two centres, along
-    the line between them, so the two assignments differ by 2 x offset."""
-    (bx, by), (sx, sy) = _slide1_centres()
-    length = math.dist((bx, by), (sx, sy))
-    ux, uy = (sx - bx) / length, (sy - by) / length
-    cx, cy = (bx + sx) / 2 - ux * offset, (by + sy) / 2 - uy * offset
-    plan = _plan(_mutate_slide(tmp_path, SLIDE2, _move_slide2_movie_centre(cx, cy)))
-    assert isinstance(plan, ContinuityPlan)
-    movies = plan.boundaries[0].movies
-    if refused:
-        assert [(m.action, m.code, m.src_object_id, m.dst_object_id) for m in movies] == [
-            ("retire", "R1", P2_OBJECT_IDS["slide1"], None),
-            ("retire", "R1", P2_OBJECT_IDS["slide1_small"], None),
-        ]
-        assert "(margin 16 px)" in movies[0].refusal
-        assert [r["code"] for r in plan.refusals] == ["R1", "R1"]
-    else:
-        assert [(m.action, m.src_object_id) for m in movies] == [("bridge", P2_OBJECT_IDS["slide1"])]
-
-
 def _set_slide1_small_opacity(value: float):
     def apply(node):
         if node.get("objectID") == P2_OBJECT_IDS["slide1_small"]:
@@ -221,21 +186,34 @@ def _set_slide1_small_opacity(value: float):
     return lambda data: _map_movie_nodes(data, apply)
 
 
-def test_r1b_candidates_that_differ_in_opacity_refuse_the_boundary(tmp_path):
-    """Keynote pairs by opacity before distance (F3), so a distance-only pairing is unsafe."""
-    plan = _plan(_mutate_slide(tmp_path, SLIDE1, _set_slide1_small_opacity(0.5)))
+@pytest.mark.parametrize(
+    "uuid, transform, expected_code",
+    [
+        pytest.param(SLIDE2, _move_slide2_movie_centre(300, 300), "R10", id="authored-distance-does-not-select"),
+        pytest.param(SLIDE1, _set_slide1_small_opacity(0.5), "overlap", id="sibling-opacity-does-not-select"),
+        pytest.param(
+            SLIDE1,
+            lambda data: _add_build("buildOut", "apple:dissolve", P2_OBJECT_IDS["slide1_small"])(data),
+            "overlap",
+            id="sibling-build-does-not-refuse-selected-pair",
+        ),
+        pytest.param(
+            SLIDE2,
+            lambda data: _add_build("buildIn", "apple:dissolve", "CLONE")(_add_destination_sibling(data)),
+            "overlap",
+            id="destination-sibling-build-does-not-refuse-selected-pair",
+        ),
+    ],
+)
+def test_pairing_uses_transition_records_not_distance_opacity_or_sibling_builds(
+    uuid, transform, expected_code, tmp_path
+):
+    plan = _plan(_mutate_slide(tmp_path, uuid, transform))
     assert isinstance(plan, ContinuityPlan)
-    movies = plan.boundaries[0].movies
-    assert [(m.action, m.code) for m in movies] == [("retire", "R1b"), ("retire", "R1b")]
-    assert "differ in opacity" in movies[0].refusal
-
-
-def test_r1b_does_not_apply_when_there_is_no_choice(tmp_path):
-    """One instance on each side: no pairing preference can change the outcome."""
-    plan = _plan(_mutate_slide(tmp_path, SLIDE2, _set_slide1_small_opacity(0.5)))
-    assert isinstance(plan, ContinuityPlan)
-    plan_opaque = _plan()
-    assert plan.boundaries[1].movies == plan_opaque.boundaries[1].movies
+    selected = next(movie for movie in plan.boundaries[0].movies if movie.src_object_id == P2_OBJECT_IDS["slide1"])
+    assert selected.dst_object_id == P2_OBJECT_IDS["slide2"]
+    assert selected.code == expected_code
+    assert all(movie.code != "R1" for movie in plan.boundaries[0].movies)
 
 
 @pytest.mark.parametrize(
@@ -269,7 +247,9 @@ def _add_wa0125_to_slide4(data):
         "asset": "VID-20250608-WA0125.mp4-0.0000-45.1381",
     }
     state = clone["baseLayer"]["initialState"]
-    state["position"]["pointY"] = 200
+    state.update(position={"pointX": 1400, "pointY": 200}, width=484, height=272)
+    video = next(layer for layer in clone["baseLayer"]["layers"] if layer.get("isVideoLayer"))
+    video["initialState"].update(position={"pointX": 242, "pointY": 136}, width=484, height=272)
     clone_id = "CLONE-WA0125"
     events[0]["effects"][0]["effects"] = events[0]["effects"][0].get("effects", []) + [
         {
@@ -278,11 +258,16 @@ def _add_wa0125_to_slide4(data):
         }
     ]
     data = {**data, "events": events}
-    # the overlap rule reads the destination slide's draw order, so the clone needs a slot
-    # of its own, clear of the existing movie so neither carry is refused for overlap.
-    rect = (state["position"]["pointX"] - state["width"] / 2,
-            state["position"]["pointY"] - state["height"] / 2, state["width"], state["height"])
-    _draw_slots(data, 0).insert(1, _authored_slot(*rect, object_id=clone_id))
+    slot = copy.deepcopy(_draw_slots(data, 0)[1])
+    object_node = slot["layers"][0]
+    object_node["objectID"] = clone_id
+    object_node["initialState"].update(
+        position={"pointX": 1415.0489349365234, "pointY": 930.9080200195312}, width=484, height=272
+    )
+    leaf = object_node["layers"][0]
+    leaf["initialState"].update(position={"pointX": 242, "pointY": 136}, width=484, height=272)
+    leaf["texture"] = "SANITIZED-TEXTURE-1"
+    _draw_slots(data, 0).insert(1, slot)
     data["assets"] = {
         **data["assets"],
         "VID-20250608-WA0125.mp4-0.0000-45.1381": {
@@ -290,6 +275,32 @@ def _add_wa0125_to_slide4(data):
             "url": {"web": "assets/VID-20250608-WA0125.mp4-0.0000-45.1381.mp4"},
         },
     }
+    return data
+
+
+def _turn_wa0125_fade_into_bridge(data):
+    slots = _transition(data)["baseLayer"]["layers"]
+    slot = next(
+        slot for slot in slots
+        if slot["initialState"]["width"] == pytest.approx(484.6603698730469, abs=0.05)
+    )
+    leaf = slot["layers"][0]
+    leaf["animations"] = []
+    moving_leaf = next(
+        candidate["layers"][0] for candidate in slots
+        if any(
+            animation["property"] == "transform.translation"
+            for group in candidate["layers"][0]["animations"]
+            for animation in group["animations"]
+        )
+    )
+    group = copy.deepcopy(moving_leaf["animations"][0])
+    group["animations"] = [
+        animation for animation in group["animations"]
+        if animation["property"] == "transform.translation"
+    ]
+    group["animations"][0]["to"] = {"pointX": 20, "pointY": 0}
+    leaf["animations"] = [group]
     return data
 
 
@@ -402,7 +413,6 @@ def _scoped_r11_reason(tmp_path: Path, uuid: str, transform, *, gl_replay: bool 
             ),
             f"movie layer on slide {SLIDE1} {_MOVIE_LAYER_TRANSFORMED}", id="non-identity-affine-transform",
         ),
-        # The draw order (see the overlap section below) must be readable for every movie.
         pytest.param(
             SLIDE2, _drop_every_movie_slot, f"movie 'untitled.mov' has no draw slot on slide {SLIDE2}",
             id="movie-slot-absent-in-every-event",
@@ -435,15 +445,9 @@ def test_an_unmeasured_shape_or_draw_order_refuses_only_its_magic_move(uuid, tra
 
 
 @pytest.mark.parametrize("overlap_the_clone", [False, True])
-def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limit(overlap_the_clone, tmp_path, monkeypatch):
-    """Two movies change geometry across 3->4. With both carries clean the deck is refused (the
-    runtime animates one bridge per boundary). Artwork above the WA0125 clone refuses that carry
-    instead: a refused bridge retires (the raw player's restart), so only Untitled.mov animates and
-    the deck derives. The fixture's transition has no motion slot for the clone, so R10 is stubbed
-    out to isolate the count."""
-    from obed_edom import live_continuity
-
-    monkeypatch.setattr(live_continuity, "_bridge_timing_refusal", lambda *args: None)
+def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limit(overlap_the_clone, tmp_path):
+    """R12 refuses both otherwise admissible bridges at one cut, without disturbing a pin or a
+    bridge that survives at another cut."""
 
     def transform(data):
         data = _add_wa0125_to_slide4(data)
@@ -455,14 +459,25 @@ def test_only_unrefused_geometry_changes_count_towards_the_one_per_boundary_limi
             _draw_slots(data, 0).append(_authored_slot(right - 40, bottom - 40, 30.0, 30.0, object_id="OVER"))
         return data
 
-    plan = _plan(_mutate_slide(tmp_path, SLIDE4, transform))
-    if not overlap_the_clone:
-        assert plan == Unsupported("more than one movie changes geometry at player index 2 -> 3")
-        return
+    root = _mutate_slide(tmp_path, SLIDE3, _turn_wa0125_fade_into_bridge)
+    _rewrite_slide_json(root, SLIDE4, transform)
+    plan = derive_plan(root, SLIDES, resolver=_resolver, gl_replay=True)
     assert isinstance(plan, ContinuityPlan)
+    assert plan.boundaries[0].movies[0].gl_replay is not None
+    if not overlap_the_clone:
+        assert [(movie.action, movie.code) for movie in plan.boundaries[2].movies] == [
+            ("bridge", "R12"), ("bridge", "R12")
+        ]
+        runtime = plan.to_runtime()
+        assert isinstance(runtime, dict)
+        assert [entry["action"] for entry in runtime["boundaries"] if entry["atScene"] == 8] == [
+            "retire", "retire"
+        ]
+        return
     assert _refusal_codes(plan) == [(1, "overlap"), (3, "overlap")]
     actions = {(m["asset"], m["action"], m.get("code")) for m in _boundary(plan, 2)["movies"]}
     assert actions == {("untitled.mov", "bridge", None), ("vid-20250608-wa0125.mp4", "bridge", "overlap")}
+    assert isinstance(plan.to_runtime(), dict)
 
 
 @pytest.mark.parametrize("ancestor_change", [None, "position", "rotation", "animation"])
@@ -772,20 +787,6 @@ def _duplicate_bridge_slot(data):
     return data
 
 
-def _strip_bridge_motion(data):
-    for node in _bridge_slot_chain(data):
-        node["animations"] = [
-            group for group in node["animations"]
-            if not any(leaf["property"] in _MOTION_PROPERTIES for leaf in group["animations"])
-        ]
-    return data
-
-
-def _drop_first_leaf_property(data):
-    del _bridge_motion_groups(data)[0]["animations"][0]["property"]
-    return data
-
-
 R10_CASES = [
     pytest.param(
         _each_leaf(lambda leaf: leaf.__setitem__("timingFunction", "Linear")),
@@ -823,24 +824,6 @@ R10_CASES = [
         "slot layer 1.animations[0].duration is not a readable finite number",
         id="group-duration-missing",
     ),
-    pytest.param(
-        _each_group(lambda group: group.__setitem__("duration", "1.5")),
-        "slot layer 1.animations[0].duration is not a readable finite number",
-        id="group-duration-string",
-    ),
-    pytest.param(
-        _drop_first_leaf_property,
-        "slot layer 1.animations[0].animations[0].property is not a readable non-empty string",
-        id="leaf-property-missing",
-    ),
-    pytest.param(_drop_transition_slots, "no transition slot starts at the carried movie's rect", id="no-slots"),
-    pytest.param(_nudge_bridge_slot(0.6), "no transition slot starts at the carried movie's rect", id="slot-nudged-0.6px"),
-    pytest.param(
-        _duplicate_bridge_slot,
-        "transition slots [1, 3] all start at the carried movie's rect",
-        id="ambiguous-slot",
-    ),
-    pytest.param(_strip_bridge_motion, "the carried movie's slot has no motion animation", id="no-motion"),
 ]
 
 
@@ -927,7 +910,14 @@ def test_r10_pins_are_exempt_from_the_eased_timing_check(tmp_path):
                     break
                 (node,) = node["layers"]
         assert moving
-        slots[SLIDE1_PIN_SLOT]["animations"].append(copy.deepcopy(moving[0]))
+        group = copy.deepcopy(moving[0])
+        group["animations"] = [
+            leaf for leaf in group["animations"] if leaf["property"] == "transform.translation"
+        ]
+        group["animations"][0]["from"] = {"pointX": 0, "pointY": 0}
+        group["animations"][0]["to"] = {"pointX": 0, "pointY": 0}
+        group["animations"][0]["timingFunction"] = "Linear"
+        slots[SLIDE1_PIN_SLOT]["layers"][0]["animations"].append(group)
         return data
 
     root = _copy_fixture_tree(tmp_path)
@@ -938,6 +928,160 @@ def test_r10_pins_are_exempt_from_the_eased_timing_check(tmp_path):
     [pin] = plan.boundaries[0].movies
     assert (pin.action, pin.refusal, pin.code) == ("pin", None, None)
     assert plan.refusals == ()
+
+
+def _nudge_transition_endpoint(dx: float):
+    def mutate(data):
+        translation = next(
+            leaf for group in _bridge_motion_groups(data) for leaf in group["animations"]
+            if leaf["property"] == "transform.translation"
+        )
+        translation["to"]["pointX"] += dx
+        return data
+
+    return mutate
+
+
+def _malformed_transition_endpoint(data):
+    _transition(data)["baseLayer"]["layers"][SLIDE3_BRIDGE_MOVIE_SLOT]["layers"][0]["initialState"]["position"][
+        "pointX"
+    ] = "bad"
+    return data
+
+
+def _motion_on_non_leaf(data):
+    slot = _transition(data)["baseLayer"]["layers"][SLIDE3_BRIDGE_MOVIE_SLOT]
+    group = copy.deepcopy(next(group for group in slot["layers"][0]["animations"] if group["animations"]))
+    group["animations"] = [
+        leaf for leaf in group["animations"] if leaf["property"] == "transform.translation"
+    ]
+    slot["animations"].append(group)
+    return data
+
+
+def _reorder_transition_slots(data):
+    slots = _transition(data)["baseLayer"]["layers"]
+    slots.append(slots.pop(SLIDE3_BRIDGE_MOVIE_SLOT))
+    return data
+
+
+def _add_bridge_constant_scalar(property_: str, value):
+    def mutate(data):
+        group = copy.deepcopy(_bridge_motion_groups(data)[0])
+        leaf = group["animations"][0]
+        leaf["property"] = property_
+        leaf["from"] = {"scalar": value}
+        leaf["to"] = {"scalar": value}
+        group["animations"] = [leaf]
+        _bridge_slot_chain(data)[-1]["animations"].append(group)
+        return data
+
+    return mutate
+
+
+def _shared_slot_source(data):
+    events = copy.deepcopy(data["events"])
+    clone = copy.deepcopy(_find_movie_nodes(events)[0])
+    clone["objectID"] = "SHARED-SOURCE"
+    clone["movie"] = {**clone["movie"], "asset": "Shared.mov-0.0000-1.0"}
+    events[0].setdefault("clonedMovies", []).append(clone)
+    data = {**data, "events": events}
+    data["assets"] = {
+        **data["assets"],
+        "Shared.mov-0.0000-1.0": {"type": "video", "url": {"web": "assets/Shared.mov-0.0000-1.0.mov"}},
+    }
+    return data
+
+
+def _shared_slot_destination(data):
+    events = copy.deepcopy(data["events"])
+    clone = copy.deepcopy(_find_movie_nodes(events)[0])
+    clone["objectID"] = "SHARED-DESTINATION"
+    clone["movie"] = {**clone["movie"], "asset": "Shared.mov-0.0000-1.0"}
+    events[0].setdefault("clonedMovies", []).append(clone)
+    working = {**data, "events": events}
+    draw = copy.deepcopy(_draw_slots(working, 0)[SLIDE2_MOVIE_SLOT])
+    draw["layers"][0]["objectID"] = "SHARED-DESTINATION"
+    _draw_slots(working, 0).insert(SLIDE2_MOVIE_SLOT, draw)
+    working["assets"] = {
+        **working["assets"],
+        "Shared.mov-0.0000-1.0": {"type": "video", "url": {"web": "assets/Shared.mov-0.0000-1.0.mov"}},
+    }
+    return working
+
+
+def _add_bridge_destination_sibling(data, offset: float):
+    events = copy.deepcopy(data["events"])
+    clone = copy.deepcopy(_find_movie_nodes(events)[0])
+    clone["objectID"] = "BRIDGE-CLONE"
+    events[0].setdefault("clonedMovies", []).append(clone)
+    working = {**data, "events": events}
+    slots = _draw_slots(working, 0)
+    index = next(i for i, slot in enumerate(slots) if slot["layers"][0].get("objectID") == P2_OBJECT_IDS["slide4"])
+    draw = copy.deepcopy(slots[index])
+    draw["layers"][0]["objectID"] = "BRIDGE-CLONE"
+    draw["layers"][0]["layers"][0]["initialState"]["position"]["pointX"] += offset
+    slots.insert(index, draw)
+    return working
+
+
+@pytest.mark.parametrize(
+    "mutations, boundary, code, fragment",
+    [
+        pytest.param([(SLIDE3, _drop_transition_slots)], 2, "R1", "no transition slot", id="missing-slot"),
+        pytest.param([(SLIDE3, _nudge_bridge_slot(0.6))], 2, "R1", "no transition slot", id="start-rect-at-0.6"),
+        pytest.param([(SLIDE3, _duplicate_bridge_slot)], 2, "R1", "all start", id="stacked-duplicate-slots"),
+        pytest.param(
+            [(SLIDE1, _shared_slot_source), (SLIDE2, _shared_slot_destination)], 0, "R1", "claimed by more than one",
+            id="slot-shared-across-assets",
+        ),
+        pytest.param([(SLIDE3, _nudge_transition_endpoint(0.5))], 2, None, None, id="endpoint-at-0.5"),
+        pytest.param([(SLIDE3, _nudge_transition_endpoint(0.6))], 2, "R1", "no destination", id="endpoint-at-0.6"),
+        pytest.param(
+            [(SLIDE3, _nudge_transition_endpoint(0.4)),
+             (SLIDE4, lambda data: _add_bridge_destination_sibling(data, 1.8))],
+            2, "R1", "runner-up is only 1.000 px", id="margin-at-1.4",
+        ),
+        pytest.param(
+            [(SLIDE3, _nudge_transition_endpoint(0.4)),
+             (SLIDE4, lambda data: _add_bridge_destination_sibling(data, 2.0))],
+            2, None, None, id="margin-at-1.6",
+        ),
+        pytest.param([(SLIDE3, _malformed_transition_endpoint)], 2, "R1", "finite number", id="malformed-number"),
+        pytest.param(
+            [(SLIDE3, _each_group(lambda group: group.__setitem__("duration", "1.5")))],
+            2, "R1", "finite number", id="group-duration-string",
+        ),
+        pytest.param(
+            [(SLIDE3, _add_bridge_constant_scalar("hidden", True))],
+            2, "R1", "unsupported 'hidden' animation", id="hidden-on-non-fading-slot",
+        ),
+        pytest.param(
+            [(SLIDE3, _add_bridge_constant_scalar("opacity", 0))],
+            2, "R1", "unsupported opacity change 0 -> 0", id="constant-zero-opacity",
+        ),
+        pytest.param([(SLIDE3, _motion_on_non_leaf)], 2, "R1", "non-leaf", id="non-leaf-motion"),
+        pytest.param([(SLIDE3, _reorder_transition_slots)], 2, None, None, id="reordered-slots"),
+        pytest.param(
+            [(SLIDE3, lambda data: _map_transitions(data, lambda _name: "apple:magic-move-dissolve"))],
+            2, "R11", "unmeasured export shape", id="unknown-variant",
+        ),
+    ],
+)
+def test_pairing_evidence_is_validated_without_distance_fallback(mutations, boundary, code, fragment, tmp_path):
+    root = _copy_fixture_tree(tmp_path)
+    for uuid, transform in mutations:
+        _rewrite_slide_json(root, uuid, transform)
+    plan = _plan(root)
+    assert isinstance(plan, ContinuityPlan)
+    movies = plan.boundaries[boundary].movies
+    if code is None:
+        assert any(movie.dst_object_id is not None and movie.refusal is None for movie in movies)
+        assert all(movie.code not in ("R1", "R11") for movie in movies)
+    else:
+        refused = [movie for movie in movies if movie.code == code]
+        assert refused
+        assert all(fragment in movie.refusal for movie in refused)
 
 
 @pytest.mark.skipif(not REAL_EXPORT_ROOT.is_dir(), reason="real P2 export not available")
@@ -953,6 +1097,12 @@ def test_fixture_bridge_transition_is_the_real_exports_with_textures_sanitized()
         return _transition(json.loads((root / "assets" / SLIDE3 / f"{SLIDE3}.json").read_text()))
 
     assert strip(transition(FIXTURE_ROOT)) == strip(transition(REAL_EXPORT_ROOT))
+    for uuid in (SLIDE1, SLIDE2, SLIDE3, SLIDE4):
+        fixture = json.loads((FIXTURE_ROOT / "assets" / uuid / f"{uuid}.json").read_text())
+        real = json.loads((REAL_EXPORT_ROOT / "assets" / uuid / f"{uuid}.json").read_text())
+        assert [strip(event["baseLayer"]) for event in fixture["events"]] == [
+            strip(event["baseLayer"]) for event in real["events"]
+        ]
     real_plan = derive_plan(REAL_EXPORT_ROOT, SLIDES, resolver=_resolver)
     assert isinstance(real_plan, ContinuityPlan)
     assert _bridge_movie(real_plan).refusal is None
@@ -1309,10 +1459,7 @@ def test_artwork_must_overlap_the_movie_by_more_than_the_minimum_to_refuse(overl
         assert plan.refusals == ()
 
 
-def test_movie_slot_absent_in_one_event_is_skipped_not_refused(tmp_path):
-    """Slide 2's last event is the flattened transition frame: a single canvas-sized slot with
-    no objectID at all. It carries no draw order for the movie and must simply be skipped."""
-
+def test_pairing_requires_the_destination_movie_in_the_first_event(tmp_path):
     def drop_the_movie_slot_from_the_first_event(data):
         data = _move_green_square_below_the_movie(data)
         movie_id = _slot_object(data, 0, SLIDE2_GREEN_SLOT)["objectID"]
@@ -1323,7 +1470,10 @@ def test_movie_slot_absent_in_one_event_is_skipped_not_refused(tmp_path):
 
     plan = _plan(_mutate_slide(tmp_path, SLIDE2, drop_the_movie_slot_from_the_first_event))
     assert isinstance(plan, ContinuityPlan)
-    assert plan.refusals == ()
+    assert [(movie.action, movie.code) for movie in plan.boundaries[0].movies] == [
+        ("retire", "R11"), ("retire", "R11")
+    ]
+    assert "has no draw slot" in plan.boundaries[0].movies[0].refusal
 
 
 # --- interim mask rule ---------------------------------------------------------------------
@@ -2725,6 +2875,14 @@ def _add_second_continuing_movie(tmp: Path) -> None:
         clone = copy.deepcopy(source)
         clone["objectID"] = "CLONE-SECOND-MOVIE"
         clone["movie"] = {**clone["movie"], "asset": "Second.mov-0.0000-1.0"}
+        slot_state = copy.deepcopy(_transition({**data, "events": events})["baseLayer"]["layers"][0]["initialState"])
+        clone["baseLayer"]["initialState"] = slot_state
+        video = next(layer for layer in clone["baseLayer"]["layers"] if layer.get("isVideoLayer"))
+        video["initialState"].update(
+            position={"pointX": slot_state["width"] / 2, "pointY": slot_state["height"] / 2},
+            width=slot_state["width"],
+            height=slot_state["height"],
+        )
         events[0]["clonedMovies"] = [clone]
         data = {**data, "events": events}
         data = {
@@ -2745,7 +2903,9 @@ def _add_second_continuing_movie(tmp: Path) -> None:
         clone["objectID"] = "CLONE-SECOND-MOVIE-2"
         clone["movie"] = {**clone["movie"], "asset": "Second.mov-0.0000-1.0"}
         events[0]["clonedMovies"] = [clone]
-        events[0]["baseLayer"]["layers"].insert(0, {"layers": [{"objectID": "CLONE-SECOND-MOVIE-2"}]})
+        draw = copy.deepcopy(_draw_slots(data, 0)[SLIDE2_MOVIE_SLOT])
+        draw["layers"][0]["objectID"] = "CLONE-SECOND-MOVIE-2"
+        events[0]["baseLayer"]["layers"].insert(SLIDE2_MOVIE_SLOT, draw)
         data = {**data, "events": events}
         data = {
             **data,
@@ -2771,10 +2931,8 @@ def test_gl_replay_rule2_rejects_more_than_one_continuing_movie(tmp_path):
     assert refusal["glReplay"] is False
     assert "movies are carried across the boundary, expected exactly 1" in refusal["glReplayReason"]
     assert refusal["glReplayReason"].startswith("2 movies")
-    # the clone is itself refused too (it is drawn under the other authored artwork), so the
-    # boundary retires both instances, each on its own entry.
     assert sorted((r["asset"], r["code"]) for r in plan.refusals if r["atScene"] == 2) == [
-        ("second.mov", "overlap"), ("untitled.mov", "overlap"),
+        ("second.mov", "R1"), ("untitled.mov", "overlap")
     ]
 
 
@@ -2812,10 +2970,6 @@ def _set_first_event_automatic_play(automatic_play):
 @pytest.mark.parametrize(
     "uuid, transform, reason",
     [
-        pytest.param(
-            SLIDE1, lambda data: _map_transitions(data, lambda _name: "apple:magic-move-dissolve"),
-            "transition 'apple:magic-move-dissolve' is not in the measured WebGL list", id="rule1-an-unmeasured-transition-name",
-        ),
         *[
             pytest.param(
                 SLIDE2, _set_first_event_automatic_play(value),
@@ -3457,6 +3611,22 @@ def test_r2_a_carried_instance_that_builds_refuses_the_boundary(uuid, build_type
     assert _refusal_codes(plan) == codes
 
 
+def test_r2_a_destination_hidden_at_its_first_event_is_treated_as_build_in(tmp_path):
+    def hide(data):
+        slot = next(
+            slot for slot in _draw_slots(data, 0)
+            if slot["layers"][0].get("objectID") == P2_OBJECT_IDS["slide4"]
+        )
+        slot["layers"][0]["initialState"]["hidden"] = True
+        return data
+
+    plan = _plan(_mutate_slide(tmp_path, SLIDE4, hide))
+    assert isinstance(plan, ContinuityPlan)
+    [movie] = plan.boundaries[2].movies
+    assert (movie.action, movie.code, movie.dst_object_id) == ("retire", "R2", None)
+    assert "hidden at its slide's first event" in movie.refusal
+
+
 def test_r3_a_transition_off_the_last_event_refuses_the_deck(tmp_path):
     def move_transition_to_the_first_event(data):
         transition = data["events"][-1]["effects"].pop(0)
@@ -3525,8 +3695,9 @@ def test_r8_a_trim_mismatch_refuses_the_boundary(transform, tmp_path):
 #
 # Every carry path (bridge reparent, settled hold, pin keep-at-slot, the glReplay hand-off) sets
 # the decoder's `opacity` to 1 outside its authored layers, and the runtime plan carries no
-# opacity at all. R1b only compares opacities when there is a pairing CHOICE, so a single
-# translucent pair, or repeated instances that all agree on a translucent opacity, used to carry.
+# opacity at all. Transition-record correspondence is independent of authored opacity, so a
+# translucent pair, or repeated instances that all agree on a translucent opacity, would carry
+# without this separate check.
 # The export exposes opacity on the movie node's own layers (movie layer, video sub-layer, the
 # poster's `singleTextureOpacity`) and on the slide's draw tree (the draw slot wrapper and the
 # object layer it holds); all of them must read exactly 1.
@@ -3568,7 +3739,7 @@ def _with_opacities(tmp_path: Path, *changes) -> Path:
 
 @pytest.mark.parametrize("where", OPACITY_SOURCES)
 def test_r9_a_single_translucent_bridge_refuses_the_boundary(where, tmp_path):
-    """Slide 3 -> 4 is one instance on each side, so R1b never looks at it."""
+    """Slide 3 -> 4 is one instance on each side, and correspondence alone would carry it."""
     root = _with_opacities(tmp_path, (SLIDE3, "slide3", 0.5, where), (SLIDE4, "slide4", 0.5, where))
     plan = _plan(root)
     assert isinstance(plan, ContinuityPlan)
@@ -3588,7 +3759,7 @@ def test_a_translucent_instance_that_also_builds_out_reports_r2_first(tmp_path):
     plan = _plan(root)
     assert isinstance(plan, ContinuityPlan)
     [bridge] = plan.boundaries[2].movies
-    assert (bridge.action, bridge.code) == ("bridge", "R2")
+    assert (bridge.action, bridge.code) == ("retire", "R2")
     assert _refusal_codes(plan) == [(1, "overlap"), (3, "R2")]
 
 
@@ -3607,9 +3778,9 @@ def test_r9_an_opacity_change_across_the_move_refuses_the_boundary(uuid, key, si
 
 @pytest.mark.parametrize("gl_replay", [False, True])
 def test_r9_repeated_instances_that_agree_on_a_translucent_opacity_refuse_the_pin_and_gl_replay(gl_replay, tmp_path):
-    """All three slide 1 -> 2 candidates at 0.5: R1b sees no difference and pairs by distance.
-    The pin is refused before its overlap is considered, so glReplay (which hands off to the
-    same opacity-1 hold) is not derived either."""
+    """All three slide 1 -> 2 candidates are at 0.5, including the transition-selected pair.
+    The pin is refused before its overlap is considered, so glReplay (which hands off to the same
+    opacity-1 hold) is not derived either."""
     root = _with_opacities(tmp_path, 
         (SLIDE1, "slide1", 0.5, "movie layer"),
         (SLIDE1, "slide1_small", 0.5, "movie layer"),
@@ -3814,6 +3985,18 @@ def test_r2_an_unattributed_build_says_it_cannot_be_ruled_out(tmp_path):
 # --- R2 before pairing, nested builds, and cuts onto a web destination (S2 Codex r1) ---------
 
 
+def _add_destination_sibling(data, offset: float = 100):
+    events = copy.deepcopy(data["events"])
+    clone = copy.deepcopy(_find_movie_nodes(events)[0])
+    clone["objectID"] = "CLONE"
+    events[0].setdefault("clonedMovies", []).append(clone)
+    draw = copy.deepcopy(_draw_slots({**data, "events": events}, 0)[SLIDE2_MOVIE_SLOT])
+    draw["layers"][0]["objectID"] = "CLONE"
+    draw["layers"][0]["layers"][0]["initialState"]["position"]["pointX"] += offset
+    _draw_slots({**data, "events": events}, 0).insert(SLIDE2_MOVIE_SLOT, draw)
+    return {**data, "events": events}
+
+
 def _clone_onto_slide2_top_right(data):
     """Slide 2 gains a second untitled.mov instance, objectID CLONE, the size of slide 1's small
     instance but centred far above it, drawn on top of everything so no overlap refuses it."""
@@ -3825,62 +4008,6 @@ def _clone_onto_slide2_top_right(data):
     w, h = SLIDE1_SMALL[2], SLIDE1_SMALL[3]
     _draw_slots(data, 0).append(_authored_slot(small_x - w / 2, 100.0 - h / 2, w, h, object_id="CLONE"))
     return data
-
-
-def test_r2_the_repeated_instance_geometry_pairs_the_sibling_onto_the_far_destination(tmp_path):
-    """Positive control for the test below, with no build anywhere: sources A (slide 1's big
-    instance) and B (its small one), destinations C (slide 2's instance, A's rect) and CLONE (far
-    above B). The minimum-total assignment is A->C, B->CLONE; B alone would pair with C, which is
-    nearer to it than CLONE by well over the 16 px margin. The clone's slide-1 transition slot only
-    fades (no motion), so R10 refuses the B->CLONE bridge; the pairing assertions are the point."""
-    from obed_edom.live_continuity import _pair_instances
-
-    plan = _plan(_mutate_slide(tmp_path, SLIDE2, _clone_onto_slide2_top_right))
-    assert isinstance(plan, ContinuityPlan)
-    assert [(m.action, m.src_object_id, m.dst_object_id, m.code) for m in plan.boundaries[0].movies] == [
-        ("pin", P2_OBJECT_IDS["slide1"], P2_OBJECT_IDS["slide2"], "overlap"),
-        ("bridge", P2_OBJECT_IDS["slide1_small"], "CLONE", "R10"),
-    ]
-    assert plan.boundaries[0].movies[1].refusal.endswith("the carried movie's slot has no motion animation")
-    source, destination = _parsed_slide(0, SLIDE1), _parsed_slide(
-        1, SLIDE2, _mutate_slide(tmp_path, SLIDE2, _clone_onto_slide2_top_right)
-    )
-    [small] = [i for i in source.instances["untitled.mov"] if i.object_id == P2_OBJECT_IDS["slide1_small"]]
-    pairs, refusal = _pair_instances([small], destination.instances["untitled.mov"], set())
-    assert refusal is None
-    assert [(src.object_id, dst.object_id) for src, dst in pairs] == [
-        (P2_OBJECT_IDS["slide1_small"], P2_OBJECT_IDS["slide2"])
-    ]
-
-
-def test_r2_a_building_instance_of_a_repeated_asset_refuses_its_whole_pairing(tmp_path):
-    """The review's shape: A builds out, so Keynote (validate._mm_matches' model, measured on
-    images, not movies) would drop A and move B onto C. Distance-pairing first and refusing A->C
-    afterwards would carry B onto CLONE instead, a destination Keynote never moves it to. Which
-    pairing Keynote makes for the rest is unmeasured for movies, so every instance of the asset
-    is refused at that boundary (R2), as an ambiguous pairing is (R1)."""
-    root = _mutate_slide(tmp_path, SLIDE2, _clone_onto_slide2_top_right)
-    _rewrite_slide_json(root, SLIDE1, _add_build("buildOut", "apple:dissolve", P2_OBJECT_IDS["slide1"]))
-    plan = _plan(root)
-    assert isinstance(plan, ContinuityPlan)
-    movies = plan.boundaries[0].movies
-    assert [(m.action, m.code, m.src_object_id, m.dst_object_id) for m in movies] == [
-        ("retire", "R2", P2_OBJECT_IDS["slide1"], None),
-        ("retire", "R2", P2_OBJECT_IDS["slide1_small"], None),
-    ]
-    assert movies[0].refusal == (
-        "'untitled.mov' pairing at player index 0 -> 1: an instance builds in or out, which Magic Move "
-        "leaves unpaired, and how Keynote then pairs the rest of a movie is unmeasured"
-    )
-    assert "CLONE" not in json.dumps(plan.as_dict()["boundaries"][0])
-
-
-def test_r2_a_destination_build_in_on_a_repeated_asset_refuses_its_whole_pairing(tmp_path):
-    root = _mutate_slide(tmp_path, SLIDE2, _clone_onto_slide2_top_right)
-    _rewrite_slide_json(root, SLIDE2, _add_build("buildIn", "apple:dissolve", P2_OBJECT_IDS["slide2"]))
-    plan = _plan(root)
-    assert isinstance(plan, ContinuityPlan)
-    assert [(m.action, m.code) for m in plan.boundaries[0].movies] == [("retire", "R2"), ("retire", "R2")]
 
 
 def _nest_build(build_type: str, name: str, object_id: str | None, *, leader: str):

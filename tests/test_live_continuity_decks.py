@@ -47,6 +47,25 @@ def _plan(root: Path, uuids: list[str]) -> ContinuityPlan | Unsupported:
     return derive_plan(root, _slides(uuids), resolver=_resolver)
 
 
+def _texture_correspondence_sets(root: Path, uuids: list[str]) -> set[frozenset[tuple]]:
+    paths_by_texture: dict[str, set[tuple]] = {}
+
+    def collect(value, path: tuple) -> None:
+        if isinstance(value, dict):
+            texture = value.get("texture")
+            if isinstance(texture, str):
+                paths_by_texture.setdefault(texture, set()).add((*path, "texture"))
+            for key, child in value.items():
+                collect(child, (*path, key))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                collect(child, (*path, index))
+
+    for uuid in uuids:
+        collect(json.loads((root / "assets" / uuid / f"{uuid}.json").read_text()), (uuid,))
+    return {frozenset(paths) for paths in paths_by_texture.values()}
+
+
 MINIMAL_UUIDS = _slide_list(MINIMAL_ROOT)
 POSITIVE_UUIDS = _slide_list(POSITIVE_ROOT)
 LOOP_UUIDS = _slide_list(LOOP_ROOT)
@@ -97,14 +116,13 @@ def test_minimal_s6_to_s7_gl_replay_refuses_two_movies():
 
 @pytest.mark.parametrize("slice_", [(4, 6), (0, 6)])
 def test_minimal_geometry_equal_pairings_refuse_only_their_boundary(slice_):
-    """Two instances each side, each geometry-equal to both across the move: the best and
-    runner-up pairings tie, so that boundary is refused (R1), not the deck."""
+    """Stacked sources match the same transition slots, so that boundary is refused, not the deck."""
     start, end = slice_
     plan = _plan(MINIMAL_ROOT, MINIMAL_UUIDS[start:end])
     assert isinstance(plan, ContinuityPlan)
     ambiguous = plan.boundaries[-2]
     assert [(m.action, m.code, m.dst_object_id) for m in ambiguous.movies] == [("retire", "R1", None)] * 2
-    assert "differ by 0.0 px (margin 16 px)" in ambiguous.movies[0].refusal
+    assert "transition slots [1, 2] all start at the carried movie's rect" in ambiguous.movies[0].refusal
 
 
 def test_positive_control_actions_and_to_runtime():
@@ -155,6 +173,8 @@ def test_fixture_parity_with_real_export(real_root, fixture_root, uuids):
     assert isinstance(real, ContinuityPlan)
     assert isinstance(fixture, ContinuityPlan)
     assert real.as_dict() == fixture.as_dict()
+    if fixture_root == POSITIVE_ROOT:
+        assert _texture_correspondence_sets(real_root, uuids) == _texture_correspondence_sets(fixture_root, uuids)
 
 
 @pytest.mark.skipif(not GL_DECKS_ROOT.is_dir(), reason="real gl-deck exports not available")
@@ -210,7 +230,7 @@ def _movie_nodes(value) -> list[dict]:
 @pytest.mark.parametrize("where", ["movie layer", "video layer", "draw slot object", "draw slot wrapper"])
 @pytest.mark.parametrize("gl_replay", [False, True])
 def test_r9_a_single_translucent_pin_refuses_the_boundary(tmp_path, where, gl_replay):
-    """S2 review r2 #2: with one instance each side R1b has no choice to judge, yet the pin's
+    """With one instance each side, correspondence alone would carry it, yet the pin's
     keep-at-slot hold draws the decoder at opacity 1 outside its authored layers."""
     plan = derive_plan(
         _translucent_minimal(tmp_path, where), _slides(MINIMAL_UUIDS[:2]), resolver=_resolver, gl_replay=gl_replay
@@ -436,8 +456,8 @@ def test_d2_restarts_after_a_bridge_and_starts_a_new_chain():
 
 
 def test_d4_the_far_instance_bridges_and_the_near_one_gets_no_entry():
-    """A-far (centre distance ~266 px) pairs, not A-near (~994 px); A-near is uncarried, so the
-    runtime never names it and plays it raw."""
+    """The transition record selects A-far, while A-near is uncarried, so the runtime never names
+    A-near and plays it raw."""
     runtime = _qual_runtime("D4")
     assert _summary(runtime) == [
         (3, "bridge", "movie1", "254E", "9E04"),
