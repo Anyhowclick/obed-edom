@@ -1,7 +1,8 @@
 export type LiveOperation = "advance" | "goTo" | "hide" | "show" | "stop";
 export type LiveCapability = { supported: boolean; reason?: string };
 export type LiveSlide = { originalOrdinal: number; skipped: boolean; thumbnailUrl?: string; notes?: string };
-export type LivePreparedDeck = { previewJobId: string; name: string; slides: number; sourceDigest: string };
+export type LiveSourceState = "current" | "changed" | "missing";
+export type LivePreparedDeck = { previewJobId: string; name: string; slides: number; sourceDigest: string; sourceState: LiveSourceState; sourcePath: string | null };
 export type LiveDeckContinuity = { mode: "qualified" | "unsupported" | "off"; reason: string | null; notCarried: LiveNotCarried[] };
 export type LiveConvertedMovie = { asset: string; sourceCodec: string };
 export type LiveQualification = LivePreparedDeck & { qualified: boolean; continuity: LiveDeckContinuity; convertedMovies: LiveConvertedMovie[] };

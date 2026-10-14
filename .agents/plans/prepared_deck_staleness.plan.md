@@ -36,7 +36,7 @@ def _source_state(result: dict[str, Any]) -> Literal["current", "changed", "miss
 Behavior:
 
 - Missing, null, or empty `result.path` returns `missing` before constructing a `Path`.
-- Call `deck_digest(path)` inside `try/except OSError`; it already raises `FileNotFoundError`/`PermissionError` for a missing or unreadable source, so either returns `missing`. No `os.access` pre-check.
+- Call `deck_digest(path)` inside `try/except (OSError, RuntimeError)` (`RuntimeError`: `Path.resolve()` on a symlink loop, 3.10–3.12); it already raises `FileNotFoundError`/`PermissionError` for a missing or unreadable source, so either returns `missing`. No `os.access` pre-check.
 - Compare the returned digest with the saved `sourceDigest`: equal → `current`; different → `changed`.
 
 Let `deck_digest()` perform its existing resolution and caching. Add no separate existence check, hash cache, or package traversal.
@@ -73,12 +73,12 @@ sourcePath: string | null;
 
 **Give the deck list its own effect (smallest race fix):**
 
-- Move the deck request and the initial-selection logic out of mount-time `loadChoices()` (which keeps display loading/selection) into a dedicated effect keyed `[active, client, jobId, qualificationAttempt]`.
-- It returns early when `active` (no `/decks` hashing at show start or mid-show), sets a `cancelled` flag in its cleanup, and ignores cancelled responses; list failures go to the existing message UI.
+- Move the deck request and the initial-selection logic out of mount-time `loadChoices()` (which keeps display loading/selection) into a dedicated effect keyed `[active, client, qualificationAttempt]` (review r1: no `jobId`, so auto-selection does not refetch).
+- It returns early when `active` and uses a request-sequence ref to ignore only superseded responses (review r1: a cleanup flag dropped the in-flight list on a mid-show remount, losing the filebar deck name); current-request failures go to the existing message UI.
 - Initial selection is unchanged: while `selectionTouched.current` is false, preserve a valid selected ID or pick `nextDecks[0]?.previewJobId || ""`. Later responses only replace rows; `selectDeck()` stays authoritative.
 - Leave the qualification effect unchanged.
 
-Effect cleanup drops a superseded response, so a slow earlier list cannot overwrite a newer one.
+The sequence ref drops a superseded response, so a slow earlier list cannot overwrite a newer one.
 
 Retain the fallback option for a selected ID absent from the current list.
 
@@ -158,7 +158,7 @@ Disable **Prepare again** for `active || pending || checking || preparing` (a `c
 
 Preparation success selects the returned job ID, triggers qualification, and refreshes the list. Preparation failures use the existing error UI; the expected one is apply's 409 "Close Keynote before exporting…" when Keynote is still open. Failure end state (owner 2026-10-13): the stale deck is re-selected — the presenter calls `selectDeck(previous)` when `preparePath` resolves `false`, which re-runs qualification, so the yellow warning and Start come back while `LiveDeckInput` keeps showing the preparation error.
 
-Clicking the button unmounts it (`onPrepared("")` clears qualification); `preparePath` moves focus to the progress paragraph (give it `tabIndex={-1}`) so keyboard focus is not dropped to `<body>`. Start keeps its existing preparation/session/output checks; `sourceState` never enters its eligibility condition.
+Clicking the button unmounts it (`onPrepared("")` clears qualification); every preparation focuses the status paragraph (`tabIndex={-1}`), which React reuses when it turns into the error alert, so keyboard focus is not dropped to `<body>`. Start keeps its existing preparation/session/output checks; `sourceState` never enters its eligibility condition.
 
 Replace only the copy sentence in the existing explanatory paragraph with:
 
@@ -168,12 +168,13 @@ Replace only the copy sentence in the existing explanatory paragraph with:
 
 **`tests/test_live_api.py`**
 
-Add one parametrized `test_prepared_deck_source_state`, reusing `client_for`, with five cases:
+Add one parametrized `test_prepared_deck_source_state`, reusing `client_for`, with six cases:
 
 - Current source.
 - Edited source.
 - Missing file.
 - Digest raises `PermissionError`.
+- Source is a symlink loop (`source.symlink_to(source)`).
 - No recorded path.
 
 Use a temporary source and real digest for current/changed (the session-wide `OBED_EDOM_CACHE_DIR` from `tests/conftest.py` already isolates the sidecar). Warm the original digest before editing; no separate cache-internals assertions.
