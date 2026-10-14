@@ -74,7 +74,8 @@ MM_FEED_JS = r"""
       gaps: [],
       wasIdle: false,
       departed: false,
-      stoodDownThisIdle: false
+      stoodDownThisIdle: false,
+      wrapped: false
     };
   }
 
@@ -190,6 +191,7 @@ MM_FEED_JS = r"""
     record.lastFeedAt = null;
     record.gaps = [];
     record.stoodDownThisIdle = false;
+    record.wrapped = false;
   }
 
   function arm(record){
@@ -241,7 +243,8 @@ MM_FEED_JS = r"""
     var scene = currentScene();
     return Object.keys(records).map(function(key){ return records[key]; }).filter(function(record){
       return record.armed &&
-        (record.boundary.atScene - 1 === scene || record.boundary.atScene === scene) &&
+        (record.boundary.atScene - 1 === scene ||
+          record.boundary.atScene === scene && !record.wrapped) &&
         record.public.state !== 'stoodDown';
     });
   }
@@ -445,6 +448,7 @@ MM_FEED_JS = r"""
       internal: 0
     };
     contexts.set(gl, state);
+    active.forEach(function(record){ record.wrapped = true; });
 
     gl.activeTexture = function(unit){
       if (!state.internal) state.unit = unit;
@@ -506,9 +510,11 @@ MM_FEED_JS = r"""
       state.draws += 1;
       state.active.forEach(function(record){
         if (!record.armed || record.public.state === 'stoodDown' || record.binding.draw !== state.draws) return;
+        var shouldFeed = record.public.mode === 'continuous' || record.onceRequested && !record.onceDone;
+        if (!shouldFeed) return;
         var decoder = decoderFor(record.boundary.src.objectId);
         if (decoder && decoder.readyState >= 2) state.reached.add(record);
-        if (record.public.mode === 'continuous' || record.onceRequested && !record.onceDone) feedAtDraw(state, record);
+        feedAtDraw(state, record);
       });
       var result = original[name].apply(gl, args);
       var drawCount = state.active.reduce(function(value, record){
@@ -577,7 +583,7 @@ def js_sha256() -> str:
     return hashlib.sha256(MM_FEED_JS.encode()).hexdigest()
 
 
-PINNED_MM_FEED_SHA256 = "a3a246cfe782cbb2393d1ce35486f2b5374756ee2e7ddde801be49aaf77d3052"
+PINNED_MM_FEED_SHA256 = "f1fe0dd644359962c4c71cce46424ac3e24eb4ac42d1f9053a103d24463b81bf"
 
 
 def mm_feed_script(*, continuous: bool, once: bool) -> str:

@@ -22,7 +22,7 @@ import mm_feed_variants  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 
 NODE = shutil.which("node")
-PINNED_MM_FEED_SHA256 = "a3a246cfe782cbb2393d1ce35486f2b5374756ee2e7ddde801be49aaf77d3052"
+PINNED_MM_FEED_SHA256 = "f1fe0dd644359962c4c71cce46424ac3e24eb4ac42d1f9053a103d24463b81bf"
 
 
 def _entry(
@@ -398,6 +398,13 @@ const first=texture('first'); upload(gl,first,[320,180],0,true,false);
 gl.clear(); bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
 assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,{json.dumps(expected_state)});
 assert.strictEqual(gl.videoUploads.length,1);
+const lateGl=makeGl('late'),lateCanvas=new Canvas('1-canvas',lateGl),lateDraw=lateGl.drawArrays;
+lateCanvas.getContext('webgl');
+assert.strictEqual(lateGl.drawArrays,lateDraw);
+const wrong=texture('wrong'); upload(lateGl,wrong,[319,180],0,true,false);
+lateGl.clear(); bind(lateGl,wrong,0); lateGl.activeTexture(lateGl.TEXTURE0); program(lateGl,'absent'); lateGl.drawArrays(4,0,6);
+assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,{json.dumps(expected_state)});
+assert.deepStrictEqual(calls.stand,[]);
 """,
         continuous=continuous,
         once=True,
@@ -503,10 +510,13 @@ const first=texture('first'); upload(gl,first,[320,180],0,true,false);
 gl.clear(); bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
 assert.strictEqual(api.once('A'),true);
 gl.clear();
-assert.strictEqual(api.entries.A.state,'stoodDown');
-assert.strictEqual(api.entries.A.reason,'no-feed');
-assert.strictEqual(api.entries.A.hold,'baked');
-assert.deepStrictEqual(calls.stand.map(x=>x.reason),['no-feed']);
+bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+gl.drawElements(4,6,gl.UNSIGNED_BYTE,0);
+assert.strictEqual(api.entries.A.state,'held');
+assert.strictEqual(api.entries.A.reason,null);
+assert.strictEqual(api.entries.A.hold,'exact');
+assert.strictEqual(gl.videoUploads.length,1);
+assert.deepStrictEqual(calls.stand,[]);
 """,
         continuous=False,
         once=True,
