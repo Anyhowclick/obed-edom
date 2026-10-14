@@ -679,7 +679,7 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
         return
     if value.get("kind") != "mm-feed" or value.get("version") != 1:
         yield f"mmFeed:version at {path}"
-    for key in ("contexts", "frames", "media", "artwork", "errors", "killedOnce", "uploads", "claims", "standDowns", "departures"):
+    for key in ("contexts", "frames", "media", "mediaDropped", "artwork", "errors", "killedOnce", "uploads", "claims", "standDowns", "departures"):
         if not isinstance(value.get(key), list):
             yield f"mmFeed.{key}:list at {path}"
     if not _count(value.get("mediaOverflow")):
@@ -789,6 +789,12 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
             yield from _fields(entry, "mmFeed.media", where, {
                 "presentedFrames": _count, "mediaTime": lambda v: _finite(v) and v >= 0,
             })
+    for index, entry in enumerate(value.get("mediaDropped") or []):
+        where = f"{path}.mediaDropped[{index}]"
+        if not isinstance(entry, dict):
+            yield f"mmFeed.mediaDropped:object at {where}"
+        else:
+            yield from _fields(entry, "mmFeed.mediaDropped", where, {"atScene": _count, "count": _id})
     for index, entry in enumerate(value.get("artwork") or []):
         where = f"{path}.artwork[{index}]"
         if not isinstance(entry, dict):
@@ -802,9 +808,9 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
     event_fields = {
         "uploads": {"serial": _id, "atScene": _count, "t": _finite, "frameN": _id_or_null,
                     "textureOrdinal": _id_or_null},
-        "claims": {"objectId": _non_empty_str, "entryId": _non_empty_str, "serial": _id,
+        "claims": {"objectId": _non_empty_str, "entryId": _non_empty_str, "serial": _id_or_null,
                    "atScene": _count, "t": _finite, "claimed": lambda v: isinstance(v, bool)},
-        "standDowns": {"objectId": _non_empty_str, "entryId": _non_empty_str, "serial": _id,
+        "standDowns": {"objectId": _non_empty_str, "entryId": _non_empty_str, "serial": _id_or_null,
                        "atScene": _count, "t": _finite, "accepted": lambda v: isinstance(v, bool)},
         "departures": {"t": _finite, "serial": _id_or_null, "atScene": _count, "entryId": _non_empty_str},
     }

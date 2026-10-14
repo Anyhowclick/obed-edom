@@ -4210,15 +4210,35 @@ def score_verdicts(
 ) -> dict[str, Any]:
     """Pure: every plan-generated verdict (`facts["verdicts"]`), keyed by id. False only for a
     fully observed contrary behaviour; every integrity or missing-evidence path is None. `schema`
-    is the sampler's (a schema-2 stream never scores as legacy). Rows or evidence outside the
-    producer contract make every verdict of the arm None."""
+    is the sampler's (a schema-2 stream never scores as legacy). Invalid sampler or general
+    evidence nulls the arm; invalid feed reports null feed entries, and an invalid feed record
+    nulls only its entry."""
     errors = contract.first_errors(contract.sample_rows(samples, schema=schema), contract.evidence(evidence))
     if errors:
         return {spec["id"]: _contract_inconclusive(errors) for spec in facts.get("verdicts") or []}
+    feed_errors: dict[str, list[str]] = {}
+    feed_specs = [spec for spec in facts.get("verdicts") or []
+                  if spec.get("kind") == "carry" and spec.get("underArtwork") is True]
+    if feed_specs and feed_evidence:
+        producer = feed_evidence.get("producer") if isinstance(feed_evidence, dict) else None
+        producer_errors = contract.first_errors(contract.mm_feed_report(producer), limit=20)
+        if producer_errors:
+            feed_errors.update({spec["id"]: producer_errors for spec in feed_specs})
+        else:
+            for spec in feed_specs:
+                record = _feed_record_for_spec(feed_evidence, spec)
+                if record is not None:
+                    record_errors = contract.first_errors(
+                        contract.feed_verdict_record(record, f"feedEvidence.verdicts.{spec['id']}"), limit=20,
+                    )
+                    if record_errors:
+                        feed_errors[spec["id"]] = record_errors
     scored: dict[str, Any] = {}
     for spec in facts.get("verdicts") or []:
         kind, scene = spec["kind"], spec["atScene"]
-        if kind == "carry":
+        if spec["id"] in feed_errors:
+            scored[spec["id"]] = _contract_inconclusive(feed_errors[spec["id"]])
+        elif kind == "carry":
             scored[spec["id"]] = score_carry(
                 samples, spec, runtime_installed, loop_period_s=loop_period_s, paint=paint, schema=schema,
                 feed_evidence=feed_evidence,

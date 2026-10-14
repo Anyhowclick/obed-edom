@@ -335,8 +335,12 @@ console.log(JSON.stringify({held: held, events: P.events, after: P.snapshot()}))
 
 def _mm_feed_report() -> dict[str, Any]:
     return {
-        "kind": "mm-feed", "version": 1, "config": {}, "media": [], "mediaOverflow": 0, "artwork": [],
-        "errors": [], "module": None, "uploads": [], "claims": [], "standDowns": [],
+        "kind": "mm-feed", "version": 1, "config": {}, "media": [], "mediaDropped": [],
+        "mediaOverflow": 0, "artwork": [], "errors": [], "module": None, "uploads": [],
+        "claims": [{"objectId": "movie-a", "entryId": "carry-a", "serial": None,
+                    "atScene": 2, "t": 1.0, "claimed": True}],
+        "standDowns": [{"objectId": "movie-a", "entryId": "carry-a", "serial": None,
+                        "atScene": 2, "t": 1.25, "accepted": True}],
         "departures": [{"t": 1.5, "serial": None, "atScene": 2, "entryId": "carry-a"}],
         "callbackCostP95Ms": None,
         "tamper": None, "killedOnce": [{"objectId": "movie-a", "t": 3.0}],
@@ -375,6 +379,7 @@ def test_mm_feed_frame_and_poster_feed_note_producers_meet_the_contract() -> Non
     (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(size=[640]), "mmFeed.texture.size"),
     (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(uploadedSize=[1280]),
      "mmFeed.texture.uploadedSize"),
+    (lambda r: r.update(mediaDropped=[{"atScene": 2, "count": 0}]), "mmFeed.mediaDropped.count"),
 ])
 def test_mm_feed_contract_rejects_required_field_and_generation_breaks(mutate: Any, clause: str) -> None:
     report = _mm_feed_report()

@@ -11827,7 +11827,7 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
             "glErrors": [],
         })
     report = {
-        "kind": "mm-feed", "version": 1, "config": {}, "media": [], "mediaOverflow": 0,
+        "kind": "mm-feed", "version": 1, "config": {}, "media": [], "mediaDropped": [], "mediaOverflow": 0,
         "errors": [], "killedOnce": [], "callbackCostP95Ms": .2,
         "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": .5, "atScene": 2,
                       "lost": False, "entryIds": [entry["id"]]}],
@@ -11885,6 +11885,10 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     assert probe.score_feed_live(per_leaf[entry["id"]]["feed"])["verdict"] is True
     assert probe.score_feed_live(per_leaf[failing_entry["id"]]["feed"])["verdict"] is False
     partial = copy.deepcopy(report)
+    partial["claims"][0]["serial"] = None
+    isolated = probe.mm_feed_instrument.verdict_records(partial, [entry], continuous_expected=True)[entry["id"]]
+    assert isolated["mode"] == "unavailable"
+    partial = copy.deepcopy(report)
     next(row for row in partial["uploads"] if row["textureOrdinal"] == 2)["serial"] = None
     isolated = probe.mm_feed_instrument.verdict_records(
         partial, [entry, failing_entry], continuous_expected=True,
@@ -11931,11 +11935,16 @@ def test_poster_pairing_uses_the_move_anchored_hold_pause() -> None:
     rows = [media("videoFrame", 1, 41, 5 - 1 / 30), media("videoFrame", 2), media("pause", 5),
             media("play", 6), media("pause", 9), media("play", 40), media("videoFrame", 41, 43, 5 + 1 / 30)]
     report = {"contexts": [{"serial": 1, "atScene": 2, "entryIds": ["carry-a"], "lost": False}],
-              "frames": frames, "media": rows, "mediaOverflow": 0, "artwork": [], "uploads": [], "claims": [],
+              "frames": frames, "media": rows, "mediaDropped": [], "mediaOverflow": 0,
+              "artwork": [], "uploads": [], "claims": [],
               "standDowns": [], "departures": [{"entryId": "carry-a", "atScene": 2, "serial": 1}], "module": None}
     record = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
     assert record["poster"]["pauseTime"] == 9
     assert probe.score_poster_hold(record["poster"])["verdict"] is True
+    report["mediaDropped"] = [{"atScene": 2, "count": 1}]
+    dropped = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
+    assert probe.score_poster_hold(dropped["poster"])["verdict"] is None
+    report["mediaDropped"] = []
     report["media"][0]["serial"] = None
     partial = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
     assert probe.score_poster_hold(partial["poster"])["verdict"] is None
@@ -11945,6 +11954,35 @@ def test_poster_pairing_uses_the_move_anchored_hold_pause() -> None:
         frame["rows"][0]["decoder"].update(paused=False, currentTime=5 + index / 30, presentedFrames=42 + index)
     broken = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
     assert probe.score_poster_hold(broken["poster"])["verdict"] is False
+
+
+def test_score_verdicts_validates_feed_contract_per_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    specs = [
+        {"id": "feed-a", "kind": "carry", "atScene": 2, "underArtwork": True,
+         "fromPlayer": 0, "toPlayer": 1},
+        {"id": "feed-b", "kind": "carry", "atScene": 4, "underArtwork": True,
+         "fromPlayer": 2, "toPlayer": 3},
+        {"id": "restart", "kind": "restart", "atScene": 6},
+    ]
+    monkeypatch.setattr(probe, "score_carry", lambda *args, **kwargs: {"verdict": True})
+    monkeypatch.setattr(probe, "score_restart_strict", lambda *args, **kwargs: {"verdict": True})
+    producer = {
+        "kind": "mm-feed", "version": 1, "contexts": [], "frames": [], "media": [],
+        "mediaDropped": [], "mediaOverflow": 0, "artwork": [], "errors": [], "killedOnce": [],
+        "uploads": [], "claims": [], "standDowns": [], "departures": [], "callbackCostP95Ms": None,
+    }
+    feed_evidence = {"producer": producer, "verdicts": {
+        "feed-a": {"mode": "continuous"},
+        "feed-b": {"mode": "unavailable", "reason": "not observed", "continuousExpected": False,
+                   "usableContext": False, "boundTextures": False, "interval": None},
+    }}
+    scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None, feed_evidence=feed_evidence)
+    assert scored["feed-a"]["verdict"] is None
+    assert scored["feed-b"]["verdict"] is True
+    assert scored["restart"]["verdict"] is True
+    producer.pop("frames")
+    scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None, feed_evidence=feed_evidence)
+    assert [scored[key]["verdict"] for key in ("feed-a", "feed-b", "restart")] == [None, None, True]
 
 
 def test_instrument_js_runs_realistic_fake_gl_end_to_end() -> None:
@@ -11958,14 +11996,15 @@ global.window=global; global.location={hash:'#1'}; global.performance={now:()=>+
 global.requestAnimationFrame=(fn)=>(raf.push(fn),raf.length);
 class Media {pause(){this.paused=true} play(){this.paused=false;return Promise.resolve()}}
 class Video extends Media {
-  constructor(id,dst,w,h,rect,counter=false){super();this.__obedInstance=id;this.__obedDst=dst;this.__obedElId=id.length;this.currentTime=1;this.paused=false;this.readyState=4;this.videoWidth=w;this.videoHeight=h;this.width=w;this.height=h;this.rect=rect;this.counter=counter;this.isConnected=true;this.nodeType=1;this.parentElement=null;this.listeners={}}
-  addEventListener(k,f){this.listeners[k]=f} requestVideoFrameCallback(f){this.cb=f} checkVisibility(){return true}
+  constructor(id,dst,w,h,rect,counter=false){super();this.__obedInstance=id;this.__obedDst=dst;this.__obedElId=id.length;this.currentTime=1;this.paused=false;this.readyState=4;this.videoWidth=w;this.videoHeight=h;this.width=w;this.height=h;this.rect=rect;this.counter=counter;this.drawSource=null;this.isConnected=true;this.nodeType=1;this.parentElement=null;this.listeners={};this.callbacks=[]}
+  addEventListener(k,f){this.listeners[k]=f} requestVideoFrameCallback(f){this.callbacks.push(f)} checkVisibility(){return true}
+  present(frame){this.__obedPresentedFrames=frame;this.__obedMediaTime=frame/30;this.currentTime=frame/30;const pending=this.callbacks.splice(0);for(const cb of pending)cb(clock,{presentedFrames:frame,mediaTime:frame/30})}
   getBoundingClientRect(){return this.rect} contains(n){return n===this}
   pixel(x,y){
     if(this.counter){const bits=[1,0,0,0,0,0,0,0,1,0,1,0,1,0,1,0,1],yy=24/540*this.videoHeight;
       for(let j=0;j<17;j++){const xx=(24+40*j)/1920*this.videoWidth;if(Math.abs(x-xx)<7&&Math.abs(y-yy)<7)return bits[j]?240:10}}
     const u=Math.max(0,Math.min(.999,x/this.videoWidth)),v=Math.max(0,Math.min(.999,y/this.videoHeight));
-    return 55+Math.floor(u*10)*15+Math.floor(v*8)*4;
+    return 35+Math.floor(u*10)*10+Math.floor(v*8)*3+((this.__obedPresentedFrames||0)%10)*12;
   }
 }
 class ImageSource {constructor(w,h,value){this.width=w;this.height=h;this.naturalWidth=w;this.naturalHeight=h;this.value=value}pixel(){return this.value}}
@@ -11981,67 +12020,111 @@ global.HTMLCanvasElement=Canvas;
 global.getComputedStyle=(el)=>({opacity:el instanceof Video?'0':'1',display:'block',visibility:'visible'});
 const styleParent={appendChild(n){n.parentNode=this},removeChild(n){n.parentNode=null}},stage={getBoundingClientRect:()=>({x:0,y:0,width:1920,height:540})};
 const overlay={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:0,top:0,right:1920,bottom:540})},labelNode={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:50,top:50,right:250,bottom:150})};
-const videos={alpha:new Video('alpha','dalpha',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),broken:new Video('broken','dbroken',160,90,{x:550,y:0,left:550,top:0,right:1050,bottom:540,width:500,height:540}),counter:new Video('counter','dcounter',960,270,{x:1100,y:0,left:1100,top:0,right:1920,bottom:540,width:820,height:540},true)};
+const videos={alpha:new Video('alpha','dalpha',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),broken:new Video('broken','dbroken',160,90,{x:550,y:0,left:550,top:0,right:1050,bottom:540,width:500,height:540}),counter:new Video('counter','dcounter',960,270,{x:1100,y:0,left:1100,top:0,right:1920,bottom:540,width:820,height:540},true),hold:new Video('hold','dhold',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),killed:new Video('killed','dkilled',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540})};
 global.document={head:styleParent,documentElement:styleParent,createElement:(k)=>k==='canvas'?new Canvas():{textContent:'',parentNode:null,nodeType:1,parentElement:null},getElementById:(id)=>id==='stage'?stage:null,elementsFromPoint:(x)=>x<500?[overlay,labelNode,videos.alpha]:[overlay,videos.broken]};
 const seam={decoderFor:(id)=>videos[id]||null,claim:()=>true,onStandDown:()=>true};global.__OBED_P2_PRESERVE__={feed:seam};
+global.__OBED_MM_FEED__={once:()=>true,entries:{}};
 const drawTable={drawCount:4,draws:[{draw:1,layerSize:[100,100],labelBoxOpacity:null},{draw:2,layerSize:[100,100],labelBoxOpacity:null},{draw:3,layerSize:[1920,540],labelBoxOpacity:null},{draw:4,layerSize:[20,20],labelBoxOpacity:.61}]};
 const entries=[['alpha',1,[100,100]],['broken',2,[100,100]],['counter',3,[1920,540]]].map(([id,draw,size])=>({id:'carry-'+id,objectId:id,dstObjectId:'d'+id,atScene:2,feed:{draw,from:{upload:draw,size},to:null},draws:drawTable,artwork:[]}));
 entries[0].artwork=[{rect:{x:50,y:50,w:200,h:100}}];entries[1].artwork=[{rect:{x:600,y:50,w:200,h:100}}];
-const boundaries=entries.map(e=>({atScene:2,underArtwork:true,src:{objectId:e.objectId},dst:{objectId:e.dstObjectId},feed:e.feed}));
+const simpleDraws={drawCount:1,draws:[{draw:1,layerSize:[100,100],labelBoxOpacity:null}]};
+entries.push({id:'carry-hold',objectId:'hold',dstObjectId:'dhold',atScene:4,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'carry-killed',objectId:'killed',dstObjectId:'dkilled',atScene:6,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'chain-10',objectId:'alpha',dstObjectId:'dalpha',atScene:10,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'chain-12',objectId:'alpha',dstObjectId:'dalpha',atScene:12,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+const boundaries=entries.map(e=>({atScene:e.atScene,underArtwork:true,src:{objectId:e.objectId},dst:{objectId:e.dstObjectId},feed:e.feed}));
 global.__OBED_CONTINUITY_INFO__={authoredWidth:1920,authoredHeight:540};
 """ + "\neval(" + instrument + ");\n" + r"""
-window.__obedMmFeedProbe.bootstrap({entries});
+function tick(){const pending=raf.splice(0);for(const cb of pending)cb()}
+window.__obedMmFeedProbe.bootstrap({entries,killHoldUpload:true,tamper:'after-feed',tamperScene:10});
 window.__OBED_CONTINUITY__={boundaries};
-videos.alpha.__obedPosterHeld=true;videos.alpha.pause();
-let active=100,bound={},sources=new WeakMap(),matrix=null,drawNo=0,program={},matrixLoc={},mixLoc={},pixels=new Uint8ClampedArray(1920*540*4);
+for(let i=0;i<601;i++)tick();for(const id of ['alpha','broken','counter'])seam.claim(id);
+let active,bound,sources,matrix,drawNo,pixels,program={},matrixLoc={},mixLoc={};
 function rectFor(m,size){const x=((m[12]+1)/2)*1920,y=((m[13]+1)/2)*540,w=m[0]*size[0]/2*1920,h=m[5]*size[1]/2*540;return {x:Math.round(x),y:Math.round(y),w:Math.round(w),h:Math.round(h)}}
 function paintSource(source,rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;x++){const v=source.pixel((x+.5)/rect.w*(source.videoWidth||source.width),(y+.5)/rect.h*(source.videoHeight||source.height)),i=((rect.y+y)*1920+rect.x+x)*4;pixels[i]=pixels[i+1]=pixels[i+2]=v;pixels[i+3]=255}}
 function paintLabel(rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;x++){const i=((rect.y+y)*1920+rect.x+x)*4;pixels[i]=pixels[i+1]=pixels[i+2]=Math.round(pixels[i]*.39);pixels[i+3]=255}}
-const gl={canvas:null,TEXTURE0:100,TEXTURE_2D:2,UNPACK_FLIP_Y_WEBGL:3,UNPACK_PREMULTIPLY_ALPHA_WEBGL:4,RGBA:5,UNSIGNED_BYTE:6,drawingBufferWidth:1920,drawingBufferHeight:540,
+function makeGl(){active=100;bound={};sources=new WeakMap();matrix=null;drawNo=0;pixels=new Uint8ClampedArray(1920*540*4);return {canvas:null,TEXTURE0:100,TEXTURE_2D:2,UNPACK_FLIP_Y_WEBGL:3,UNPACK_PREMULTIPLY_ALPHA_WEBGL:4,RGBA:5,UNSIGNED_BYTE:6,drawingBufferWidth:1920,drawingBufferHeight:540,
  activeTexture(u){active=u},bindTexture(t,texture){bound[active]=texture},pixelStorei(){},useProgram(){},getUniformLocation(p,n){return n==='MVPMatrix'?matrixLoc:mixLoc},uniform1f(){},uniformMatrix4fv(l,t,v){matrix=Array.from(v)},
  clear(){drawNo=0;pixels.fill(0)},drawElements(){this.drawArrays()},drawArrays(){drawNo++;const sizes=[[100,100],[100,100],[1920,540],[20,20]],r=rectFor(matrix,sizes[drawNo-1]);if(drawNo===4)paintLabel(r);else paintSource(sources.get(bound[active]),r)},
- texImage2D(){sources.set(bound[active],arguments[5])},readPixels(x,y,w,h,f,t,a){for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const src=((y+yy)*1920+x+xx)*4,dst=(yy*w+xx)*4;a.set(pixels.slice(src,src+4),dst)}}};
+ texImage2D(){const source=arguments[5];sources.set(bound[active],source.drawSource||source)},readPixels(x,y,w,h,f,t,a){for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const src=((y+yy)*1920+x+xx)*4,dst=(yy*w+xx)*4;a.set(pixels.slice(src,src+4),dst)}}}}
+const gl=makeGl();
 const canvas=new Canvas('0-canvas',gl);gl.canvas=canvas;canvas.getContext('webgl');
 const textures={alpha:{},broken:{},counter:{}},posters={alpha:new ImageSource(100,100,8),broken:new ImageSource(100,100,8),counter:new ImageSource(1920,540,8)};
+videos.broken.drawSource=posters.broken;
 for(const id of ['alpha','broken','counter']){gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,textures[id]);gl.texImage2D(0,0,0,0,0,posters[id])}
-raf.shift()();for(const id of Object.keys(videos))seam.claim(id);videos.alpha.play();
 const matrices={alpha:[.005208333,0,0,0,0,.02,0,0,0,0,1,0,-1,-1,0,1],broken:[.005208333,0,0,0,0,.02,0,0,0,0,1,0,-.427083333,-1,0,1],counter:[.0004448785,0,0,0,0,.0037037037,0,0,0,0,1,0,.145833333,-1,0,1],label:[.010416667,0,0,0,0,.018518519,0,0,0,0,1,0,-.947916667,-.814814815,0,1]};
 gl.useProgram(program);const m=gl.getUniformLocation(program,'MVPMatrix');
 for(let n=1;n<=4;n++){
-  for(const v of Object.values(videos)){v.__obedPresentedFrames=n+9;v.__obedMediaTime=n/30;v.currentTime=n/30;if(v.cb)v.cb(clock,{presentedFrames:n+9,mediaTime:n/30})}
+  for(const v of Object.values(videos))v.present(n+9);
   gl.clear();gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,textures.alpha);gl.texImage2D(0,0,0,0,0,videos.alpha);gl.uniformMatrix4fv(m,false,matrices.alpha);gl.drawArrays();
-  gl.bindTexture(gl.TEXTURE_2D,textures.broken);gl.uniformMatrix4fv(m,false,matrices.broken);gl.drawArrays();
+  gl.bindTexture(gl.TEXTURE_2D,textures.broken);gl.texImage2D(0,0,0,0,0,videos.broken);gl.uniformMatrix4fv(m,false,matrices.broken);gl.drawArrays();
   gl.bindTexture(gl.TEXTURE_2D,textures.counter);gl.texImage2D(0,0,0,0,0,videos.counter);gl.uniformMatrix4fv(m,false,matrices.counter);gl.drawArrays();
-  gl.uniformMatrix4fv(m,false,matrices.label);gl.drawArrays();raf.shift()();
+  gl.uniformMatrix4fv(m,false,matrices.label);gl.drawArrays();tick();
 }
-window.__obedMmFeedProbe.report();videos.alpha.__obedInstance='dalpha';videos.broken.__obedInstance='dbroken';raf.shift()();
+function present(video,frame){video.present(frame)}
+function openContext(id){const next=makeGl(),canvas=new Canvas(id,next);next.canvas=canvas;canvas.getContext('webgl');next.useProgram(program);return {gl:next,m:next.getUniformLocation(program,'MVPMatrix')}}
+function posterTexture(move,poster){const texture={};move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,poster);return texture}
+function drawHeld(move,texture,video,upload){for(let n=0;n<3;n++){move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);if(upload&&n===0)move.gl.texImage2D(0,0,0,0,0,video);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}window.__obedMmFeedProbe.report()}
+location.hash='#3';for(const frame of [31,32,33])present(videos.hold,frame);seam.onStandDown('hold','pre-departure');videos.hold.__obedPosterHeld=true;videos.hold.pause();
+const holdMove=openContext('1-canvas'),holdTexture=posterTexture(holdMove,new ImageSource(100,100,8));drawHeld(holdMove,holdTexture,videos.hold,true);videos.hold.play();present(videos.hold,34);
+location.hash='#5';for(const frame of [41,42,43])present(videos.killed,frame);videos.killed.__obedPosterHeld=true;videos.killed.pause();window.__OBED_MM_FEED__.once('killed');
+const killedMove=openContext('2-canvas'),killedTexture=posterTexture(killedMove,new ImageSource(100,100,8));drawHeld(killedMove,killedTexture,videos.killed,false);videos.killed.play();present(videos.killed,44);
+function runChain(atScene,startFrame,id){location.hash='#'+(atScene-1);seam.claim('alpha');const move=openContext(id),texture=posterTexture(move,new ImageSource(100,100,8));for(let n=0;n<4;n++){present(videos.alpha,startFrame+n);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}}
+videos.broken.drawSource=null;runChain(10,51,'3-canvas');runChain(12,61,'4-canvas');
+window.__obedMmFeedProbe.report();videos.alpha.__obedInstance='dalpha';videos.broken.__obedInstance='dbroken';tick();
 console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
 """
     completed = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
     assert probe.contract.first_errors(probe.contract.mm_feed_report(report), limit=20) == []
-    entries = [
+    continuous_entries = [
         {"id": f"carry-{name}", "objectId": name, "dstObjectId": f"d{name}", "atScene": 2,
          "feed": {"draw": draw, "from": {"upload": draw, "size": size}, "to": None}}
         for name, draw, size in (("alpha", 1, [100, 100]), ("broken", 2, [100, 100]),
                                  ("counter", 3, [1920, 540]))
     ]
-    records = probe.mm_feed_instrument.verdict_records(report, entries, continuous_expected=True)
+    continuous_entries.extend({
+        "id": f"chain-{scene}", "objectId": "alpha", "dstObjectId": "dalpha", "atScene": scene,
+        "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
+    } for scene in (10, 12))
+    hold_entries = [{
+        "id": f"carry-{name}", "objectId": name, "dstObjectId": f"d{name}", "atScene": scene,
+        "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
+    } for name, scene in (("hold", 4), ("killed", 6))]
+    records = probe.mm_feed_instrument.verdict_records(report, continuous_entries, continuous_expected=True)
+    hold_records = probe.mm_feed_instrument.verdict_records(report, hold_entries, continuous_expected=False)
     assert probe.score_feed_live(records["carry-alpha"]["feed"])["verdict"] is True
     assert probe.score_feed_live(records["carry-broken"]["feed"])["verdict"] is False
+    assert records["carry-broken"]["feed"]["continuousCoverage"] is True
     assert probe.score_feed_live(records["carry-counter"]["feed"])["verdict"] is True
+    assert probe.score_feed_live(records["chain-10"]["feed"])["verdict"] is True
+    assert probe.score_feed_live(records["chain-12"]["feed"])["verdict"] is True
     assert probe.score_no_rider_above_canvas(records["carry-alpha"]["rider"])["verdict"] is True
     assert probe.score_labels_over_feed(records["carry-alpha"]["labels"])["verdict"] is True
     assert probe.score_artwork_above(records["carry-alpha"]["artwork"])["verdict"] is True
     assert probe.score_artwork_above(records["carry-broken"]["artwork"])["verdict"] is False
     assert probe.score_hold_frame(records["carry-alpha"]["hold"])["verdict"] is None
+    assert probe.score_hold_frame(hold_records["carry-hold"]["hold"])["verdict"] is True
+    assert probe.score_poster_hold(hold_records["carry-hold"]["poster"])["verdict"] is True
+    assert probe.score_hold_frame(hold_records["carry-killed"]["hold"])["verdict"] is False
+    assert probe.score_poster_hold(hold_records["carry-killed"]["poster"])["verdict"] is True
     assert all(read["kind"] == "counter" for read in records["carry-counter"]["feed"]["reads"]), json.dumps(
         records["carry-counter"]["feed"]["reads"]
     )
-    alpha_texture = report["frames"][-1]["rows"][0]["textures"][0]
+    alpha_texture = next(row for frame in report["frames"] if frame["serial"] == 1
+                         for row in frame["rows"] if row["entryId"] == "carry-alpha")["textures"][0]
     assert alpha_texture["size"] == [100, 100] and alpha_texture["uploadedSize"] == [160, 90]
-    assert report["departures"][0]["serial"] == 1
+    assert [(row["entryId"], row["serial"]) for row in report["claims"]] == [
+        ("carry-alpha", 1), ("carry-broken", 1), ("carry-counter", 1), ("chain-10", 4), ("chain-12", 5),
+    ]
+    assert [(row["entryId"], row["serial"]) for row in report["departures"]] == [
+        ("carry-hold", 2), ("carry-killed", 3),
+    ]
+    assert report["standDowns"][0]["serial"] == 2
+    assert [row["objectId"] for row in report["killedOnce"]] == ["killed"]
+    assert report["mediaDropped"] == []
+    assert report["tamper"]["applied"] is True and "attempts" not in report["tamper"]
     assert records["carry-alpha"]["feed"]["framesFed"] == 4
 
 

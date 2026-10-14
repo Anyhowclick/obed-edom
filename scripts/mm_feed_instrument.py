@@ -177,13 +177,13 @@ INSTRUMENT_JS = r"""
   function wrap(gl,canvas){
     if(gl.__obedMmFeedProbe)return;
     gl.__obedMmFeedProbe=true;
-    S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1])});
-    var atScene=resolveAtScene(),active=entriesAt(atScene),O={},G={unit:gl.TEXTURE0,bindings:{},program:null,flip:false,premultiply:false,
+    var atScene=resolveAtScene();S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1]);if(pair[1].atScene!==atScene)finishContext(pair[1])});
+    var active=entriesAt(atScene),O={},G={unit:gl.TEXTURE0,bindings:{},program:null,flip:false,premultiply:false,
       frame:null,serial:S.contexts.length+1,regularUploads:0,atScene:atScene,entries:active,closed:false};
     ['texImage2D','activeTexture','bindTexture','pixelStorei','useProgram','getUniformLocation','uniform1f','uniformMatrix4fv','clear','drawArrays','drawElements'].forEach(function(n){O[n]=gl[n]});
     var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};
     S.contexts.push(contextRecord);S.live.push([gl,G]);
-    active.forEach(function(e){entryState[e.id].serial=G.serial;[S.media,S.departures].forEach(function(stream){stream.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial})});
+    active.forEach(function(e){entryState[e.id].serial=G.serial;[S.media,S.departures,S.claims,S.standDowns].forEach(function(stream){stream.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial})});
       var v=decoderForEntry(e);if(v){armDecoder(v,e);decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId}}});
     gl.activeTexture=function(u){G.unit=u;return O.activeTexture.apply(gl,arguments)};
     gl.bindTexture=function(target,texture){if(target===gl.TEXTURE_2D)G.bindings[G.unit]=texture;return O.bindTexture.apply(gl,arguments)};
@@ -236,7 +236,7 @@ INSTRUMENT_JS = r"""
     }
     gl.drawArrays=function(){return draw('drawArrays',arguments)};
     gl.drawElements=function(){return draw('drawElements',arguments)};
-    canvas.addEventListener('webglcontextlost',function(){contextRecord.lost=true;G.closed=true;if(G.frame)finishFrame(gl,G)},true);
+    canvas.addEventListener('webglcontextlost',function(){contextRecord.lost=true;if(G.frame)finishFrame(gl,G);finishContext(G)},true);
   }
   function laterQuads(F,draw){return Object.keys(F.quads).filter(function(k){return +k>draw}).map(function(k){return F.quads[k]})}
   function bestGeneric(gl,F,row){
@@ -283,6 +283,10 @@ INSTRUMENT_JS = r"""
     if(!F.pixelsDone){F.rows.forEach(function(row){row.feedRead={patchInside:false,coveredByLaterDraw:false,kind:null,late:true};row.holdMatch=null;delete row._reference;delete row._matrix;delete row._layerSize});F.under=[]}
     F.glErrors=[];S.frames.push(F);G.frame=null;
   }
+  function finishContext(G){
+    if(G.closed)return;G.closed=true;
+    if(S.tamper&&S.tamper.kind==='after-feed'&&S.tamper.applied!==true&&G.atScene===S.tamper.atScene){S.tamper.failed=true;S.tamper.reason='target move context finished without a trigger'}
+  }
   function installKillSwitch(){
     if(!S.config||!S.config.killHoldUpload)return;var api=window.__OBED_MM_FEED__;
     if(api&&typeof api.once==='function'&&!api.__obedProbeOnce){api.__obedProbeOnce=api.once;api.once=function(id){S.killedOnce.push({objectId:id,t:performance.now()});return false}}
@@ -308,6 +312,8 @@ INSTRUMENT_JS = r"""
     return true;
   }
   function afterFeedTamper(){
+    if(!S.tamper||S.tamper.applied===true||S.tamper.failed===true)return;
+    if(Number.isInteger(S.tamper.atScene)&&scene()!==S.tamper.atScene-1){requestAnimationFrame(afterFeedTamper);return}
     var found=entries().filter(function(e){return S.tamper&&(!Number.isInteger(S.tamper.atScene)||e.atScene===S.tamper.atScene)&&S.uploads.some(function(u){return u.atScene===e.atScene&&[e.feed&&e.feed.from,e.feed&&e.feed.to].some(function(p){return p&&p.upload===u.textureOrdinal})})})[0];found=found&&found.objectId;
     if(found){
       var v=decoderFor(found),start=v&&v.__obedPresentedFrames;
@@ -319,20 +325,24 @@ INSTRUMENT_JS = r"""
       });
       S.tamper=Object.assign({},S.tamper,{objectId:found,lastPresented:start,armedAt:performance.now()});return;
     }
-    S.tamper.attempts=(S.tamper.attempts||0)+1;if(S.tamper.attempts<600)requestAnimationFrame(afterFeedTamper);
+    requestAnimationFrame(afterFeedTamper);
+  }
+  function entryForObject(objectId){
+    var found=entries().filter(function(e){return e.objectId===objectId}),current=scene(),next=found.filter(function(e){return e.atScene===current+1});
+    if(next.length===1)return next[0];var here=found.filter(function(e){return e.atScene===current});if(here.length===1)return here[0];return found.length===1?found[0]:null;
   }
   function armSeam(){
     var feed=window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.feed;if(!feed||feed.__obedMmFeedProbe)return;
     feed.__obedMmFeedProbe=true;var claim=feed.claim,stand=feed.onStandDown;
-    if(typeof claim==='function')feed.claim=function(objectId){var result=claim.apply(feed,arguments),entry=entries().filter(function(e){return e.objectId===objectId})[0],v=decoderFor(objectId),move=v&&moveFor(v);S.claims.push({objectId:objectId,entryId:entry&&entry.id,serial:move?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),claimed:result===true});return result};
-    if(typeof stand==='function')feed.onStandDown=function(objectId,reason){var v=decoderFor(objectId),move=v&&moveFor(v),result=stand.apply(feed,arguments),entry=entries().filter(function(e){return e.objectId===objectId})[0];S.standDowns.push({objectId:objectId,entryId:entry&&entry.id,serial:move?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),reason:reason==null?null:String(reason),accepted:result===true});return result};
+    if(typeof claim==='function')feed.claim=function(objectId){var result=claim.apply(feed,arguments),entry=entryForObject(objectId),v=decoderFor(objectId),move=v&&moveFor(v);S.claims.push({objectId:objectId,entryId:entry&&entry.id,serial:move&&entry&&move.atScene===entry.atScene?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),claimed:result===true});return result};
+    if(typeof stand==='function')feed.onStandDown=function(objectId,reason){var v=decoderFor(objectId),move=v&&moveFor(v),result=stand.apply(feed,arguments),entry=entryForObject(objectId);S.standDowns.push({objectId:objectId,entryId:entry&&entry.id,serial:move&&entry&&move.atScene===entry.atScene?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),reason:reason==null?null:String(reason),accepted:result===true});return result};
   }
   function riderTick(){
     armSeam();installKillSwitch();
     S.live.forEach(function(pair){var gl=pair[0],G=pair[1],F=G.frame,canvas=gl.canvas;if(!F||G.closed||!canvas||!canvas.isConnected)return;var cr=canvas.getBoundingClientRect();
       G.entries.forEach(function(e){if(F.riders.some(function(r){return r.entryId===e.id}))return;var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
         opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})});
-    S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G)});settledArtwork();requestAnimationFrame(riderTick);
+    S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G);if(!canvas||!canvas.isConnected)finishContext(G)});settledArtwork();requestAnimationFrame(riderTick);
   }
   function rectMatchesFact(node,fact){for(var n=node;n&&n.nodeType===1;n=n.parentElement){var r=n.getBoundingClientRect&&n.getBoundingClientRect();if(r&&Math.abs(r.left-fact.x)<=2&&Math.abs(r.top-fact.y)<=2&&Math.abs(r.right-(fact.x+fact.w))<=2&&Math.abs(r.bottom-(fact.y+fact.h))<=2)return true}return false}
   function settledArtwork(){
@@ -347,9 +357,10 @@ INSTRUMENT_JS = r"""
     );
   }
   function p95(values){if(!values.length)return null;var a=values.slice().sort(function(x,y){return x-y}),p=(a.length-1)*.95,l=Math.floor(p),h=Math.ceil(p);return l===h?a[l]:a[l]+(a[h]-a[l])*(p-l)}
+  function droppedMedia(){var counts={};S.media.forEach(function(row){if(row.serial===null)counts[row.atScene]=(counts[row.atScene]||0)+1});return Object.keys(counts).map(function(key){return {atScene:+key,count:counts[key]}})}
   requestAnimationFrame(riderTick);
   window.__obedMmFeedProbe={version:1,bootstrap:bootstrap,configure:configure,report:function(){S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1])});return {kind:'mm-feed',version:1,config:S.config,
-    contexts:S.contexts,frames:S.frames.slice().sort(function(a,b){return a.t-b.t}),media:S.media.filter(function(row){return row.serial!==null}),mediaOverflow:S.mediaOverflow,artwork:S.artwork,errors:S.errors,
+    contexts:S.contexts,frames:S.frames.slice().sort(function(a,b){return a.t-b.t}),media:S.media.filter(function(row){return row.serial!==null}),mediaDropped:droppedMedia(),mediaOverflow:S.mediaOverflow,artwork:S.artwork,errors:S.errors,
     uploads:S.uploads,claims:S.claims,standDowns:S.standDowns,departures:S.departures,callbackCostP95Ms:p95(S.costs),module:moduleRead(),tamper:S.tamper,killedOnce:S.killedOnce}}};
 })();
 """
@@ -404,6 +415,7 @@ def verdict_records(
     claims = [row for row in report.get("claims") or [] if isinstance(row, dict)]
     stand_downs = [row for row in report.get("standDowns") or [] if isinstance(row, dict)]
     departures = [row for row in report.get("departures") or [] if isinstance(row, dict)]
+    media_dropped = [row for row in report.get("mediaDropped") or [] if isinstance(row, dict)]
     media_overflow = report.get("mediaOverflow")
     records: dict[str, dict[str, Any]] = {}
     for entry in entries:
@@ -418,7 +430,7 @@ def verdict_records(
         ]
         visits = [_visit_record(
             report, entry, move, frames, media_rows, artwork_rows, uploads, claims, stand_downs, departures,
-            continuous_expected=continuous_expected, media_overflow=media_overflow,
+            continuous_expected=continuous_expected, media_overflow=media_overflow, media_dropped=media_dropped,
         ) for move in moves]
         if len(visits) == 1:
             records[entry_id] = visits[0]
@@ -433,7 +445,7 @@ def _visit_record(
     report: dict[str, Any], entry: dict[str, Any], move: dict[str, Any], frames: list[dict[str, Any]],
     media_rows: list[dict[str, Any]], artwork_rows: list[dict[str, Any]], uploads: list[dict[str, Any]],
     claims: list[dict[str, Any]], stand_downs: list[dict[str, Any]], departures: list[dict[str, Any]], *,
-    continuous_expected: bool, media_overflow: Any,
+    continuous_expected: bool, media_overflow: Any, media_dropped: list[dict[str, Any]],
 ) -> dict[str, Any]:
     entry_id, serial, at_scene = entry["id"], move.get("serial"), entry.get("atScene")
     object_id = entry.get("objectId")
@@ -467,6 +479,7 @@ def _visit_record(
     ) for wanted in expected)
     times = sorted(float(r["t"]) for r in rows if _finite(r.get("t")))
     interval = {"start": times[0], "end": times[-1]} if len(times) > 1 and times[-1] > times[0] else None
+    first_t = min((f["t"] for f in move_frames if _finite(f.get("t"))), default=None)
     matching = lambda row: row.get("entryId") == entry_id or (row.get("entryId") is None and row.get("objectId") == object_id)
     related_claims = [r for r in claims if matching(r) and r.get("atScene") == at_scene]
     related_stands = [r for r in stand_downs if matching(r) and r.get("atScene") == at_scene]
@@ -478,10 +491,11 @@ def _visit_record(
     entry_claims = [r for r in related_claims if r.get("entryId") == entry_id and r.get("serial") == serial]
     entry_stands = [r for r in related_stands if r.get("entryId") == entry_id and r.get("serial") == serial
                     and r.get("accepted") is True]
+    move_stands = [r for r in entry_stands if _finite(first_t) and _finite(r.get("t")) and r["t"] >= first_t]
     entry_departures = [r for r in related_departures if r.get("entryId") == entry_id and r.get("serial") == serial]
     if not (claims_complete and stands_complete and departures_complete):
         mode, reason = "unavailable", "the feed mode stream is partial or unattributed"
-    elif entry_stands:
+    elif move_stands:
         mode, reason = "standDown", None
     elif any(r.get("claimed") is True for r in entry_claims):
         mode, reason = "continuous", None
@@ -500,7 +514,7 @@ def _visit_record(
     wanted_frame_ns = {f.get("n") for f, group in zip(move_frames, rows_by_frame, strict=True) if group and _finite(f.get("n"))}
     fed_frame_ns = {r.get("frameN") for r in move_uploads if _finite(r.get("frameN"))}
     last_upload = next((r.get("presentedFrames") for r in reversed(entry_uploads) if _finite(r.get("presentedFrames"))), None)
-    stand = entry_stands[0] if entry_stands else None
+    stand = move_stands[0] if move_stands else None
     reupload = None if stand is None else any(_finite(r.get("t")) and r["t"] > stand.get("t", math.inf) for r in entry_uploads)
     presented = [r["decoder"].get("presentedFrames") for r in rows if isinstance(r.get("decoder"), dict)
                  and _finite(r["decoder"].get("presentedFrames"))]
@@ -521,11 +535,12 @@ def _visit_record(
         == len([r for r in f.get("labelExpected") or [] if isinstance(r, dict) and r.get("entryId") == entry_id])
         for f in move_frames
     )
-    first_t = min((f["t"] for f in move_frames if _finite(f.get("t"))), default=None)
     last_t = max((f["t"] for f in move_frames if _finite(f.get("t"))), default=None)
     related_media = [r for r in media_rows if r.get("atScene") == at_scene
                      and (r.get("entryId") == entry_id or not isinstance(r.get("entryId"), str))]
-    media_complete = all(r.get("entryId") == entry_id and r.get("serial") == serial for r in related_media)
+    media_complete = not any(r.get("atScene") == at_scene and isinstance(r.get("count"), int)
+                             and not isinstance(r.get("count"), bool) and r["count"] > 0 for r in media_dropped) \
+        and all(r.get("entryId") == entry_id and r.get("serial") == serial for r in related_media)
     media = [r for r in related_media if r.get("entryId") == entry_id and r.get("serial") == serial]
     resume = next((r for r in media if r.get("kind") == "play" and _finite(r.get("t")) and _finite(last_t) and r["t"] > last_t), None)
     pauses = [r for r in media if r.get("kind") == "pause" and resume and _finite(r.get("t")) and r["t"] < resume["t"]
