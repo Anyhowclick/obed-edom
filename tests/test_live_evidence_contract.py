@@ -267,6 +267,7 @@ var videos = [new Media('movie-a.mov-0.0000-10.0000.mov', {x: 100, y: 100, w: 40
 var stage = {offsetWidth: 1920, offsetHeight: 1080,
              getBoundingClientRect: function(){ return {left: 0, top: 0, width: 1920, height: 1080}; }};
 global.document = {
+  timeline: {currentTime: 0},
   getElementById: function(id){ return id === 'stage' ? stage : null; },
   querySelectorAll: function(){ return videos.slice(); },
   contains: function(v){ return videos.indexOf(v) >= 0; },
@@ -279,7 +280,7 @@ global.WeakRef = function(v){ this.deref = function(){ return v; }; };
 global.Element = function(){};
 Element.prototype.checkVisibility = function(){ return true; };
 __SAMPLER__
-function step(ts){ now = ts + 0.25; var f = frames.splice(0); f.forEach(function(cb){ cb(ts); }); }
+function step(ts){ now = ts + 0.25; document.timeline.currentTime = ts; var f = frames.splice(0); f.forEach(function(cb){ cb(ts); }); }
 step(16);
 videos[0].__obedElId = 3; videos[0].__obedInstance = 'A2';
 videos.push(new Media('other.mov', {x: 0, y: 0, w: 10, h: 10}, NaN));
@@ -344,10 +345,10 @@ def _mm_feed_report() -> dict[str, Any]:
         "departures": [{"t": 1.5, "serial": None, "atScene": 2, "entryId": "carry-a"}],
         "callbackCostP95Ms": None,
         "tamper": None, "killedOnce": [{"objectId": "movie-a", "t": 3.0}],
-        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "atScene": 2,
+        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "closedAt": 3.0, "atScene": 2,
                       "lost": False, "entryIds": ["carry-a"]}],
         "frames": [{
-            "serial": 1, "atScene": 2, "n": 1, "t": 2.0, "draws": 1, "uploads": 2,
+            "serial": 1, "atScene": 2, "n": 1, "t": 2.0, "frameTime": 2.0, "draws": 1, "uploads": 2,
             "labels": [], "riders": [], "labelExpected": [],
             "glErrors": [], "module": None,
             "rows": [{"serial": 1, "atScene": 2, "entryId": "carry-a", "objectId": "movie-a",
@@ -375,7 +376,9 @@ def test_mm_feed_frame_and_poster_feed_note_producers_meet_the_contract() -> Non
 
 @pytest.mark.parametrize(("mutate", "clause"), [
     (lambda r: r["contexts"][0].pop("lost"), "mmFeed.context.lost:missing"),
+    (lambda r: r["contexts"][0].pop("closedAt"), "mmFeed.context.closedAt:missing"),
     (lambda r: r["frames"][0].update(t="late"), "mmFeed.frame.t"),
+    (lambda r: r["frames"][0].pop("frameTime"), "mmFeed.frame.frameTime:missing"),
     (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(size=[640]), "mmFeed.texture.size"),
     (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(uploadedSize=[1280]),
      "mmFeed.texture.uploadedSize"),

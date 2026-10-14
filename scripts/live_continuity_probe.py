@@ -612,13 +612,13 @@ SAMPLER_JS = r"""
     probe.raf = requestAnimationFrame(frame);
     try {
       frameSeq++;
-      frameTs = ts;
+      frameTs = document.timeline.currentTime;
       meta.rafTicks++;
-      meta.lastTs = ts;
+      meta.lastTs = frameTs;
       var ctl = window.__obedPaintControl__;
-      if (ctl && typeof ctl.tick === 'function') ctl.tick(frameSeq, ts);
-      tick(ts);
-      prepaint.toggle(frameSeq, ts);
+      if (ctl && typeof ctl.tick === 'function') ctl.tick(frameSeq, frameTs);
+      tick(frameTs);
+      prepaint.toggle(frameSeq, frameTs);
     } catch (e) {
       if (meta.errors.length < 50) meta.errors.push('frame: ' + String(e && e.message || e));
     }
@@ -1972,6 +1972,7 @@ def track_by_id(samples: list[dict[str, Any]], asset: str) -> dict[int, list[dic
             if video.get("id") in named:
                 row = dict(video)
                 row["t"] = sample.get("t")
+                row["ts"] = sample.get("ts")
                 row["scene"] = sample.get("scene")
                 row["playerState"] = sample.get("playerState")
                 row["busy"] = sample.get("busy")
@@ -2460,7 +2461,7 @@ def score_continuity(
     """
     if not (
         isinstance(gl_interval, dict) and _finite_number(gl_interval.get("start")) is not None
-        and _finite_number(gl_interval.get("end")) is not None and gl_interval["end"] > gl_interval["start"]
+        and _finite_number(gl_interval.get("end")) is not None and gl_interval["end"] >= gl_interval["start"]
     ):
         gl_interval = None
     tracks = track_by_id(samples, asset)
@@ -2493,6 +2494,8 @@ def score_continuity(
             transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=paint_floor,
             wrap_times=scored.get("wrapTimes") or (), gl_interval=gl_interval,
         )
+        if gl_interval is not None:
+            scored["hiddenGapFrames"] = scored["paint"].get("hiddenGapFrames", 0)
         status = scored["paint"].get("status")
         if status == "fail":
             scored["verdict"] = False
@@ -2599,7 +2602,7 @@ def score_continuity(
 
     move_rows = [r for r in before_rows if is_move_sample(r, transition_scene)]
     completed_move_rows = [r for r in before_rows if is_move_complete(r, transition_scene)]
-    in_gl = lambda row: bool(gl_interval and gl_interval["start"] <= row["t"] <= gl_interval["end"])
+    in_gl = lambda row: bool(gl_interval and gl_interval["start"] <= sample_frame_time(row) <= gl_interval["end"])
     dom_move_rows = [row for row in move_rows if not in_gl(row)]
     motion = score_motion(dom_move_rows, src_rect, dst_rect, rect_tolerance) if transition_scene is not None and not gl_interval else None
     if motion is not None and not any(
@@ -2693,6 +2696,11 @@ def paint_start(
     return start if floor is None else max(floor, start)
 
 
+def sample_frame_time(row: dict[str, Any]) -> float:
+    value = _finite_number(row.get("ts"))
+    return float(value if value is not None else row["t"])
+
+
 def carry_paint(
     samples: list[dict[str, Any]], element_id: Any, asset: str, window: dict[str, float],
     boundary_scene: float, src_rect: dict[str, float], dst_rect: dict[str, float], *,
@@ -2745,11 +2753,15 @@ def carry_paint_outside_gl(
             samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
             transition_scene=transition_scene, rect_tolerance=rect_tolerance, floor=floor, wrap_times=wrap_times,
         )
-    epsilon = 1e-6
-    segments = [
-        (window["start"], min(window["end"], gl_interval["start"] - epsilon)),
-        (max(window["start"], gl_interval["end"] + epsilon), window["end"]),
-    ]
+    before = [row for row in samples if window["start"] <= row.get("t", -math.inf) <= window["end"]
+              and sample_frame_time(row) < gl_interval["start"]]
+    after = [row for row in samples if window["start"] <= row.get("t", -math.inf) <= window["end"]
+             and sample_frame_time(row) > gl_interval["end"]]
+    segments = []
+    if before:
+        segments.append((window["start"], max(row["t"] for row in before)))
+    if after:
+        segments.append((min(row["t"] for row in after), window["end"]))
     scored = [
         carry_paint(
             samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
@@ -2762,7 +2774,7 @@ def carry_paint_outside_gl(
     applicable = [row for row in scored if row.get("status") != "n/a"]
     if not applicable:
         return {"status": "inconclusive", "verdict": None, "reasons": ["no pre/post GL paint segment"],
-                "segments": scored, "glInterval": gl_interval}
+                "segments": scored, "glInterval": gl_interval, "hiddenGapFrames": 0}
     status = "fail" if any(row.get("status") == "fail" for row in applicable) else (
         "ok" if all(row.get("status") == "ok" for row in applicable) else "inconclusive"
     )
@@ -2772,6 +2784,7 @@ def carry_paint_outside_gl(
         "status": status, "verdict": False if status == "fail" else True if status == "ok" else None,
         "reasons": [reason for row in applicable for reason in row.get("reasons") or []],
         "segments": scored, "glInterval": gl_interval,
+        "hiddenGapFrames": sum(row.get("unpaintedFrames") or 0 for row in applicable),
         "longestRun": max((row.get("longestRun") or 0 for row in applicable), default=0),
         "coverage": {"segments": [row.get("coverage") for row in applicable]},
         **{key: [value for row in applicable for value in row.get(key) or []] for key in lists},

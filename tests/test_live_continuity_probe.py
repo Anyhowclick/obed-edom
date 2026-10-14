@@ -7746,6 +7746,7 @@ class TestAssetKeysAreExactNames:
         var stage = {{offsetWidth: 1920, offsetHeight: 1080,
                       getBoundingClientRect: function(){{ return {{left: 0, top: 0, width: 1920, height: 1080}}; }}}};
         global.document = {{
+          timeline: {{currentTime: 0}},
           getElementById: function(id){{ return id === 'stage' ? stage : null; }},
           querySelectorAll: function(){{
             return [vid('http://h/x/ba.mov-0.0000-10.0000.mov'), vid('http://h/x/a.mov-0.0000-10.0000.mov'), vid('http://h/x/c.mov')];
@@ -7760,7 +7761,8 @@ class TestAssetKeysAreExactNames:
         global.Element = function(){{}};
         Element.prototype.checkVisibility = function(){{ return true; }};
         {probe.SAMPLER_JS}
-        tick();
+        document.timeline.currentTime = 16;
+        tick(16);
         console.log(JSON.stringify(asked));
         """
         result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
@@ -9950,14 +9952,15 @@ class TestSamplerV2:
     def test_the_sampler_keeps_the_detach_literals_and_feeds_tick_the_frame_time(self) -> None:
         """Plan §3.2: `detach_experiment.py` patches `tick(){` into `tick(ts){` and the push literal, so
         both stay byte-for-byte exactly once and `rafTs` never appears; `frame(ts)` runs the control
-        hook, then `tick(ts)` WITH the frame time, then the pre-paint toggle. Overflow drops the row
+        hook, then `tick(frameTs)` with `document.timeline.currentTime`, then the pre-paint toggle. Overflow drops the row
         and counts it instead of the silent `samples.shift()`."""
         js = probe.SAMPLER_JS
         assert js.count("  function tick(){\n    var t = performance.now();\n") == 1
         assert js.count("samples.push({t: t, scene: state.sceneId,") == 1
         assert "window.__obedContinuityProbe__ = {samples" in js and "rafTs" not in js
         frame = js[js.index("function frame(ts){"):]
-        assert frame.index("ctl.tick(frameSeq, ts)") < frame.index("tick(ts);") < frame.index("prepaint.toggle(frameSeq, ts)")
+        assert "frameTs = document.timeline.currentTime;" in frame
+        assert frame.index("ctl.tick(frameSeq, frameTs)") < frame.index("tick(frameTs);") < frame.index("prepaint.toggle(frameSeq, frameTs)")
         assert "samples.shift()" not in js and "meta.overflow++" in js
         assert "seq: frameSeq, ts: frameTs, hash:" in js and "sceneCount:" in js
 
@@ -11807,7 +11810,8 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     frames = []
     for index in range(4):
         frames.append({
-            "serial": 1, "atScene": 2, "n": index + 1, "t": float(index + 1), "draws": 1, "uploads": 1,
+            "serial": 1, "atScene": 2, "n": index + 1, "t": float(index + 1),
+            "frameTime": float(index + 1), "draws": 1, "uploads": 1,
             "module": {"entries": {"movie-a": {"mode": "continuous", "state": "fed", "framesFed": index + 1}}},
             "rows": [{
                 "serial": 1, "atScene": 2, "entryId": entry["id"], "objectId": "movie-a", "dstObjectId": "movie-b",
@@ -11829,7 +11833,7 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     report = {
         "kind": "mm-feed", "version": 1, "config": {}, "media": [], "mediaDropped": [], "mediaOverflow": 0,
         "errors": [], "killedOnce": [], "callbackCostP95Ms": .2,
-        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": .5, "atScene": 2,
+        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": .5, "closedAt": 5.0, "atScene": 2,
                       "lost": False, "entryIds": [entry["id"]]}],
         "frames": frames,
         "uploads": [{"serial": 1, "atScene": 2, "t": float(index + 1) + .003, "frameN": index + 1,
@@ -12022,7 +12026,7 @@ const styleParent={appendChild(n){n.parentNode=this},removeChild(n){n.parentNode
 const overlay={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:0,top:0,right:1920,bottom:540})},labelNode={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:50,top:50,right:250,bottom:150})};
 const videos={alpha:new Video('alpha','dalpha',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),broken:new Video('broken','dbroken',160,90,{x:550,y:0,left:550,top:0,right:1050,bottom:540,width:500,height:540}),counter:new Video('counter','dcounter',960,270,{x:1100,y:0,left:1100,top:0,right:1920,bottom:540,width:820,height:540},true),hold:new Video('hold','dhold',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),killed:new Video('killed','dkilled',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540})};
 const decoders={...videos,'alpha-hop':videos.alpha,'alpha-final':videos.alpha};
-global.document={head:styleParent,documentElement:styleParent,createElement:(k)=>k==='canvas'?new Canvas():{textContent:'',parentNode:null,nodeType:1,parentElement:null},getElementById:(id)=>id==='stage'?stage:null,elementsFromPoint:(x)=>x<500?[overlay,labelNode,videos.alpha]:[overlay,videos.broken]};
+global.document={timeline:{get currentTime(){return clock}},head:styleParent,documentElement:styleParent,createElement:(k)=>k==='canvas'?new Canvas():{textContent:'',parentNode:null,nodeType:1,parentElement:null},getElementById:(id)=>id==='stage'?stage:null,elementsFromPoint:(x)=>x<500?[overlay,labelNode,videos.alpha]:[overlay,videos.broken]};
 const seam={decoderFor:(id)=>decoders[id]||null,claim:()=>true,onStandDown:()=>true};global.__OBED_P2_PRESERVE__={feed:seam};
 global.__OBED_MM_FEED__={once:()=>true,entries:{}};
 const drawTable={drawCount:4,draws:[{draw:1,layerSize:[100,100],labelBoxOpacity:null},{draw:2,layerSize:[100,100],labelBoxOpacity:null},{draw:3,layerSize:[1920,540],labelBoxOpacity:null},{draw:4,layerSize:[20,20],labelBoxOpacity:.61}]};
@@ -12215,6 +12219,37 @@ def test_gl_interval_splits_paint_without_waiving_a_pre_move_failure(monkeypatch
     assert result["verdict"] is False
     assert len(intervals) == 2
     assert all(end < moving[0]["t"] or start > moving[-1]["t"] for start, end in intervals)
+
+
+def test_gl_interval_exempts_same_tick_edges_but_counts_a_real_hidden_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = _v2(moving_boundary_samples())
+    moving = [row for row in rows if row["playerState"] == "Playing"]
+    first, last, gap = moving[0], moving[-1], rows[rows.index(moving[0]) - 1]
+    first["t"] = first["ts"] - .25
+    last["t"] = last["ts"] + .25
+    first["videos"][0]["footprintOwner"] = None
+    last["videos"][0]["footprintOwner"] = None
+    special = {first["seq"], last["seq"], gap["seq"]}
+    scored_seqs: set[int] = set()
+
+    def score_paint(samples: Any, _element_id: Any, _asset: str, **kwargs: Any) -> dict[str, Any]:
+        selected = {row["seq"] for row in samples if kwargs["start"] <= row["t"] <= kwargs["end"]} & special
+        scored_seqs.update(selected)
+        return {
+            "status": "fail" if selected else "ok", "verdict": not selected,
+            "reasons": ["hidden gap"] if selected else [], "longestRun": len(selected),
+            "frames": len(selected), "unpaintedFrames": len(selected), "unpaintedSeqs": sorted(selected),
+        }
+
+    monkeypatch.setattr(probe.paint_instrument, "score_paint", score_paint)
+    result = probe.score_continuity(
+        rows, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7,
+        gl_interval={"start": first["ts"], "end": last["ts"]},
+    )
+    assert result["verdict"] is False
+    assert result["ownerMismatches"] == []
+    assert result["hiddenGapFrames"] == 1
+    assert scored_seqs == {gap["seq"]}
 
 
 def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() -> None:

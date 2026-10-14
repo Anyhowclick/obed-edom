@@ -28,6 +28,7 @@ INSTRUMENT_JS = r"""
   var locationName=new WeakMap(),programUniforms=new WeakMap(),textureInfo=new WeakMap();
   var decoderState=new WeakMap(),entryState={},media=HTMLMediaElement.prototype,originalPause=media.pause,originalPlay=media.play;
   function finite(v){return typeof v==='number'&&isFinite(v)}
+  function frameTime(){var t=document.timeline&&document.timeline.currentTime;return finite(t)?t:null}
   function noteError(where,e){if(S.errors.length<50)S.errors.push({where:where,error:String(e&&e.stack||e)})}
   function scene(){
     var n=parseInt(String(location.hash||'').replace(/^#/,''),10);return Number.isInteger(n)?n:null;
@@ -181,7 +182,7 @@ INSTRUMENT_JS = r"""
     var active=entriesAt(atScene),O={},G={unit:gl.TEXTURE0,bindings:{},program:null,flip:false,premultiply:false,
       frame:null,serial:S.contexts.length+1,regularUploads:0,atScene:atScene,entries:active,closed:false};
     ['texImage2D','activeTexture','bindTexture','pixelStorei','useProgram','getUniformLocation','uniform1f','uniformMatrix4fv','clear','drawArrays','drawElements'].forEach(function(n){O[n]=gl[n]});
-    var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};
+    var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),closedAt:null,atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};G.context=contextRecord;
     S.contexts.push(contextRecord);S.live.push([gl,G]);
     active.forEach(function(e){entryState[e.id].serial=G.serial;[S.media,S.departures,S.claims,S.standDowns].forEach(function(stream){stream.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial})});
       var v=decoderForEntry(e);if(v){armDecoder(v,e);decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId}}});
@@ -206,7 +207,7 @@ INSTRUMENT_JS = r"""
     };
     gl.clear=function(){
       if(G.frame)finishFrame(gl,G);
-      G.frame={serial:G.serial,atScene:G.atScene,n:S.frames.length+1,t:performance.now(),draws:0,uploads:0,rows:[],labels:[],riders:[],
+      G.frame={serial:G.serial,atScene:G.atScene,n:S.frames.length+1,t:performance.now(),frameTime:frameTime(),draws:0,uploads:0,rows:[],labels:[],riders:[],
         quads:{},under:[],labelExpected:[],module:moduleRead(),pixelsDone:false};
       return O.clear.apply(gl,arguments);
     };
@@ -284,7 +285,7 @@ INSTRUMENT_JS = r"""
     F.glErrors=[];S.frames.push(F);G.frame=null;
   }
   function finishContext(G){
-    if(G.closed)return;G.closed=true;
+    if(G.closed)return;G.closed=true;if(G.context)G.context.closedAt=frameTime();
     if(S.tamper&&S.tamper.kind==='after-feed'&&S.tamper.applied!==true&&G.atScene===S.tamper.atScene){S.tamper.failed=true;S.tamper.reason='target move context finished without a trigger'}
   }
   function installKillSwitch(){
@@ -385,7 +386,7 @@ def feed_interval(record: Any) -> dict[str, float] | None:
     interval = record.get("interval")
     if not isinstance(interval, dict) or not _finite(interval.get("start")) or not _finite(interval.get("end")):
         return None
-    if interval["end"] <= interval["start"]:
+    if interval["end"] < interval["start"]:
         return None
     return {"start": float(interval["start"]), "end": float(interval["end"])}
 
@@ -479,8 +480,7 @@ def _visit_record(
         isinstance(texture, dict) and texture.get("ordinal") == wanted.get("upload") and texture.get("size") == wanted.get("size")
         for row in rows for texture in row.get("textures") or []
     ) for wanted in expected)
-    times = sorted(float(r["t"]) for r in rows if _finite(r.get("t")))
-    interval = {"start": times[0], "end": times[-1]} if len(times) > 1 and times[-1] > times[0] else None
+    interval = None
     first_t = min((f["t"] for f in move_frames if _finite(f.get("t"))), default=None)
     matching = lambda row: row.get("entryId") == entry_id or (row.get("entryId") is None and row.get("objectId") == object_id)
     related_claims = [r for r in claims if matching(r) and r.get("atScene") == at_scene]
@@ -511,10 +511,15 @@ def _visit_record(
     entry_uploads = [r for r in related_uploads if r.get("serial") == serial]
     move_frame_ns = {f["n"] for f in move_frames}
     move_uploads = [r for r in entry_uploads if r.get("frameN") in move_frame_ns]
+    fed_frame_ns = {r.get("frameN") for r in move_uploads if _finite(r.get("frameN"))}
+    frame_times = sorted(float(f["frameTime"]) for f, group in zip(move_frames, rows_by_frame, strict=True)
+                         if group and f.get("n") in fed_frame_ns and _finite(f.get("frameTime")))
+    closed_at = move.get("closedAt")
+    interval = {"start": frame_times[0], "end": float(closed_at)} if usable and bound and frame_times \
+        and _finite(closed_at) and closed_at >= frame_times[0] else None
     upload_times = sorted(float(r["t"]) for r in move_uploads if _finite(r.get("t")))
     gaps = [b - a for a, b in zip(upload_times, upload_times[1:])]
     wanted_frame_ns = {f.get("n") for f, group in zip(move_frames, rows_by_frame, strict=True) if group and _finite(f.get("n"))}
-    fed_frame_ns = {r.get("frameN") for r in move_uploads if _finite(r.get("frameN"))}
     last_upload = next((r.get("presentedFrames") for r in reversed(entry_uploads) if _finite(r.get("presentedFrames"))), None)
     stand = move_stands[0] if move_stands else None
     reupload = None if stand is None else any(_finite(r.get("t")) and r["t"] > stand.get("t", math.inf) for r in entry_uploads)

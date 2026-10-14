@@ -626,7 +626,8 @@ def evidence(value: Any, path: str = "evidence") -> Iterator[str]:
 
 
 MM_FEED_CONTEXT_FIELDS = {
-    "serial": _id, "id": _non_empty_str, "createdAt": _finite, "atScene": _count,
+    "serial": _id, "id": _non_empty_str, "createdAt": _finite,
+    "closedAt": lambda v: v is None or _finite(v), "atScene": _count,
     "lost": lambda v: isinstance(v, bool),
     "entryIds": lambda v: isinstance(v, list) and all(_non_empty_str(item) for item in v),
 }
@@ -699,7 +700,8 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
             yield f"mmFeed.frame:object at {where}"
             continue
         yield from _fields(frame, "mmFeed.frame", where, {
-            "serial": _id, "atScene": _count, "n": _id, "t": _finite, "draws": _count, "uploads": _count,
+            "serial": _id, "atScene": _count, "n": _id, "t": _finite, "frameTime": _finite,
+            "draws": _count, "uploads": _count,
             "rows": lambda v: isinstance(v, list), "labels": lambda v: isinstance(v, list),
             "riders": lambda v: isinstance(v, list), "labelExpected": lambda v: isinstance(v, list),
             "glErrors": lambda v: isinstance(v, list) and all(_int(e) for e in v),
@@ -845,7 +847,7 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
     interval = value.get("interval")
     if interval is not None and not (
         isinstance(interval, dict) and _finite(interval.get("start")) and _finite(interval.get("end"))
-        and interval["end"] > interval["start"]
+        and interval["end"] >= interval["start"]
     ):
         yield f"feedVerdict.interval at {path}"
     if "notes" in value:
