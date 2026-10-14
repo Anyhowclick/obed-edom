@@ -12275,7 +12275,7 @@ def test_lingering_canvas_does_not_exempt_settled_dwell_and_null_close_still_bou
     }
     record = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)["carry-a"]
     interval = probe.mm_feed_instrument.feed_interval(record["feed"])
-    assert interval == {"start": 500.0, "end": 2050.0}
+    assert interval == {"start": 500.0, "end": 2075.0}
     assert record["canvasLingerMs"] == 2000.0
 
     open_report = copy.deepcopy(report)
@@ -12285,11 +12285,16 @@ def test_lingering_canvas_does_not_exempt_settled_dwell_and_null_close_still_bou
     assert open_record["canvasLingerMs"] is None
 
     rows = _v2(moving_boundary_samples())
+    jitter = next(row for row in rows if row["t"] == 2050.0)
+    jitter["t"] = jitter["ts"] = 2052.0
+    jitter["pp"]["ts"] = 2052.0
+    jitter["pp"]["t"] = 2053.0
     settled = next(row for row in rows if row["t"] == 2100.0)
-    settled["videos"][0]["footprintOwner"] = None
-    extra = copy.deepcopy(settled["pp"]["videos"][0])
-    extra["id"] = 99
-    settled["pp"]["videos"].append(extra)
+    for row in (jitter, settled):
+        row["videos"][0]["footprintOwner"] = None
+        extra = copy.deepcopy(row["pp"]["videos"][0])
+        extra["id"] = 99
+        row["pp"]["videos"].append(extra)
     scored = probe.score_continuity(rows, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, gl_interval=interval)
     assert scored["verdict"] is False
     assert [row["t"] for row in scored["ownerMismatches"]] == [2100.0]

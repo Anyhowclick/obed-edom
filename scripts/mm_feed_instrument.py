@@ -522,8 +522,9 @@ def _visit_record(
     last_move_frame_time = move_frame_times[-1] if frame_times_complete and move_frame_times else None
     closed_at = move.get("closedAt")
     canvas_linger = float(closed_at) - last_move_frame_time if _finite(closed_at) and last_move_frame_time is not None else None
-    interval_end = min(float(closed_at), last_move_frame_time + period) if _finite(closed_at) \
-        and last_move_frame_time is not None else last_move_frame_time + period if last_move_frame_time is not None else None
+    interval_end = min(float(closed_at), last_move_frame_time + 1.5 * period) if _finite(closed_at) \
+        and last_move_frame_time is not None else last_move_frame_time + 1.5 * period \
+        if last_move_frame_time is not None else None
     interval = {"start": fed_frame_times[0], "end": interval_end} if usable and bound and fed_frame_times \
         and interval_end is not None and interval_end >= fed_frame_times[0] else None
     upload_times = sorted(float(r["t"]) for r in move_uploads if _finite(r.get("t")))
