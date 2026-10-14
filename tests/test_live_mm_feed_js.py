@@ -19,9 +19,10 @@ if str(REPO / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO / "scripts"))
 
 import mm_feed_variants  # noqa: E402
+import mm_feed_instrument  # noqa: E402
 
 NODE = shutil.which("node")
-PINNED_MM_FEED_SHA256 = "4bef83a54e7e65dfdee6bfc0b43615b69c202ee93681cacee46e83cf448ec4c4"
+PINNED_MM_FEED_SHA256 = "a3a246cfe782cbb2393d1ce35486f2b5374756ee2e7ddde801be49aaf77d3052"
 
 
 def _entry(
@@ -66,10 +67,23 @@ global.performance = {now(){ clock += 5; return clock; }};
 const raf = [];
 global.requestAnimationFrame = function(fn){ raf.push(fn); return raf.length; };
 
-class Video {
-  constructor(name){ this.name=name; this.readyState=2; this.videoWidth=320; this.videoHeight=180; this.currentTime=1; }
+class Media {
+  pause(){ this.paused=true; }
+  play(){ this.paused=false; return Promise.resolve(); }
+  addEventListener(){}
+}
+global.HTMLMediaElement = Media;
+class Video extends Media {
+  constructor(name){
+    super();
+    this.name=name; this.readyState=2; this.videoWidth=320; this.videoHeight=180; this.currentTime=1;
+    this.paused=true; this.__obedInstance=name; this.isConnected=true; this.nodeType=1; this.parentElement=null;
+  }
+  getBoundingClientRect(){ return {x:0,y:0,left:0,top:0,width:320,height:180,right:320,bottom:180}; }
+  checkVisibility(){ return true; }
 }
 global.HTMLVideoElement = Video;
+global.getComputedStyle = function(){ return {opacity:'1',display:'block',visibility:'visible'}; };
 
 const warmUploads = [];
 function makeGl(name){
@@ -80,6 +94,7 @@ function makeGl(name){
     RGBA:6408, UNSIGNED_BYTE:5121, NO_ERROR:0,
     active:33984, program:null, flip:false, premultiply:false, nextError:0,
     bindings:new Map(), videoUploads:[], calls:[], textureN:0,
+    drawingBufferWidth:1920, drawingBufferHeight:1080,
     getParameter(p){
       if(p===this.ACTIVE_TEXTURE)return this.active;
       if(p===this.CURRENT_PROGRAM)return this.program;
@@ -102,10 +117,11 @@ function makeGl(name){
     },
     useProgram(program){ this.program=program; },
     getUniformLocation(program,uniform){ return {program,uniform}; },
-    uniform1f(){}, uniform1fv(){},
+    uniform1f(){}, uniform1fv(){}, uniformMatrix4fv(){},
     clear(){ this.calls.push(['clear']); },
     drawArrays(){ this.calls.push(['drawArrays']); },
     drawElements(){ this.calls.push(['drawElements']); },
+    readPixels(x,y,w,h,format,type,pixels){ pixels.fill(0); },
     getError(){ const value=this.nextError; this.nextError=0; return value; }
   };
   return gl;
@@ -113,17 +129,32 @@ function makeGl(name){
 
 const warmGl = makeGl('warm');
 let baseCalls = 0, preCalls = 0, g2Calls = 0;
+const fake2d = {
+  clearRect(){}, drawImage(){},
+  getImageData(){ return {data:new Uint8Array(81*30*4)}; }
+};
 class Canvas {
-  constructor(id,gl){ this.id=id||''; this._gl=gl||warmGl; this.width=1920; this.height=1080; this.listeners={}; }
+  constructor(id,gl){
+    this.id=id||''; this._gl=gl||warmGl; this._gl.canvas=this;
+    this.width=1920; this.height=1080; this.listeners={}; this.isConnected=true;
+  }
   addEventListener(name,fn){ this.listeners[name]=fn; }
   dispatch(name){ if(this.listeners[name])this.listeners[name]({type:name}); }
+  getBoundingClientRect(){ return {x:0,y:0,left:0,top:0,width:1920,height:1080,right:1920,bottom:1080}; }
 }
-Canvas.prototype.getContext = function(){ baseCalls++; return this._gl; };
+Canvas.prototype.getContext = function(type){ baseCalls++; return type==='2d'?fake2d:this._gl; };
 const baseGetContext = Canvas.prototype.getContext;
 Canvas.prototype.getContext = function(){ preCalls++; return baseGetContext.apply(this,arguments); };
 Canvas.prototype.getContext.__obedMmFeedProbe = 1;
+const preGetContext = Canvas.prototype.getContext;
+Canvas.prototype.getContext = function(){ g2Calls++; return preGetContext.apply(this,arguments); };
+Canvas.prototype.getContext.__obedGlReplay = 1;
 global.HTMLCanvasElement = Canvas;
-global.document = {createElement(name){ assert.strictEqual(name,'canvas'); return new Canvas('',warmGl); }};
+global.document = {
+  timeline:{currentTime:0}, head:null, documentElement:null,
+  createElement(name){ assert.strictEqual(name,'canvas'); return new Canvas('',warmGl); },
+  getElementById(){ return null; }, elementsFromPoint(){ return []; }
+};
 
 const decoders = {A:new Video('A'), B:new Video('B')};
 const calls = {decoder:[],claim:[],stand:[]};
@@ -138,12 +169,6 @@ global.__OBED_P2_PRESERVE__ = {feed:{
 }};
 global.__obedLive = {snapshot(){ return {playerState:snapshotState,busy:snapshotBusy,sceneId:snapshotScene}; }};
 global.__OBED_CONTINUITY__ = PLAN;
-
-eval(MODULE);
-assert(global.__OBED_MM_FEED__);
-const moduleGetContext = Canvas.prototype.getContext;
-Canvas.prototype.getContext = function(){ g2Calls++; return moduleGetContext.apply(this,arguments); };
-Canvas.prototype.getContext.__obedGlReplay = 1;
 
 function texture(name){ return {name}; }
 function upload(gl,tex,size,unit,flip,premultiply){
@@ -171,6 +196,8 @@ def _run_node(
     continuous: bool = True,
     once: bool = True,
     script: str | None = None,
+    before_module: str = "",
+    constants: dict[str, str] | None = None,
 ) -> None:
     if NODE is None:
         pytest.skip("node is not installed")
@@ -183,8 +210,14 @@ def _run_node(
         + ";\nconst MODULE="
         + json.dumps(match.group(1))
         + ";\n"
+        + "".join(
+            f"const {name}={json.dumps(value)};\n"
+            for name, value in (constants or {}).items()
+        )
         + _HARNESS
         + "\n"
+        + before_module
+        + "\neval(MODULE);\nassert(global.__OBED_MM_FEED__);\n"
         + scenario
     )
     completed = subprocess.run([NODE, "-e", code], capture_output=True, text=True, timeout=15)
@@ -212,8 +245,8 @@ def test_python_api_version_sha_flags_and_script_safety(monkeypatch: pytest.Monk
 
 def test_continuous_feed_two_leaves_state_identity_chain_and_page_api() -> None:
     plan = _plan(
-        _entry("A", draw=1, draw_count=2, upload=1, to=(2, (640, 360))),
-        _entry("B", draw=2, draw_count=2, upload=3),
+        _entry("A", draw=2, draw_count=3, upload=1, to=(2, (640, 360))),
+        _entry("B", draw=3, draw_count=3, upload=3),
     )
     _run_node(
         plan,
@@ -223,7 +256,7 @@ assert(calls.claim.every(x=>x.scene==='#1' && x.snapshot.busy===false));
 assert.strictEqual(warmUploads.length,2);
 const gl=makeGl('player'), canvas=new Canvas('0-canvas',gl), wrapped=canvas.getContext('webgl');
 assert.strictEqual(wrapped,gl);
-assert.strictEqual(g2Calls,1);
+assert.strictEqual(g2Calls,2);
 assert.strictEqual(preCalls,2);
 assert.strictEqual(baseCalls,2);
 
@@ -234,6 +267,7 @@ upload(gl,b0,[320,180],0,true,true);
 
 function frame(){
   gl.clear();
+  program(gl,'absent'); gl.drawElements(4,6,gl.UNSIGNED_BYTE,0);
   bind(gl,a0,0); bind(gl,a1,1); gl.activeTexture(gl.TEXTURE0);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,false);
@@ -247,6 +281,8 @@ function frame(){
   bind(gl,b0,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent');
   gl.drawElements(4,6,gl.UNSIGNED_BYTE,0);
 }
+gl.clear(); gl.clear();
+assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,'armed');
 frame(); frame();
 assert.strictEqual(gl.videoUploads.length,6);
 assert.deepStrictEqual(gl.videoUploads.slice(0,3).map(x=>x.source.name),['A','A','B']);
@@ -277,10 +313,52 @@ assert.strictEqual(api.entries.A.framesFed,0);
 const nextGl=makeGl('next'),nextCanvas=new Canvas('1-canvas',nextGl); nextCanvas.getContext('webgl');
 const n0=texture('n0'),n1=texture('n1');
 upload(nextGl,n0,[320,180],0,true,false); upload(nextGl,n1,[640,360],1,false,true);
-nextGl.clear(); bind(nextGl,n0,0); bind(nextGl,n1,1); nextGl.activeTexture(nextGl.TEXTURE0); program(nextGl,'present'); nextGl.drawArrays(4,0,6);
+nextGl.clear(); program(nextGl,'absent'); nextGl.drawElements(4,6,nextGl.UNSIGNED_BYTE,0);
+bind(nextGl,n0,0); bind(nextGl,n1,1); nextGl.activeTexture(nextGl.TEXTURE0); program(nextGl,'present'); nextGl.drawArrays(4,0,6);
 assert.strictEqual(api.entries.A.state,'fed');
 assert.strictEqual(api.entries.A.framesFed,1);
 """,
+    )
+
+
+def test_real_instrument_observes_module_uploads_after_zero_draw_frame() -> None:
+    entry = _entry("A")
+    probe_entry = {
+        "id": "entry-A",
+        "atScene": 2,
+        "objectId": "A",
+        "dstObjectId": "A2",
+        "feed": entry["feed"],
+        "draws": {"drawCount": 1, "draws": []},
+    }
+    before_module = f"""
+eval(INSTRUMENT);
+assert(global.__obedMmFeedProbe);
+global.__obedMmFeedProbe.bootstrap({json.dumps({"entries": [probe_entry]}, separators=(",", ":"))});
+const instrumentTick=raf.shift(); assert(instrumentTick); instrumentTick();
+"""
+    _run_node(
+        _plan(entry),
+        r"""
+assert.strictEqual(calls.claim.length,1);
+const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl); canvas.getContext('webgl');
+const first=texture('first'); upload(gl,first,[320,180],0,true,false);
+gl.clear(); gl.clear();
+bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+gl.clear();
+bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+const report=global.__obedMmFeedProbe.report();
+assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,'fed');
+assert.strictEqual(global.__OBED_MM_FEED__.entries.A.framesFed,2);
+assert.deepStrictEqual(report.frames.map(x=>x.draws),[0,1,1]);
+assert.deepStrictEqual(report.uploads.map(x=>x.frameN),[2,3]);
+assert.deepStrictEqual(report.uploads.map(x=>x.textureOrdinal),[1,1]);
+assert.strictEqual(report.claims.length,1);
+assert.strictEqual(report.claims[0].claimed,true);
+assert.strictEqual(report.claims[0].serial,1);
+""",
+        before_module=before_module,
+        constants={"INSTRUMENT": mm_feed_instrument.INSTRUMENT_JS},
     )
 
 
@@ -300,6 +378,29 @@ const hot=makeGl('hot'),hotCanvas=new Canvas('1-canvas',hot),hotDraw=hot.drawArr
 hotCanvas.getContext('webgl');
 assert.notStrictEqual(hot.drawArrays,hotDraw);
 """,
+    )
+
+
+@pytest.mark.parametrize(("continuous", "expected_state"), [(True, "fed"), (False, "held")])
+def test_context_accepts_hash_already_advanced_for_continuous_and_once(
+    continuous: bool, expected_state: str
+) -> None:
+    request_once = "" if continuous else "assert.strictEqual(global.__OBED_MM_FEED__.once('A'),true);"
+    _run_node(
+        _plan(_entry("A")),
+        f"""
+{request_once}
+location.hash='#2'; snapshotScene=2;
+const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl),originalDraw=gl.drawArrays;
+canvas.getContext('webgl');
+assert.notStrictEqual(gl.drawArrays,originalDraw);
+const first=texture('first'); upload(gl,first,[320,180],0,true,false);
+gl.clear(); bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,{json.dumps(expected_state)});
+assert.strictEqual(gl.videoUploads.length,1);
+""",
+        continuous=continuous,
+        once=True,
     )
 
 
@@ -338,7 +439,6 @@ assert.deepStrictEqual(calls.stand.map(x=>x.reason),['binding-mismatch']);
         ("identity", "identity-change"),
         ("shared", "shared-texture"),
         ("gl-error", "gl-error"),
-        ("no-feed", "no-feed"),
         ("context-lost", "context-lost"),
         ("decoder", "decoder-mismatch"),
     ],
@@ -356,8 +456,10 @@ const late=[];
 global.__OBED_P2_PRESERVE__.feed.onStandDown=function(id,why){{ late.push({{id,why}}); return true; }};
 const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl); canvas.getContext('webgl');
 const first=texture('first'); upload(gl,first,[320,180],0,true,false);
-if({json.dumps(failure)}==='no-feed'){{ gl.clear(); gl.clear(); }}
-else if({json.dumps(failure)}==='context-lost'){{ canvas.dispatch('webglcontextlost'); }}
+if({json.dumps(failure)}==='context-lost'){{
+  canvas.dispatch('webglcontextlost'); idleTick();
+  assert.deepStrictEqual(calls.claim.map(x=>x.id),['A']);
+}}
 else if({json.dumps(failure)}==='decoder'){{ decoders.A=null; gl.clear(); bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6); }}
 else if({json.dumps(failure)}==='shared'){{
   gl.clear(); bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
@@ -377,6 +479,40 @@ assert(Object.values(global.__OBED_MM_FEED__.entries).some(x=>x.reason==={json.d
     )
 
 
+def test_no_feed_requires_a_ready_draw_reached_in_that_frame() -> None:
+    plan = _plan(_entry("A"))
+    _run_node(
+        plan,
+        r"""
+const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl); canvas.getContext('webgl');
+const first=texture('first'); upload(gl,first,[320,180],0,true,false);
+gl.clear(); gl.clear(); gl.clear();
+assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,'armed');
+bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,'fed');
+assert.deepStrictEqual(calls.stand,[]);
+""",
+    )
+    missed_plan = _plan(_entry("A", draw=1, draw_count=2))
+    _run_node(
+        missed_plan,
+        r"""
+const api=global.__OBED_MM_FEED__;
+const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl); canvas.getContext('webgl');
+const first=texture('first'); upload(gl,first,[320,180],0,true,false);
+gl.clear(); bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+assert.strictEqual(api.once('A'),true);
+gl.clear();
+assert.strictEqual(api.entries.A.state,'stoodDown');
+assert.strictEqual(api.entries.A.reason,'no-feed');
+assert.strictEqual(api.entries.A.hold,'baked');
+assert.deepStrictEqual(calls.stand.map(x=>x.reason),['no-feed']);
+""",
+        continuous=False,
+        once=True,
+    )
+
+
 def test_once_uploads_each_texture_once_never_claims_and_keeps_baked_fallback_reason() -> None:
     plan = _plan(_entry("A", to=(2, (640, 360))))
     _run_node(
@@ -390,6 +526,8 @@ assert.strictEqual(api.once('A'),true);
 const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl); canvas.getContext('webgl');
 const a0=texture('a0'),a1=texture('a1');
 upload(gl,a0,[320,180],0,true,false); upload(gl,a1,[640,360],1,false,true);
+gl.clear(); gl.clear();
+assert.strictEqual(api.entries.A.state,'armed');
 gl.clear(); bind(gl,a0,0); bind(gl,a1,1); gl.activeTexture(gl.TEXTURE0);
 gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,false);
 program(gl,'present'); gl.drawArrays(4,0,6);

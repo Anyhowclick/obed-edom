@@ -73,7 +73,8 @@ MM_FEED_JS = r"""
       lastFeedAt: null,
       gaps: [],
       wasIdle: false,
-      departed: false
+      departed: false,
+      stoodDownThisIdle: false
     };
   }
 
@@ -144,6 +145,7 @@ MM_FEED_JS = r"""
   function standDown(record, reason, hold){
     if (record.public.state === 'stoodDown') return;
     record.armed = false;
+    record.stoodDownThisIdle = true;
     record.public.state = 'stoodDown';
     record.public.reason = reason;
     record.public.hold = hold || (record.public.framesFed ? 'unavailable' : 'baked');
@@ -187,10 +189,11 @@ MM_FEED_JS = r"""
     record.textures = null;
     record.lastFeedAt = null;
     record.gaps = [];
+    record.stoodDownThisIdle = false;
   }
 
   function arm(record){
-    if (record.armed) return;
+    if (record.armed || record.stoodDownThisIdle) return;
     if (!record.valid){
       standDown(record, 'binding-invalid', 'baked');
       return;
@@ -237,7 +240,9 @@ MM_FEED_JS = r"""
   function activeRecords(){
     var scene = currentScene();
     return Object.keys(records).map(function(key){ return records[key]; }).filter(function(record){
-      return record.armed && record.boundary.atScene - 1 === scene && record.public.state !== 'stoodDown';
+      return record.armed &&
+        (record.boundary.atScene - 1 === scene || record.boundary.atScene === scene) &&
+        record.public.state !== 'stoodDown';
     });
   }
 
@@ -397,8 +402,7 @@ MM_FEED_JS = r"""
     state.active.forEach(function(record){
       if (record.public.state === 'stoodDown' || record.public.mode === 'once' && record.onceDone) return;
       var shouldFeed = record.public.mode === 'continuous' || record.onceRequested;
-      var decoder = shouldFeed ? decoderFor(record.boundary.src.objectId) : null;
-      if (shouldFeed && decoder && decoder.readyState >= 2 && !state.fed.has(record)){
+      if (shouldFeed && state.reached.has(record) && !state.fed.has(record)){
         standDown(record, 'no-feed', record.public.framesFed ? 'exact' : 'baked');
       }
     });
@@ -435,6 +439,7 @@ MM_FEED_JS = r"""
       regularUploads: 0,
       draws: 0,
       eligible: new Set(),
+      reached: new Set(),
       fed: new Set(),
       frameOpen: false,
       internal: 0
@@ -492,6 +497,7 @@ MM_FEED_JS = r"""
       if (state.frameOpen) finishFrame(state);
       state.draws = 0;
       state.eligible = new Set();
+      state.reached = new Set();
       state.fed = new Set();
       state.frameOpen = true;
       return original.clear.apply(gl, arguments);
@@ -500,6 +506,8 @@ MM_FEED_JS = r"""
       state.draws += 1;
       state.active.forEach(function(record){
         if (!record.armed || record.public.state === 'stoodDown' || record.binding.draw !== state.draws) return;
+        var decoder = decoderFor(record.boundary.src.objectId);
+        if (decoder && decoder.readyState >= 2) state.reached.add(record);
         if (record.public.mode === 'continuous' || record.onceRequested && !record.onceDone) feedAtDraw(state, record);
       });
       var result = original[name].apply(gl, args);
@@ -569,7 +577,7 @@ def js_sha256() -> str:
     return hashlib.sha256(MM_FEED_JS.encode()).hexdigest()
 
 
-PINNED_MM_FEED_SHA256 = "4bef83a54e7e65dfdee6bfc0b43615b69c202ee93681cacee46e83cf448ec4c4"
+PINNED_MM_FEED_SHA256 = "a3a246cfe782cbb2393d1ce35486f2b5374756ee2e7ddde801be49aaf77d3052"
 
 
 def mm_feed_script(*, continuous: bool, once: bool) -> str:
