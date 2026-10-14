@@ -942,15 +942,6 @@ def _nudge_transition_endpoint(dx: float):
     return mutate
 
 
-def _mismatch_destination_texture(data):
-    slot = next(
-        slot for slot in _draw_slots(data, 0)
-        if slot["layers"][0].get("objectID") == P2_OBJECT_IDS["slide4"]
-    )
-    slot["layers"][0]["layers"][0]["texture"] = "MISMATCH"
-    return data
-
-
 def _malformed_transition_endpoint(data):
     _transition(data)["baseLayer"]["layers"][SLIDE3_BRIDGE_MOVIE_SLOT]["layers"][0]["initialState"]["position"][
         "pointX"
@@ -1056,7 +1047,6 @@ def _add_bridge_destination_sibling(data, offset: float):
              (SLIDE4, lambda data: _add_bridge_destination_sibling(data, 2.0))],
             2, None, None, id="margin-at-1.6",
         ),
-        pytest.param([(SLIDE4, _mismatch_destination_texture)], 2, "R1", "texture", id="texture-mismatch"),
         pytest.param([(SLIDE3, _malformed_transition_endpoint)], 2, "R1", "finite number", id="malformed-number"),
         pytest.param(
             [(SLIDE3, _each_group(lambda group: group.__setitem__("duration", "1.5")))],

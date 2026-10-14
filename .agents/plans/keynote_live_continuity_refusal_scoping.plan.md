@@ -484,3 +484,15 @@ Positive Control fixture drift), 3 mediums, 6 lows, all folded, none refuted.
 - GL replay rule 1 ("not in the measured WebGL list") is now unreachable: `_PAIRING_TRANSITIONS == _GL_REPLAY_TRANSITIONS`,
   so an unmeasured variant refuses R11 before GL replay is attempted; its test row was dropped.
 - Code review r2: Opus 5.5 (high) — approve; three style lows folded by the coordinator.
+- Full suite on 58589475 (coordinator): 4 failed / 10874 passed. Root cause 1 (defect): pairing compared transition
+  `contents` texture ids with destination draw-leaf texture ids, but Stage T's prepare-time repair re-points draw leaves
+  and never the transition, so a repaired deck false-refused (alpha-dsk-textures 6→7 `overlap` → R1). The raw-export audit
+  could not see it. Fix: pairing reads no texture ids at all (identity = destination objectID + 0.5 px endpoint + 1 px
+  margin + injective claims + fade classification); the audit now also derives on repaired copies (64/64 runtime and
+  signature equal; repaired Alpha plans match baseline). Root cause 2 (test-only): `tests/test_live_host.py`
+  `write_one_movie_export` used the bare `apple:magic-move` name (now R11) and no slot evidence; it now emits the measured
+  shape. Targeted 5 files: 853 passed.
+- Coordination (2026-10-14): Stage B (`claude/stage-b-implementation`) also rewrites `_magic_move_movies`; owner: this PR
+  merges first, Stage B rebases (R12 must exclude its `under_artwork` bridges). PDF page fix (Stage T, `preview_textures`)
+  stays separate; the second to merge re-runs `tests/test_preview_textures.py` and the audit.
+

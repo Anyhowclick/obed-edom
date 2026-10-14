@@ -1516,7 +1516,6 @@ class _PairingDescriptor:
     center_y: float
     width: float
     height: float
-    texture: str
     outgoing_fade: bool = False
     hidden: bool = False
 
@@ -1629,8 +1628,6 @@ def _transition_pairing_evidence(
     leaf = chain[-1]
     _v_empty_list(leaf.get("layers"), f"transition slot {slot_index} leaf.layers")
     _v_textured_rectangle(leaf.get("texturedRectangle"), f"transition slot {slot_index} leaf.texturedRectangle")
-    source_texture = leaf.get("texture")
-    _v_nonempty_str(source_texture, f"transition slot {slot_index} leaf.texture")
     animations = _pairing_animation_map(chain)
     outgoing_fade = False
     opacity = animations.get("opacity")
@@ -1648,10 +1645,6 @@ def _transition_pairing_evidence(
     z_position = animations.get("zPosition")
     if z_position is not None and z_position["from"] != z_position["to"]:
         raise _Refuse(f"transition slot {slot_index} has a changing 'zPosition' animation")
-    contents = animations.get("contents")
-    if contents is not None and contents["from"]["texture"] != source_texture:
-        raise _Refuse(f"transition slot {slot_index} contents.from disagrees with its source texture")
-    resolved_texture = contents["to"]["texture"] if contents is not None else source_texture
     scale_x = animations.get("transform.scale.x")
     scale_y = animations.get("transform.scale.y")
     translation = animations.get("transform.translation")
@@ -1670,9 +1663,7 @@ def _transition_pairing_evidence(
     center_x, center_y, width, height = _composed_leaf_descriptor(
         root_state, chain, scale_x=sx, scale_y=sy, translation_x=tx, translation_y=ty
     )
-    return slot_index, _PairingDescriptor(
-        center_x, center_y, width, height, resolved_texture, outgoing_fade=outgoing_fade
-    )
+    return slot_index, _PairingDescriptor(center_x, center_y, width, height, outgoing_fade=outgoing_fade)
 
 
 def _destination_pairing_descriptor(
@@ -1698,10 +1689,8 @@ def _destination_pairing_descriptor(
     leaf = chain[-1]
     _v_empty_list(leaf.get("layers"), f"destination draw slot {slot_index} leaf.layers")
     _v_textured_rectangle(leaf.get("texturedRectangle"), f"destination draw slot {slot_index} leaf.texturedRectangle")
-    texture = leaf.get("texture")
-    _v_nonempty_str(texture, f"destination draw slot {slot_index} leaf.texture")
     center_x, center_y, width, height = _composed_leaf_descriptor(root_state, chain)
-    return _PairingDescriptor(center_x, center_y, width, height, texture, hidden=hidden)
+    return _PairingDescriptor(center_x, center_y, width, height, hidden=hidden)
 
 
 def _pair_instances(
@@ -1746,10 +1735,6 @@ def _pair_instances(
             )
             refusals.append((src, ("R2", reason)))
             continue
-        if descriptor.texture != candidate.texture:
-            raise _Refuse(
-                f"transition texture {descriptor.texture!r} disagrees with destination texture {candidate.texture!r}"
-            )
         if dst.object_id in claimed:
             raise _Refuse(f"two source slots claim destination object {dst.object_id}")
         claimed[dst.object_id] = src
