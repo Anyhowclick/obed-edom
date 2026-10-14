@@ -5,6 +5,15 @@ Read first, with `keynote-live-continuity-2026-10-13.md` (overall state) and the
 Astra high r1–r3). Owner paused for the night after one review round; resume in the S2 follow-ups session (owner: "this
 session" orchestrates B).
 
+## Update 2026-10-14: review loop closed (r1–r9)
+- Commits: r1 fold `9bf912b6`, r2 `51ee3be2`, r3 `c047e271`, r4 `3ee6f7f9`, r5 `51749efc`, r6 `b1264033`, r7 `060818da`, r8 `2f418b8b`. Reviews r1–r9 in `.agents/reviews/stage-b/` (Opus 5.5 high, one resumed reviewer). Owner session override: mediums/lows folded through r5; r6+ major/blocker only. **r9: 0 blocker, 0 major.**
+- Not folded (low, carried from r7): (1) revert the paint sampler to the rAF `ts` for byte identity with S3 (equal by spec, unmeasured); (2) frames skipped at move start under the `readyState < 2` exemption are still paint-scored — raise with the owner if Phase 0 shows it.
+- WS-F interfaces frozen in plan §4 ("WS-F interfaces frozen after review r1": binding source `window.__OBED_CONTINUITY__`, keyword-only builder, page API, writable object, decoder re-resolution, call-time seam lookup, instrument install order via host `pre_navigation_scripts`, variants API).
+- `ALPHA_DSK_PLAN_SHA256` re-pinned to the repaired full fixture `c9e54655…` (new `tests/fixtures/live_continuity/alpha_dsk_repaired_full/`, excluded from runtime censuses). Core sha `6c687c47…`.
+- **Provisional constants awaiting Phase 0 re-bank** with the new instrument: `ALPHA_POSTER_FLOOR` 2.5 (dSep; run2-cmp used the experiment's fixed-centre reference and cannot register it), hold margins, `MAX_INTER_FEED_GAP_MS` 50. Phase 0 also records `callbackCostP95Ms`, `hiddenGapFrames`, `canvasLingerMs`, and compares feed gaps instrument on/off.
+- Touched-file suites green at `2f418b8b` (`-n 2`); full suites not run.
+- Next: Phase 0 + CEF step (machine window, owner go), then WS-F with the frozen interfaces, WS-P, full suites, §5 Q1–Q7. D7/D7s decks still need the owner's Keynote go.
+
 ## State
 | Thing | State |
 |---|---|
