@@ -393,8 +393,8 @@ def test_mm_feed_contract_rejects_required_field_and_generation_breaks(mutate: A
 def _feed_verdict_record() -> dict[str, Any]:
     return {
         "mode": "continuous", "usableContext": True, "boundTextures": True,
-        "interval": {"start": 1.0, "end": 2.0},
-        "feed": {"usableContext": True, "boundTextures": True, "reads": [{
+        "interval": {"start": 1.0, "end": 2.0}, "canvasLingerMs": 3.0,
+        "feed": {"usableContext": True, "boundTextures": True, "canvasLingerMs": 3.0, "reads": [{
             "progress": .25, "patchInside": True, "coveredByLaterDraw": False,
             "kind": "alpha", "dVideo": 2.0, "dPoster": 20.0, "dSep": 20.0,
         }]},
@@ -410,3 +410,8 @@ def test_feed_verdict_contract_checks_applicable_nested_producer_generation() ->
     assert "feedVerdict.feed.read.kind:missing" in [
         problem.split(" at ")[0] for problem in contract.feed_verdict_record(record)
     ]
+    record = _feed_verdict_record()
+    record.pop("canvasLingerMs")
+    record["feed"].pop("canvasLingerMs")
+    problems = [problem.split(" at ")[0] for problem in contract.feed_verdict_record(record)]
+    assert "feedVerdict.canvasLingerMs" in problems and "feedVerdict.feed.canvasLingerMs" in problems

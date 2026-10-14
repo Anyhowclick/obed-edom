@@ -844,6 +844,11 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
     for key in ("usableContext", "boundTextures"):
         if not isinstance(value.get(key), bool):
             yield f"feedVerdict.{key} at {path}"
+    linger = value.get("canvasLingerMs")
+    if (value.get("mode") != "unavailable" and "canvasLingerMs" not in value) or (
+        linger is not None and not (_finite(linger) and linger >= 0)
+    ):
+        yield f"feedVerdict.canvasLingerMs at {path}"
     interval = value.get("interval")
     if interval is not None and not (
         isinstance(interval, dict) and _finite(interval.get("start")) and _finite(interval.get("end"))
@@ -867,6 +872,9 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
         for field in ("usableContext", "boundTextures"):
             if not isinstance(record.get(field), bool):
                 yield f"feedVerdict.{key}.{field} at {path}"
+        linger = record.get("canvasLingerMs")
+        if "canvasLingerMs" not in record or linger is not None and not (_finite(linger) and linger >= 0):
+            yield f"feedVerdict.{key}.canvasLingerMs at {path}"
         if not isinstance(record.get("reads"), list):
             yield f"feedVerdict.{key}.reads:list at {path}"
     feed = value.get("feed")

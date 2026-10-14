@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from typing import Any, Iterable
 
 READ_PROGRESS = (0.25, 0.5, 0.75)
@@ -512,11 +513,19 @@ def _visit_record(
     move_frame_ns = {f["n"] for f in move_frames}
     move_uploads = [r for r in entry_uploads if r.get("frameN") in move_frame_ns]
     fed_frame_ns = {r.get("frameN") for r in move_uploads if _finite(r.get("frameN"))}
-    frame_times = sorted(float(f["frameTime"]) for f, group in zip(move_frames, rows_by_frame, strict=True)
-                         if group and f.get("n") in fed_frame_ns and _finite(f.get("frameTime")))
+    fed_frame_times = sorted(float(f["frameTime"]) for f, group in zip(move_frames, rows_by_frame, strict=True)
+                             if group and f.get("n") in fed_frame_ns and _finite(f.get("frameTime")))
+    move_frame_times = sorted(float(f["frameTime"]) for f in move_frames if _finite(f.get("frameTime")))
+    frame_times_complete = len(move_frame_times) == len(move_frames)
+    frame_periods = [b - a for a, b in zip(move_frame_times, move_frame_times[1:])]
+    period = statistics.median(frame_periods) if frame_periods else 1000 / 60
+    last_move_frame_time = move_frame_times[-1] if frame_times_complete and move_frame_times else None
     closed_at = move.get("closedAt")
-    interval = {"start": frame_times[0], "end": float(closed_at)} if usable and bound and frame_times \
-        and _finite(closed_at) and closed_at >= frame_times[0] else None
+    canvas_linger = float(closed_at) - last_move_frame_time if _finite(closed_at) and last_move_frame_time is not None else None
+    interval_end = min(float(closed_at), last_move_frame_time + period) if _finite(closed_at) \
+        and last_move_frame_time is not None else last_move_frame_time + period if last_move_frame_time is not None else None
+    interval = {"start": fed_frame_times[0], "end": interval_end} if usable and bound and fed_frame_times \
+        and interval_end is not None and interval_end >= fed_frame_times[0] else None
     upload_times = sorted(float(r["t"]) for r in move_uploads if _finite(r.get("t")))
     gaps = [b - a for a, b in zip(upload_times, upload_times[1:])]
     wanted_frame_ns = {f.get("n") for f, group in zip(move_frames, rows_by_frame, strict=True) if group and _finite(f.get("n"))}
@@ -591,7 +600,8 @@ def _visit_record(
             selected.append(match)
         if all(isinstance(match, dict) for match in selected):
             hold_reads = [{"phase": phase, **match} for phase, match in zip(("first", "middle", "last"), selected, strict=True)]
-    common = {"usableContext": usable, "boundTextures": bound, "interval": interval}
+    common = {"usableContext": usable, "boundTextures": bound, "interval": interval,
+              "canvasLingerMs": canvas_linger}
     feed = {
         **common, "complete": frames_complete and uploads_complete and claims_complete,
         "mode": mode, "reads": feed_reads, "presentedFrames": presented,

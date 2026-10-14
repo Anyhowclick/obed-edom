@@ -12252,6 +12252,50 @@ def test_gl_interval_exempts_same_tick_edges_but_counts_a_real_hidden_gap(monkey
     assert scored_seqs == {gap["seq"]}
 
 
+def test_lingering_canvas_does_not_exempt_settled_dwell_and_null_close_still_bounds_interval() -> None:
+    entry = {
+        "id": "carry-a", "objectId": "movie-a", "dstObjectId": "movie-b", "atScene": 8,
+        "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
+    }
+    frames, uploads = [], []
+    for n, frame_time in enumerate(range(500, 2001, 50), start=1):
+        frames.append({
+            "serial": 1, "atScene": 8, "n": n, "t": float(frame_time), "frameTime": float(frame_time),
+            "rows": [{"entryId": "carry-a", "objectId": "movie-a", "t": float(frame_time),
+                      "textures": [{"ordinal": 1, "size": [100, 100]}, None]}],
+            "riders": [], "labels": [], "labelExpected": [],
+        })
+        uploads.append({"serial": 1, "atScene": 8, "frameN": n, "t": float(frame_time), "textureOrdinal": 1})
+    report = {
+        "contexts": [{"serial": 1, "atScene": 8, "entryIds": ["carry-a"], "lost": False, "closedAt": 4000.0}],
+        "frames": frames, "media": [], "mediaDropped": [], "mediaOverflow": 0, "artwork": [],
+        "uploads": uploads, "claims": [{"entryId": "carry-a", "objectId": "movie-a", "serial": 1,
+                                          "atScene": 8, "claimed": True}],
+        "standDowns": [], "departures": [], "module": None,
+    }
+    record = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)["carry-a"]
+    interval = probe.mm_feed_instrument.feed_interval(record["feed"])
+    assert interval == {"start": 500.0, "end": 2050.0}
+    assert record["canvasLingerMs"] == 2000.0
+
+    open_report = copy.deepcopy(report)
+    open_report["contexts"][0]["closedAt"] = None
+    open_record = probe.mm_feed_instrument.verdict_records(open_report, [entry], continuous_expected=True)["carry-a"]
+    assert probe.mm_feed_instrument.feed_interval(open_record["feed"]) == interval
+    assert open_record["canvasLingerMs"] is None
+
+    rows = _v2(moving_boundary_samples())
+    settled = next(row for row in rows if row["t"] == 2100.0)
+    settled["videos"][0]["footprintOwner"] = None
+    extra = copy.deepcopy(settled["pp"]["videos"][0])
+    extra["id"] = 99
+    settled["pp"]["videos"].append(extra)
+    scored = probe.score_continuity(rows, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, gl_interval=interval)
+    assert scored["verdict"] is False
+    assert [row["t"] for row in scored["ownerMismatches"]] == [2100.0]
+    assert scored["paint"]["doubleFrames"] == 1
+
+
 def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() -> None:
     expected = {
         "feed-on", "feed-off", "attach-once", "hold-upload-killed", "ordinal", "after-feed",
