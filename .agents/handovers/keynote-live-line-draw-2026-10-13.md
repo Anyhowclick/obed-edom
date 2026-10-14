@@ -23,29 +23,21 @@ without the owner. Plan `.agents/plans/keynote_live_line_draw.plan.md` rev 6 (ow
 - **The pre-squash history is on the local branch `backup/line-draw-pre-squash` (`4b5d16d7`).** Delete it once #270
   merges.
 
-## Next (owner: 2026-10-14)
+## Done 2026-10-14
 
-1. **Send "need window" to the peer sessions first.** The CEF placement session runs long managed-OBS passes; its 2B is
-   also moved to tomorrow.
-2. **Full suites on the PR head**, in the worktree `.venv` (3.12) and `.venv310` (3.10 floor; both already synced):
-   `env -u PYTHONDONTWRITEBYTECODE .venv/bin/python -m pytest tests/ -n auto --dist worksteal -q -p no:cacheprovider`,
-   then the same with `.venv310`. The last green run was 10807 passed on pre-rebase `4b5d16d7`.
-3. **The full headless gate on the PR head.**
-   - Use a read-only clone of the export: `cp -cR` both `html` and `manifest.json` from
-     `/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/s2-followups-dsk-deck-902af1/output/.html-preview/7e3c930194d00effe3a21ee0e86a20baddb74223f661b9fa23186282aaf7081d-p3-r1/`
-     into a scratch dir. The probe's resolver accepts any root.
-   - Run: `PYTHONPATH=$PWD/src .venv/bin/python scripts/line_draw_probe.py <scratch>/html --manifest <scratch>/manifest.json --out <scratch>/gate`.
-   - Expected (last run, pre-rebase `g4`/`g5`):
-     - PASS: `on`, `hold-p1`, `hide-show`, `destroy`, `busy`.
-     - Controls: `off` fails reveal; head-static fails hand-back.
-     - Refused: diamond (diff 124) and protrusions (127).
-     - INCONCLUSIVE: `neighbour`, because Chrome 155 gets no snap grant. Top-level `pass` is therefore false by design;
-       read the per-arm verdicts.
-   - Re-score offline with `--score <dir>`.
-4. **Fold the results into the gate record and the PR checklist.** If a check reddens, compare against the pre-rebase
-   behaviour before blaming #269. mm-fade touches only GL Magic Move leaf fades, and Line Draw is CSS.
-5. **Optional review r3** (Opus 5.5 high, the reviewer's model class differs from Sol's) on the rebase resolution only.
-   Round 3 still folds every severity; from round 4 only majors count.
+- Both suites on the rebased head: 10813 passed, 0 failed (3.12 and the 3.10 floor).
+- Full headless gate (`g6`): green apart from `neighbour`, which is INCONCLUSIVE because Chrome 155 gets no snap
+  grant.
+- `hold-p1` reveal timing was flaky because the probe's capture-to-animation clock mapping lands one frame differently
+  from run to run. The owner made it report-only; the arm now gates only the held composite. See the gate record.
+
+## Open
+
+- **Owner review and merge of #270.** Only the owner merges.
+- **Optional:** the owner compares slide 2 against Keynote's native playback.
+- **Optional follow-up:** stamp each captured frame with the page's animation time instead of mapping capture
+  timestamps. That would make the reveal-timing checks deterministic.
+- After merge, delete the local branch `backup/line-draw-pre-squash`.
 
 ## Lessons (also in memory `line-draw`)
 

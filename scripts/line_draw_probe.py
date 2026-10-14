@@ -413,6 +413,118 @@ def sample_points(geometry: dict[str, Any], count: int = 96, end_length: float |
     return samples
 
 
+def point_segment_distance(point: tuple[float, float], left: tuple[float, float],
+                           right: tuple[float, float]) -> float:
+    dx, dy = right[0] - left[0], right[1] - left[1]
+    ratio = ((point[0] - left[0]) * dx + (point[1] - left[1]) * dy) / max(dx * dx + dy * dy, 1e-12)
+    ratio = min(max(ratio, 0), 1)
+    return math.hypot(point[0] - left[0] - ratio * dx, point[1] - left[1] - ratio * dy)
+
+
+def convex_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    points = sorted(set(points))
+
+    def cross(origin: tuple[float, float], left: tuple[float, float], right: tuple[float, float]) -> float:
+        return ((left[0] - origin[0]) * (right[1] - origin[1])
+                - (left[1] - origin[1]) * (right[0] - origin[0]))
+
+    lower: list[tuple[float, float]] = []
+    for point in points:
+        while len(lower) > 1 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(points):
+        while len(upper) > 1 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
+
+
+def inside_polygon(polygon: list[tuple[float, float]], point: tuple[float, float]) -> bool:
+    inside = False
+    for index, right in enumerate(polygon):
+        left = polygon[index - 1]
+        if ((right[1] > point[1]) != (left[1] > point[1])
+                and point[0] < (left[0] - right[0]) * (point[1] - right[1])
+                / (left[1] - right[1]) + right[0]):
+            inside = not inside
+    return inside
+
+
+def polygon_distance(polygon: list[tuple[float, float]], point: tuple[float, float]) -> float:
+    if inside_polygon(polygon, point):
+        return 0
+    return min(point_segment_distance(point, polygon[index - 1], right)
+               for index, right in enumerate(polygon))
+
+
+def arrow_head_model(geometry: dict[str, Any], origin: np.ndarray, texture: np.ndarray) -> dict[str, Any]:
+    rect = geometry["rect"]
+    leaf = geometry["leaf"]["initialState"]
+    scale_x = rect[2] / leaf["width"]
+    scale_y = rect[3] / leaf["height"]
+    if abs(scale_x - scale_y) > 0.002:
+        raise ValueError(f"non-uniform arrow texture scale {scale_x}, {scale_y}")
+    band = geometry["stroke"] / 2 + 1.5
+    changed = np.abs(texture[:, :, :3].astype(int) - origin[:, :, :3].astype(int)).max(axis=2) > 12
+    x0, y0 = max(0, math.floor(rect[0])), max(0, math.floor(rect[1]))
+    x1 = min(texture.shape[1], math.ceil(rect[0] + rect[2]))
+    y1 = min(texture.shape[0], math.ceil(rect[1] + rect[3]))
+    path = [(point[0], point[1]) for point in geometry["points"]]
+    wings = []
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            if not changed[y, x]:
+                continue
+            point = ((x + 0.5 - rect[0]) / scale_x, (y + 0.5 - rect[1]) / scale_y)
+            if min(point_segment_distance(point, left, right) for left, right in zip(path, path[1:])) > band:
+                wings.append(point)
+    hull = convex_hull(wings)
+    if len(hull) < 3:
+        raise ValueError(f"arrow texture supplied {len(hull)} hull points")
+    entry = None
+    was_inside = inside_polygon(hull, path[0])
+    for left, right in zip(geometry["points"], geometry["points"][1:]):
+        is_inside = inside_polygon(hull, (right[0], right[1]))
+        if not was_inside and is_inside:
+            low, high = 0.0, 1.0
+            for _ in range(24):
+                middle = (low + high) / 2
+                point = (left[0] + (right[0] - left[0]) * middle,
+                         left[1] + (right[1] - left[1]) * middle)
+                if inside_polygon(hull, point):
+                    high = middle
+                else:
+                    low = middle
+            entry = left[2] + (right[2] - left[2]) * high
+            break
+        was_inside = is_inside
+    if entry is None:
+        raise ValueError("arrow path does not enter the texture head hull")
+    end = at_length(geometry["points"], geometry["length"])
+    return {"hull": hull, "d": geometry["length"] - entry, "end": end[:2],
+            "endAngle": end[2], "band": band, "texturePixels": int(changed[y0:y1, x0:x1].sum()),
+            "wingPixels": len(wings)}
+
+
+def arrow_head_exclusions(geometry: dict[str, Any], model: dict[str, Any], progress: float,
+                          count: int = 96) -> set[int]:
+    distance = max(progress * geometry["length"], model["d"])
+    anchor = at_length(geometry["points"], distance)
+    angle = anchor[2] - model["endAngle"]
+    cosine, sine = math.cos(angle), math.sin(angle)
+    hull = []
+    for x, y in model["hull"]:
+        dx, dy = x - model["end"][0], y - model["end"][1]
+        hull.append((anchor[0] + cosine * dx - sine * dy,
+                     anchor[1] + sine * dx + cosine * dy))
+    body_length = geometry["length"] - model["d"]
+    return {index for index in range(count)
+            if polygon_distance(hull, at_length(geometry["points"], body_length * index / max(count - 1, 1))[:2])
+            <= model["band"]}
+
+
 def revealed_front(frame: np.ndarray, before: np.ndarray, final: np.ndarray,
                    samples: list[tuple[int, int]], start: int = 0) -> float:
     values = []
@@ -431,12 +543,12 @@ def revealed_front(frame: np.ndarray, before: np.ndarray, final: np.ndarray,
 
 def revealed_error(frame: np.ndarray, before: np.ndarray, final: np.ndarray,
                    samples: list[tuple[int, int]], expected: float, start: int,
-                   front_band: float, head_band: float) -> tuple[float | None, int]:
+                   front_band: float, excluded: set[int]) -> tuple[float | None, int]:
     errors = []
     eligible = 0
     for index, (x, y) in enumerate(samples[start:], start):
         position = index / max(len(samples) - 1, 1)
-        if expected - front_band <= position <= expected + head_band:
+        if index in excluded or expected - front_band <= position <= expected + front_band:
             continue
         y0, y1 = max(0, y - 1), min(frame.shape[0], y + 2)
         x0, x1 = max(0, x - 1), min(frame.shape[1], x + 2)
@@ -456,7 +568,8 @@ def revealed_error(frame: np.ndarray, before: np.ndarray, final: np.ndarray,
 
 
 def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], before: np.ndarray, final: np.ndarray,
-                 frames: list[tuple[float, np.ndarray]], origins: dict[str, np.ndarray] | None = None) -> dict[str, Any]:
+                 frames: list[tuple[float, np.ndarray]], origins: dict[str, np.ndarray] | None = None,
+                 head_models: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     checks: dict[str, Any] = {"body": [], "handback": {}, "lifecycle": record.get("lifecycle", {})}
     begin = float(record["advanceFrameTime"])
     offset = 0.0
@@ -481,7 +594,9 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
         if origins and str(geometry["objectID"]) in origins:
             origin = origins[str(geometry["objectID"])]
         arrow_body = geometry["name"].endswith("LineDrawForLine")
-        samples = sample_points(geometry, end_length=geometry["length"] - 8.09 if arrow_body else None)
+        head_model = (head_models or {}).get(str(geometry["objectID"])) if arrow_body else None
+        samples = sample_points(geometry, end_length=geometry["length"] - head_model["d"]
+                                if head_model else None)
         sample_support = 0
         for x, y in samples:
             y0, y1 = max(0, y - 1), min(final.shape[0], y + 2)
@@ -512,14 +627,17 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
             actual = revealed_front(frame, origin, final, samples, start)
             expected = progress
             if geometry["name"].endswith("LineDrawForLine"):
-                d = 8.09
+                if not head_model:
+                    continue
+                d = head_model["d"]
                 expected = max(progress * geometry["length"], d) - d
                 expected /= max(geometry["length"] - d, 1e-12)
                 if expected < start / len(samples):
                     continue
                 domain = geometry["length"] - d
                 band = (geometry["stroke"] / 2 + 1.5) / domain
-                error, eligible = revealed_error(frame, origin, final, samples, expected, start, band, (d + 13) / domain)
+                excluded = arrow_head_exclusions(geometry, head_model, progress, len(samples))
+                error, eligible = revealed_error(frame, origin, final, samples, expected, start, band, excluded)
                 eligible_counts.append(eligible)
                 if eligible < 8:
                     continue
@@ -528,7 +646,10 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
             errors.append(error)
             if record["arm"] == "hide-show" and show_ready is not None and timestamp >= show_ready:
                 post_show_errors.append(error)
-            rows.append({"t": round(local, 4), "actual": round(actual, 4), "expected": round(expected, 4)})
+            row = {"t": round(local, 4), "actual": round(actual, 4), "expected": round(expected, 4)}
+            if arrow_body:
+                row["headExcludedSamples"] = len(excluded)
+            rows.append(row)
         frame_step = float(np.median([right[0] - left[0] for left, right in zip(frames, frames[1:])])) \
             if len(frames) > 1 else 1
         allowance = 2 * frame_step / geometry["duration"] + 0.04
@@ -538,15 +659,17 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
                                        "maximum": round(allowance, 4), "frameCount": len(rows)}]
         status = None
         eligible_max = max(eligible_counts, default=sample_support)
-        if sample_support < 8 or arrow_body and eligible_max < 8:
+        if sample_support < 8 or arrow_body and (not head_model or eligible_max < 8):
             status = "INCONCLUSIVE"
             failures = [{"check": "body.eligibleSamples", "effect": geometry["name"],
-                         "measured": min(sample_support, eligible_max), "minimum": 8}]
+                         "measured": min(sample_support, eligible_max) if head_model else None, "minimum": 8}]
             passed = None
         check = {"name": geometry["name"], "frames": rows, "maxError": maximum,
                  "allowance": round(allowance, 4), "sampleSupport": sample_support,
                  "eligibleSamples": eligible_counts,
                  "failedChecks": failures, "pass": passed}
+        if head_model:
+            check["headModel"] = {key: head_model[key] for key in ("d", "band", "texturePixels", "wingPixels")}
         if status:
             check.update({"status": status, "reason": "too few eligible body samples"})
         checks["body"].append(check)
@@ -677,7 +800,9 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
         handback["heldP1EqualsStock"] = not held_missing and len(roi_diffs) == len(geometries) and all(
             item["comparedPixels"] > 0 and item["overTolerancePixels"] == 0 for item in roi_diffs)
         handback["heldP1MissingTelemetry"] = held_missing
-    failures = [failure for item in checks["body"] for failure in item["failedChecks"]]
+    failures = [] if record["arm"] == "hold-p1" else [failure for item in checks["body"] for failure in item["failedChecks"]]
+    if record["arm"] == "hold-p1":
+        checks["bodyReportOnly"] = "owner 2026-10-14: hold-p1 gates the held composite only; reveal timing is gated by on"
     if not painted_any:
         failures.append({"check": "overlay.frames", "measured": 0, "minimum": 1})
     for item in handback["effects"]:
@@ -1317,12 +1442,36 @@ def score_saved_run(out: Path) -> dict[str, Any]:
             effect_begin = float(on["advanceFrameTime"]) + float(on["effectStarts"].get(str(geometry["objectID"]), 0))
             prior = [item for item in on_frames if item[0] < effect_begin]
             origins[str(geometry["objectID"])] = prior[-1][1] if prior else reference_before
+    head_models: dict[str, dict[str, Any]] = {}
+    if geometries is not None:
+        sources = [run for arm in ("on", "hold-p1") for run in report["runs"]
+                   if run["arm"] == arm and arm in evidence and run.get("status") != "INCONCLUSIVE"]
+        for geometry in geometries:
+            if not geometry["name"].endswith("LineDrawForLine") or not sources:
+                continue
+            source_run = sources[0]
+            source_before, _, source_frames = evidence[source_run["arm"]]
+            object_id = str(geometry["objectID"])
+            effect_begin = (float(source_run["advanceFrameTime"])
+                            + float(source_run["effectStarts"].get(object_id, 0)))
+            prior = [item for item in source_frames if item[0] < effect_begin]
+            origin = prior[-1][1] if prior else source_before
+            texture_time = effect_begin + geometry["duration"]
+            texture_frame = min(source_frames, key=lambda item: abs(item[0] - texture_time))
+            try:
+                head_models[object_id] = arrow_head_model(geometry, origin, texture_frame[1])
+                report["arrowHeadModel"] = {"sourceArm": source_run["arm"],
+                                            "frameOffset": texture_frame[0] - texture_time,
+                                            **{key: head_models[object_id][key]
+                                               for key in ("d", "band", "texturePixels", "wingPixels")}}
+            except Exception as exc:
+                report["arrowHeadModel"] = {"sourceArm": source_run["arm"], "error": str(exc)}
     for run in report["runs"]:
         if run["arm"] not in evidence or run.get("status") == "INCONCLUSIVE" or geometries is None:
             continue
         before, final, frames = evidence[run["arm"]]
         run["score"] = (destroy_score(run) if run["arm"] == "destroy"
-                        else score_frames(run, geometries, before, final, frames, origins))
+                        else score_frames(run, geometries, before, final, frames, origins, head_models))
         if (run["score"].get("status") == "INCONCLUSIVE"
                 and run["arm"] not in ("off", "head-static", "head-diamond-tail", "head-protrusions")):
             run.update({"status": "INCONCLUSIVE", "reason": run["score"]["reason"], "pass": None})

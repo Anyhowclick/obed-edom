@@ -217,6 +217,10 @@ Minimal, pixel-based. Every check is made on captured frames, never on the patch
     head-notch arms.
   - Kept: body reveal; the `off` and head-static controls; the diamond and protrusion refusals; the held `p = 1` and
     pop checks; end equals `off`; the label rect; hide and show; destroy; busy.
+- **Held `p = 1` arm, owner 2026-10-14.** This arm gates only the held composite against stock; its body-reveal timing
+  is report-only. Reveal timing is gated by the `on` arm. Reason: the probe maps capture time onto the animation clock
+  one frame differently from run to run. That made the arm's reveal check flaky (2 of 3 live runs failed at load ~4),
+  while the drawn pixels were identical in passing and failing runs.
 - **Recorded deviation: body allowance.** The tolerance is 2 median frames + 4 % (0.0817 on the box). On `g2` the box
   measured 0.0448, against the plan's one-frame bar of 0.0208.
 
