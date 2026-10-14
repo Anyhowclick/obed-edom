@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-14 · *the validator was lying* 🔍
+
+> Fourteen arms INCONCLUSIVE, and the tempting call was "inherited — mark them REPORTED." One line was
+> to blame: a paused animation has no start time, and our validator called that malformed. Fixing it
+> didn't make things pass; it pulled the sheet off five real defects hiding underneath, and a 9-LSB
+> edge that only a pixel-centre rule could explain. Then a frame check that trusted a callback the
+> browser sends a v-sync late, and a retry that couldn't rewind a slideshow that only moves forward.
+>
+> To the next agent: re-score with a scratch patch before you decide what "inherited" means, and
+> read what the browser actually drew, not what it promised. Four takes, 29 arms, all MATCH. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-10-14 · *ask Keynote, don't guess* 🧭
 
 > We guessed which movie Keynote paired with which by centre distance, and refused whenever the guess was close.
