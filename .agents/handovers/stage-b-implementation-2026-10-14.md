@@ -38,16 +38,17 @@ Reviews: Sol (gpt-5.6-sol high) r1–r6, r6 no blocker/major (implementer Opus 5
 11007 passed + the known load-only `test_the_settle_wait_never_sleeps_past_its_deadline` (passes alone); the 3.10 floor and
 dashboard suites are not rerun yet (do before the PR). Raw runs: session scratchpad only (not evidence).
 **Open (next):**
-- **Rebase (owner decision 2026-10-14):** the deck-refusal-rules branch (`claude/deck-refusal-rules-alpha-1686c7`) merges
-  FIRST; Stage B rebases `_magic_move_movies` onto it: deck-wide "more than one movie changes geometry" raise → R12
-  (per-boundary, before `_held_after`; exclude `under_artwork` bridges from its count as our raise did); `_pair_instances`
-  pairs from per-slot end points; `_gl_replay_attempt` continuing_count = Σmin(out, in); `write_one_movie_export` emits
-  transition/draw evidence. That session sends the PR link.
+- **Main merged (owner decision: #277 first):** `4eb18cc2` merges main `25849a82` (#277 deck refusal rules):
+  transition-endpoint pairing, per-boundary R12 (excludes `under_artwork` bridges), Σmin continuing_count; Stage B's
+  ordering kept (overlap→under_artwork, `_crossing_carries`, glReplay, feed). `51ead0a8` makes the R12 oracle a
+  coherent, visible, non-crossing pair (`_add_wa0125_beside_the_carry_to_slide4`). Sol merge review r1 (1 medium,
+  folded) → r2 no findings. D7/D7s/Alpha plan pins unchanged. Suites on the merge: 3.12 and 3.10 11011 passed each +
+  the load-only deadline test. Headless D7 recheck on the merge not yet run (machine held by CEF/OBS live pass).
 - `feedLive` unreadable: `counterFromGl` decodes null at both orientations on the real player (instrument coordinate bug).
 - Chrome **155.0.8059.79** still unqualified (`QUALIFIED_SNAP_MAJORS = (154,)`): headless runs used a scratch-only wrapper;
   qualifying 155 stays the owner's call.
-**Q7 setup that stays valid:** worktree `.claude/worktrees/stage-b-q7` (detached at the fix commit `17186488`
-since 2026-10-14 19:3x), edited Alpha prepared there (`bf1c093f…-p3-r1`, plan `c9e54655…`, ordinals 10→p8, 11→p9), fixtures in
+**Q7 setup that stays valid:** worktree `.claude/worktrees/stage-b-q7` (detached at `51ead0a8`, the fix plus
+the main merge), edited Alpha prepared there (`bf1c093f…-p3-r1`, plan `c9e54655…`, ordinals 10→p8, 11→p9), fixtures in
 `~/Desktop/Convert wall to 16x9 CGs/Continuity/q7-fixtures/{D7,D7s,Alpha}`, runbook `stage-b-q7-runbook.md`. Owner
 decisions: Q7 first then Q2–Q6; managed OBS uses the Q6 qualification flags; measure holdFrame exactness before choosing a
 tolerance. Attempt-1 evidence: main `output/evidence/stage-b-2026-10-13/q7-attempt1/`. Machine: coordinate with the
