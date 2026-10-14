@@ -454,12 +454,12 @@ def test_owner_loop_export_differs_from_the_plain_export_only_by_loop_mode():
         assert strip(looping) == plain
 
 
-# --- S0 decks D1-D6 (generalisation plan section 5) ----------------------------------------
+# --- qualification decks D1-D7s -------------------------------------------------------------
 #
-# `qual_decks/Dn/` holds each S0 export's header and slide JSONs verbatim (main checkout
-# `output/fixtures/qual-decks/Dn/html-unmodified`); no movie files. D2-across derives exactly as
-# D2 (the export does not encode play-across), so it has no committed copy. D1, D3 and D5 must
-# derive the frozen schema-2 contract examples the core and injection streams test against.
+# `qual_decks/Dn/` holds each export's header and slide JSONs verbatim; no movie files.
+# D2-across derives exactly as D2 (the export does not encode play-across), so it has no
+# committed copy. D1, D3 and D5 must derive the frozen schema-2 contract examples the core and
+# injection streams test against.
 
 QUAL_ROOT = Path(__file__).parent / "fixtures" / "live_continuity" / "qual_decks"
 QUAL_REAL_ROOT = fixture("qual-decks")
@@ -471,6 +471,24 @@ QUAL_PLAN_SHA256 = {
     "D4": "e166c385753364cdc159307b8f7d9092979533b71aee93ea4b8ebbea7a366076",
     "D5": "73d1153f086381996b5490d6f66eae2ee6996eb05b4a1dcd0af0fce70a018f5e",
     "D6": "149e813cfe68b6bac7c5c4ea0b5829f20e017ee1d0ce742ece3444fd1f60eed1",
+    "D7": "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584",
+    "D7s": "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577",
+}
+QUAL_STAGE_B_SHAPES = {
+    "D7": [
+        (2, "bridge", "movie1", True),
+        (2, "bridge", "movie2", True),
+        (4, "bridge", "movie1", True),
+        (4, "bridge", "movie2", True),
+        (6, "pin", "movie1", False),
+        (6, "pin", "movie2", False),
+    ],
+    "D7s": [
+        (2, "bridge", "movie1", True),
+        (2, "bridge", "movie2", True),
+        (4, "bridge", "movie1", True),
+        (4, "bridge", "movie2", True),
+    ],
 }
 
 
@@ -502,9 +520,20 @@ def test_s0_deck_derives_the_contract_example(deck, gl_replay):
 
 @pytest.mark.parametrize("deck", sorted(QUAL_PLAN_SHA256))
 @pytest.mark.parametrize("gl_replay", [False, True])
-def test_s0_deck_runtime_is_pinned(deck, gl_replay):
+def test_qualification_deck_runtime_is_pinned(deck, gl_replay):
     runtime = _qual_runtime(deck, gl_replay=gl_replay)
     assert live_continuity.plan_signature(runtime) == QUAL_PLAN_SHA256[deck]
+    if deck not in QUAL_STAGE_B_SHAPES:
+        return
+    entries = runtime["boundaries"]
+    assert all(entry.get("underArtwork") is True and "feed" in entry for entry in entries)
+    assert [
+        (entry["atScene"], entry["action"], entry["movieKey"], entry["feed"]["to"] is not None)
+        for entry in entries
+    ] == QUAL_STAGE_B_SHAPES[deck]
+    if deck == "D7s":
+        first, second = [entry["dst"]["rect"] for entry in entries if entry["atScene"] == 2]
+        assert first["x"] + first["w"] - second["x"] == 5
 
 
 def test_d2_restarts_after_a_bridge_and_starts_a_new_chain():
@@ -551,7 +580,7 @@ def test_d3_ends_the_movie_that_does_not_continue():
 
 
 @pytest.mark.skipif(not QUAL_REAL_ROOT.is_dir(), reason="S0 deck exports not available")
-@pytest.mark.parametrize("deck", sorted(QUAL_PLAN_SHA256))
+@pytest.mark.parametrize("deck", [f"D{number}" for number in range(1, 7)])
 def test_s0_deck_fixture_is_the_exports_bytes(deck):
     real = QUAL_REAL_ROOT / deck / "html-unmodified" / "assets"
     committed = QUAL_ROOT / deck / "assets"

@@ -990,7 +990,13 @@ def test_mm_opacity_census_mirror_changes_only_p2_1_to_2_slot_4_in_committed_fix
     for row in rows:
         assert [old == new for old, new in row] == [True, True, True, True, False]
         assert row[4] == (1, SLOT4_ALPHA)
-    paths = sorted(path for path in FIXTURE_ROOT.rglob("*.json") if not {"alpha_dsk_repaired", "alpha_dsk_repaired_full"} & set(path.parts))
+    paths = sorted(
+        path
+        for path in FIXTURE_ROOT.rglob("*.json")
+        if not {"alpha_dsk_repaired", "alpha_dsk_repaired_full"} & set(path.parts)
+        and FIXTURE_ROOT / "qual_decks" / "D7" not in path.parents
+        and FIXTURE_ROOT / "qual_decks" / "D7s" not in path.parents
+    )
     stats, changed = _census(paths)
     assert stats["one_to_two"] >= 1 and stats["effects"] > stats["one_to_two"]
     assert changed == {(True, 4)}
