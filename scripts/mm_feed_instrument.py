@@ -10,6 +10,11 @@ ALPHA_POSTER_FLOOR = 2.5
 LABEL_SPREAD_FLOOR = 24.0
 LABEL_SLOPE_TOLERANCE = 0.02
 RIDER_OPACITY_FLOOR = 0.02
+MAX_INTER_FEED_GAP_MS = 50.0
+# Provisional: re-bank from Phase 0 headless captures alongside ALPHA_POSTER_FLOOR.
+ALPHA_HOLD_MARGIN = 6.0
+# Provisional: re-bank from Phase 0 headless captures alongside ALPHA_POSTER_FLOOR.
+COUNTER_HOLD_MARGIN = 1.0
 
 
 INSTRUMENT_JS = r"""
@@ -17,14 +22,13 @@ INSTRUMENT_JS = r"""
   'use strict';
   if(window.__obedMmFeedProbe)return;
   var READS=[0.25,0.5,0.75],PATCH_UV=[[0.2,0.2],[0.5,0.2],[0.8,0.2],[0.2,0.5],[0.5,0.5],[0.8,0.5],[0.2,0.8],[0.5,0.8],[0.8,0.8]];
-  var S={config:null,entries:[],contexts:[],live:[],frames:[],holds:[],media:[],artwork:[],errors:[],tamper:null,killedOnce:[],forcedDecoders:{}};
+  var S={config:null,entries:[],contexts:[],live:[],frames:[],media:[],mediaOverflow:0,artwork:[],errors:[],tamper:null,killedOnce:[],forcedDecoders:{},uploads:[],claims:[],standDowns:[],departures:[],costs:[]};
   var originalGetContext=HTMLCanvasElement.prototype.getContext;
   var locationName=new WeakMap(),programUniforms=new WeakMap(),textureInfo=new WeakMap();
   var decoderState=new WeakMap(),entryState={},media=HTMLMediaElement.prototype,originalPause=media.pause,originalPlay=media.play;
   function finite(v){return typeof v==='number'&&isFinite(v)}
   function noteError(where,e){if(S.errors.length<50)S.errors.push({where:where,error:String(e&&e.stack||e)})}
   function scene(){
-    try{var snap=window.__obedLive&&window.__obedLive.snapshot&&window.__obedLive.snapshot();if(snap&&Number.isInteger(snap.scene))return snap.scene}catch(e){}
     var n=parseInt(String(location.hash||'').replace(/^#/,''),10);return Number.isInteger(n)?n:null;
   }
   function moduleRead(){
@@ -60,11 +64,12 @@ INSTRUMENT_JS = r"""
     if(move&&move.atScene!==current&&move.atScene!==current+1)move=null;
     if(!move&&state){var candidates=Object.keys(state.entries).map(function(id){return state.entries[id]}).filter(function(e){return e.atScene===current||e.atScene===current+1});
       if(candidates.length===1)move={serial:null,atScene:candidates[0].atScene,entryId:candidates[0].id}}
-    if(!move||S.media.length>=20000)return;
+    if(!move)return;if(S.media.length>=20000){S.mediaOverflow++;return}
     S.media.push(Object.assign({kind:kind,t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,
       instance:v.__obedInstance==null?null:String(v.__obedInstance),elId:v.__obedElId==null?null:v.__obedElId,
       currentTime:v.currentTime,paused:!!v.paused,presentedFrames:v.__obedPresentedFrames==null?null:v.__obedPresentedFrames,
       mediaTime:v.__obedMediaTime==null?null:v.__obedMediaTime},extra||{}));
+    if(kind==='pause'&&v.__obedPosterHeld)S.departures.push({t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,objectId:move.objectId||null});
   }
   media.pause=function(){mediaEvent('pause',this);return originalPause.apply(this,arguments)};
   media.play=function(){mediaEvent('play',this);return originalPlay.apply(this,arguments)};
@@ -75,10 +80,11 @@ INSTRUMENT_JS = r"""
     if(state.armed)return;state.armed=true;
     v.addEventListener('seeking',function(){mediaEvent('seeking',v)},true);
     if(typeof v.requestVideoFrameCallback==='function'){
-      var callback=function(now,meta){v.__obedPresentedFrames=meta.presentedFrames;v.__obedMediaTime=meta.mediaTime;
+      var callback=function(now,meta){var costStart=performance.now();v.__obedPresentedFrames=meta.presentedFrames;v.__obedMediaTime=meta.mediaTime;
         mediaEvent('videoFrame',v,{now:now,presentedFrames:meta.presentedFrames,mediaTime:meta.mediaTime});
         Object.keys(state.entries).forEach(function(id){var e=state.entries[id],size=entryState[id].leafSize||e.feed&&e.feed.from&&e.feed.from.size;
-          if(!size)return;try{var ring=entryState[id].ring;ring.push({frame:meta.presentedFrames,mediaTime:meta.mediaTime,patches:capture(v,size)});if(ring.length>18)ring.shift()}catch(x){noteError('rVFC capture',x)}});
+          var current=scene(),move=state.move,moveLive=move&&move.entryId===id&&S.live.some(function(pair){return pair[1].serial===move.serial&&pair[1].frame});if(!size||!(current===e.atScene-1||moveLive))return;try{var ring=entryState[id].ring;ring.push({frame:meta.presentedFrames,mediaTime:meta.mediaTime,patches:capture(v,size,entryState[id])});if(ring.length>18)ring.shift()}catch(x){noteError('rVFC capture',x)}});
+        S.costs.push(performance.now()-costStart);if(S.costs.length>1000)S.costs.shift();
         v.requestVideoFrameCallback(callback)};v.requestVideoFrameCallback(callback);
     }
   }
@@ -97,7 +103,7 @@ INSTRUMENT_JS = r"""
   }
   function entriesAt(atScene){return entries().filter(function(e){return e.atScene===atScene})}
   function resolveAtScene(){
-    var current=scene(),candidates=[current,current==null?null:current+1];
+    var current=scene(),candidates=[current==null?null:current+1,current];
     for(var i=0;i<candidates.length;i++)if(entriesAt(candidates[i]).length)return candidates[i];
     return null;
   }
@@ -128,25 +134,16 @@ INSTRUMENT_JS = r"""
     var out=[0,0,0],n=0;for(var yy=Math.max(0,Math.floor(y-r));yy<=Math.min(h-1,Math.ceil(y+r));yy++)for(var xx=Math.max(0,Math.floor(x-r));xx<=Math.min(w-1,Math.ceil(x+r));xx++){
       var i=(yy*w+xx)*4;out[0]+=px[i];out[1]+=px[i+1];out[2]+=px[i+2];n++}return n?[out[0]/n,out[1]/n,out[2]/n]:null;
   }
-  function canvasPixels(source,w,h){
-    if(!source||!w||!h)return null;var c=document.createElement('canvas');c.width=w;c.height=h;var ctx=c.getContext('2d',{willReadFrequently:true});
-    ctx.drawImage(source,0,0,w,h);return {pixels:ctx.getImageData(0,0,w,h).data,w:w,h:h};
-  }
-  function counterFrom(s){
-    if(!s)return null;var values=[];for(var i=0;i<17;i++){var x=(24+40*i)/1920*s.w,y=24/540*s.h,m=meanAt(s.pixels,s.w,s.h,x,y,Math.max(1,Math.min(s.w/1920,s.h/540)*6));if(!m)return null;values.push((m[0]+m[1]+m[2])/3)}
-    var lo=Math.min.apply(null,values),hi=Math.max.apply(null,values),cut=(lo+hi)/2,bits=values.map(function(v){return v>cut?1:0});
-    if(hi-lo<80||bits[0]!==1||bits[1]!==0||bits[15]!==0||bits[16]!==1)return null;
-    var n=0;for(var j=2;j<14;j++)n=n*2+bits[j];var parity=bits.slice(2,14).reduce(function(a,b){return a+b},0)%2;
-    return parity===bits[14]?n:null;
-  }
   function keyFor(uv){return uv[0]+','+uv[1]}
-  function vectorFromPixels(s,uv){
-    var out=[],rx=8/s.w,ry=8/s.h;for(var y=-1;y<=1;y++)for(var x=-1;x<=1;x++){
-      var m=meanAt(s.pixels,s.w,s.h,(uv[0]+x*rx)*s.w,(uv[1]+y*ry)*s.h,1);if(!m)return null;out=out.concat(m)}return out;
-  }
-  function capture(source,size){
-    var s=canvasPixels(source,size[0],size[1]);if(!s)return null;var vectors={};PATCH_UV.forEach(function(uv){vectors[keyFor(uv)]=vectorFromPixels(s,uv)});
-    return {vectors:vectors,counter:counterFrom(s)};
+  function capture(source,size,state){
+    if(!source||!size||!size[0]||!size[1])return null;state=state||{};var c=state.captureCanvas;
+    if(!c){c=state.captureCanvas=document.createElement('canvas');c.width=81;c.height=30;state.captureContext=c.getContext('2d',{willReadFrequently:true})}
+    var ctx=state.captureContext;ctx.clearRect(0,0,81,30);PATCH_UV.forEach(function(uv,i){var sx=Math.max(0,uv[0]*size[0]-12),sy=Math.max(0,uv[1]*size[1]-12),sw=Math.min(24,size[0]-sx),sh=Math.min(24,size[1]-sy);ctx.drawImage(source,sx,sy,sw,sh,i*9,0,9,9)});
+    for(var j=0;j<17;j++){var x=(24+40*j)/1920*size[0],y=24/540*size[1];ctx.drawImage(source,Math.max(0,x-3),Math.max(0,y-3),6,6,j,27,1,1)}
+    var px=ctx.getImageData(0,0,81,30).data,vectors={};PATCH_UV.forEach(function(uv,i){var out=[];for(var y=0;y<3;y++)for(var x=0;x<3;x++){var m=meanAt(px,81,30,i*9+1+x*3,1+y*3,1);out=out.concat(m||[])}vectors[keyFor(uv)]=out.length===27?out:null});
+    var values=[];for(var k=0;k<17;k++){var p=(27*81+k)*4;values.push((px[p]+px[p+1]+px[p+2])/3)}var lo=Math.min.apply(null,values),hi=Math.max.apply(null,values),cut=(lo+hi)/2,bits=values.map(function(v){return v>cut?1:0}),counter=null;
+    if(hi-lo>=80&&bits[0]===1&&bits[1]===0&&bits[15]===0&&bits[16]===1){var n=0;for(var q=2;q<14;q++)n=n*2+bits[q];if(bits.slice(2,14).reduce(function(a,b){return a+b},0)%2===bits[14])counter=n}
+    return {vectors:vectors,counter:counter};
   }
   function vectorFromGl(gl,m,layerSize,textureSize,uv,flip){
     var out=[],rx=8/textureSize[0],ry=8/textureSize[1];for(var y=-1;y<=1;y++)for(var x=-1;x<=1;x++){
@@ -157,7 +154,6 @@ INSTRUMENT_JS = r"""
   function counterFromGl(gl,m,size,flip){
     var values=[];for(var i=0;i<17;i++){var ux=(24+40*i)/1920,uy=24/540,lx=ux*size[0],ly=(flip?1-uy:uy)*size[1],p=project(m,gl.drawingBufferWidth,gl.drawingBufferHeight,lx,ly);
       var b={x:Math.max(0,Math.round(p[0])-1),y:Math.max(0,Math.round(p[1])-1),w:3,h:3};b.w=Math.min(3,gl.drawingBufferWidth-b.x);b.h=Math.min(3,gl.drawingBufferHeight-b.y);var read=pixelPatch(gl,b),q=read&&meanAt(read.pixels,b.w,b.h,1,1,2);if(!q)return null;values.push((q[0]+q[1]+q[2])/3)}
-    var fake={pixels:new Uint8ClampedArray(17*4),w:17,h:1};for(var j=0;j<17;j++){fake.pixels[j*4]=fake.pixels[j*4+1]=fake.pixels[j*4+2]=values[j];fake.pixels[j*4+3]=255}
     var lo=Math.min.apply(null,values),hi=Math.max.apply(null,values),cut=(lo+hi)/2,bits=values.map(function(v){return v>cut?1:0});if(hi-lo<80||bits[0]!==1||bits[1]!==0||bits[15]!==0||bits[16]!==1)return null;
     var n=0;for(var k=2;k<14;k++)n=n*2+bits[k];return bits.slice(2,14).reduce(function(a,b){return a+b},0)%2===bits[14]?n:null;
   }
@@ -181,12 +177,12 @@ INSTRUMENT_JS = r"""
     gl.__obedMmFeedProbe=true;
     S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1])});
     var atScene=resolveAtScene(),active=entriesAt(atScene),O={},G={unit:gl.TEXTURE0,bindings:{},program:null,flip:false,premultiply:false,
-      frame:null,serial:S.contexts.length+1,uploads:0,atScene:atScene,entries:active,closed:false};
+      frame:null,serial:S.contexts.length+1,regularUploads:0,atScene:atScene,entries:active,closed:false};
     ['texImage2D','activeTexture','bindTexture','pixelStorei','useProgram','getUniformLocation','uniform1f','uniformMatrix4fv','clear','drawArrays','drawElements'].forEach(function(n){O[n]=gl[n]});
     var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};
     S.contexts.push(contextRecord);S.live.push([gl,G]);
     active.forEach(function(e){entryState[e.id].serial=G.serial;S.media.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial});
-      var v=decoderForEntry(e);if(v){armDecoder(v,e);decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id}}});
+      var v=decoderForEntry(e);if(v){armDecoder(v,e);decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId}}});
     gl.activeTexture=function(u){G.unit=u;return O.activeTexture.apply(gl,arguments)};
     gl.bindTexture=function(target,texture){if(target===gl.TEXTURE_2D)G.bindings[G.unit]=texture;return O.bindTexture.apply(gl,arguments)};
     gl.pixelStorei=function(p,v){if(p===gl.UNPACK_FLIP_Y_WEBGL)G.flip=!!v;if(p===gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL)G.premultiply=!!v;return O.pixelStorei.apply(gl,arguments)};
@@ -198,17 +194,18 @@ INSTRUMENT_JS = r"""
     gl.texImage2D=function(){
       var src=arguments.length<9?arguments[5]:null,w=arguments.length>=9?arguments[3]:src&&(src.videoWidth||src.width||src.naturalWidth),
           h=arguments.length>=9?arguments[4]:src&&(src.videoHeight||src.height||src.naturalHeight),texture=G.bindings[G.unit];
-      G.uploads++;if(G.frame)G.frame.uploads++;
-      if(texture){var previous=textureInfo.get(texture),isVideo=!!(src&&typeof src.currentTime==='number'),poster=previous&&previous.poster;
-        if(!isVideo&&src)try{poster=capture(src,[w,h])}catch(e){noteError('poster capture',e)}
-        textureInfo.set(texture,{serial:G.serial,ordinal:G.uploads,size:[w,h],flip:G.flip,premultiply:G.premultiply,poster:poster,
-          video:isVideo,presentedFrames:src&&src.__obedPresentedFrames,mediaTime:src&&src.__obedMediaTime})}
+      var isVideo=!!(src&&((typeof HTMLVideoElement!=='undefined'&&src instanceof HTMLVideoElement)||(typeof VideoFrame!=='undefined'&&src instanceof VideoFrame)||typeof src.currentTime==='number'));
+      if(G.frame)G.frame.uploads++;
+      if(texture){var previous=textureInfo.get(texture)||{},poster=previous.poster,ordinal=previous.ordinal;
+        if(!isVideo){ordinal=++G.regularUploads;var planned=G.entries.filter(function(e){return [e.feed&&e.feed.from,e.feed&&e.feed.to].some(function(p){return p&&p.upload===ordinal})})[0];if(src&&planned)try{poster=capture(src,[w,h],entryState[planned.id])}catch(e){noteError('poster capture',e)}}
+        var info={serial:G.serial,ordinal:ordinal,size:[w,h],flip:G.flip,premultiply:G.premultiply,poster:poster,video:isVideo,presentedFrames:src&&src.__obedPresentedFrames,mediaTime:src&&src.__obedMediaTime};textureInfo.set(texture,info);
+        if(isVideo)S.uploads.push({serial:G.serial,atScene:G.atScene,t:performance.now(),frameN:G.frame&&G.frame.n,textureOrdinal:ordinal,presentedFrames:info.presentedFrames,mediaTime:info.mediaTime})}
       return O.texImage2D.apply(gl,arguments);
     };
     gl.clear=function(){
       if(G.frame)finishFrame(gl,G);
       G.frame={serial:G.serial,atScene:G.atScene,n:S.frames.length+1,t:performance.now(),draws:0,uploads:0,rows:[],labels:[],riders:[],
-        quads:{},under:[],module:moduleRead(),pixelsDone:false};
+        quads:{},under:[],labelExpected:[],module:moduleRead(),pixelsDone:false};
       return O.clear.apply(gl,arguments);
     };
     function draw(name,args){
@@ -218,14 +215,14 @@ INSTRUMENT_JS = r"""
       if(drawFact&&finite(drawFact.labelBoxOpacity)&&F.quads[draw])G.entries.forEach(function(e){var fed=e.feed&&F.quads[e.feed.draw];if(!fed)return;
         var overlap=bounds(fed,gl.drawingBufferWidth,gl.drawingBufferHeight,0),lb=bounds(F.quads[draw],gl.drawingBufferWidth,gl.drawingBufferHeight,0);
         if(overlap.x>=lb.x+lb.w||lb.x>=overlap.x+overlap.w||overlap.y>=lb.y+lb.h||lb.y>=overlap.y+overlap.h)return;
-        var b=bounds(F.quads[draw],gl.drawingBufferWidth,gl.drawingBufferHeight,4),under=pixelPatch(gl,b);if(under)F.under.push({entryId:e.id,serial:G.serial,atScene:G.atScene,
+        F.labelExpected.push({entryId:e.id,draw:draw});var b=bounds(F.quads[draw],gl.drawingBufferWidth,gl.drawingBufferHeight,4),under=pixelPatch(gl,b);if(under)F.under.push({entryId:e.id,serial:G.serial,atScene:G.atScene,
           draw:draw,opacity:drawFact.labelBoxOpacity,quad:F.quads[draw],under:under})});
       var textures=[0,1].map(function(unit){var tex=G.bindings[gl.TEXTURE0+unit],info=tex&&textureInfo.get(tex);return info?{unit:unit,ordinal:info.ordinal,size:info.size,
         video:info.video,presentedFrames:info.presentedFrames,mediaTime:info.mediaTime,_poster:info.poster,flip:info.flip}:null});
       var result=O[name].apply(gl,args);
       G.entries.filter(function(e){return e.feed&&e.feed.draw===draw}).forEach(function(e){
-        var layerSize=e.feed.from.size,leafSize=textures[0]&&textures[0].size,points=u.MVPMatrix?quad(u.MVPMatrix,gl.drawingBufferWidth,gl.drawingBufferHeight,layerSize):null;
-        var decoder=decoderRead(e),v=decoderForEntry(e),reference=null;try{if(v&&leafSize)reference=capture(v,leafSize)}catch(x){noteError('same-task reference',x)}
+        var layerSize=drawFact&&drawFact.layerSize,leafSize=textures[0]&&textures[0].size,points=u.MVPMatrix&&layerSize?quad(u.MVPMatrix,gl.drawingBufferWidth,gl.drawingBufferHeight,layerSize):null;
+        var decoder=decoderRead(e),v=decoderForEntry(e),reference=null;try{if(v&&leafSize)reference=capture(v,leafSize,entryState[e.id])}catch(x){noteError('same-task reference',x)}
         if(leafSize)entryState[e.id].leafSize=leafSize.slice();
         F.rows.push({serial:G.serial,atScene:G.atScene,entryId:e.id,objectId:e.objectId,dstObjectId:e.dstObjectId,draw:draw,t:F.t,quad:points,_matrix:u.MVPMatrix?u.MVPMatrix.slice():null,_layerSize:layerSize,
           mixFactor:Object.prototype.hasOwnProperty.call(u,'mixFactor')?u.mixFactor:null,decoder:decoder,_reference:reference,
@@ -241,15 +238,14 @@ INSTRUMENT_JS = r"""
   }
   function laterQuads(F,draw){return Object.keys(F.quads).filter(function(k){return +k>draw}).map(function(k){return F.quads[k]})}
   function bestGeneric(gl,F,row){
-    var tex=row.textures[0],textureSize=tex&&tex.size,layerSize=row._layerSize,m=row.quad&&row.quad.length===4&&F.quads[row.draw]?programMatrixForRow(row,F):null;
+    var tex=row.textures[0],textureSize=tex&&tex.size,layerSize=row._layerSize,m=row.quad&&row.quad.length===4&&F.quads[row.draw]?row._matrix:null;
     if(!tex||!textureSize||!layerSize||!m||!row._reference)return {patchInside:false,coveredByLaterDraw:false};
     var later=laterQuads(F,row.draw),best=null,anyInside=false,anyClear=false;
     PATCH_UV.forEach(function(uv){var safe=safeUv(uv,m,layerSize,textureSize,tex.flip,later,gl.drawingBufferWidth,gl.drawingBufferHeight,row.quad);if(!safe.inside)return;anyInside=true;if(safe.covered)return;anyClear=true;
-      var key=keyFor(uv),video=row._reference.vectors[key],poster=tex._poster&&tex._poster.vectors[key],final=vectorFromGl(gl,m,layerSize,textureSize,uv,tex.flip),dPoster=distance(final,poster);
-      if(final&&video&&finite(dPoster)&&(!best||dPoster>best.dPoster))best={uv:uv,final:final,video:video,poster:poster,dPoster:dPoster}});
+      var key=keyFor(uv),video=row._reference.vectors[key],poster=tex._poster&&tex._poster.vectors[key],final=vectorFromGl(gl,m,layerSize,textureSize,uv,tex.flip),dSep=distance(video,poster);
+      if(final&&video&&finite(dSep)&&(!best||dSep>best.dSep))best={uv:uv,final:final,video:video,poster:poster,dSep:dSep}});
     return best?{patchInside:true,coveredByLaterDraw:false,choice:best}:{patchInside:anyInside,coveredByLaterDraw:anyInside&&!anyClear};
   }
-  function programMatrixForRow(row,F){return row._matrix||null}
   function counterSafe(gl,F,row,m,size,flip){
     var later=laterQuads(F,row.draw),inside=true,covered=false;
     for(var i=0;i<17;i++){var ux=(24+40*i)/1920,uy=24/540,p=project(m,gl.drawingBufferWidth,gl.drawingBufferHeight,ux*size[0],(flip?1-uy:uy)*size[1]);
@@ -259,31 +255,35 @@ INSTRUMENT_JS = r"""
   function holdMatch(entry,row,choice){
     var candidates=(entryState[entry.id]&&entryState[entry.id].ring||[]).map(function(ref){return {frame:ref.frame,vector:choice&&ref.patches&&ref.patches.vectors[keyFor(choice.uv)]}}).filter(function(x){return x.vector});
     if(choice&&choice.poster)candidates.push({frame:0,vector:choice.poster});var scored=candidates.map(function(x){return {frame:x.frame,distance:distance(choice&&choice.final,x.vector)}}).filter(function(x){return finite(x.distance)}).sort(function(a,b){return a.distance-b.distance});
-    return scored.length>=2?{bestFrame:scored[0].frame,matchDistance:scored[0].distance,matchMargin:scored[1].distance-scored[0].distance,requiredMargin:6.0}:null;
+    return scored.length>=2?{kind:'alpha',bestFrame:scored[0].frame,matchDistance:scored[0].distance,matchMargin:scored[1].distance-scored[0].distance}:null;
   }
   function holdCounterMatch(entry,row,value){
     var candidates=(entryState[entry.id]&&entryState[entry.id].ring||[]).map(function(ref){return {frame:ref.frame,counter:ref.patches&&ref.patches.counter}}).filter(function(x){return Number.isInteger(x.counter)});
     var poster=row.textures[0]&&row.textures[0]._poster&&row.textures[0]._poster.counter;if(Number.isInteger(poster))candidates.push({frame:0,counter:poster});
     var scored=candidates.map(function(x){return {frame:x.frame,distance:Math.abs(value-x.counter)}}).sort(function(a,b){return a.distance-b.distance});
-    return Number.isInteger(value)&&scored.length>=2?{bestFrame:scored[0].frame,matchDistance:scored[0].distance,matchMargin:scored[1].distance-scored[0].distance,requiredMargin:1.0}:null;
+    return Number.isInteger(value)&&scored.length>=2?{kind:'counter',bestFrame:scored[0].frame,matchDistance:scored[0].distance,matchMargin:scored[1].distance-scored[0].distance}:null;
   }
   function finalizePixels(gl,G,F){
     if(F.pixelsDone)return;F.pixelsDone=true;
     F.rows.forEach(function(row){var entry=G.entries.filter(function(e){return e.id===row.entryId})[0],tex=row.textures[0],m=row._matrix;
-      if(!entry||!tex||!m){row.feedRead={patchInside:false,coveredByLaterDraw:false};delete row._reference;return}
+      if(!entry||!tex||!m){row.feedRead={patchInside:false,coveredByLaterDraw:false,kind:null,late:true};delete row._reference;return}
       var counterSafeRead=counterSafe(gl,F,row,m,row._layerSize,tex.flip),counter=row._reference&&row._reference.counter;
       if(counter!==null&&counter!==undefined){var finalCounter=counterFromGl(gl,m,row._layerSize,tex.flip);row.feedRead={patchInside:counterSafeRead.inside,coveredByLaterDraw:counterSafeRead.covered,kind:'counter',
         counter:finalCounter,referenceCounter:counter};row.holdMatch=holdCounterMatch(entry,row,finalCounter)}
       else{var selected=bestGeneric(gl,F,row),choice=selected.choice;row.feedRead={patchInside:selected.patchInside,coveredByLaterDraw:selected.coveredByLaterDraw,kind:'alpha',
-        dVideo:choice?distance(choice.final,choice.video):null,dPoster:choice?distance(choice.final,choice.poster):null};row.holdMatch=choice?holdMatch(entry,row,choice):null}
+        dVideo:choice?distance(choice.final,choice.video):null,dPoster:choice?distance(choice.final,choice.poster):null,dSep:choice?choice.dSep:null};row.holdMatch=choice?holdMatch(entry,row,choice):null}
       delete row._reference;row.textures.forEach(function(t){if(t)delete t._poster});delete row._matrix;delete row._layerSize;
     });
     F.under.forEach(function(read){var after=pixelPatch(gl,read.under.rect),row=labelStats(read,after,laterQuads(F,read.draw));if(row)F.labels.push(row)});F.under=[];
   }
   function finishFrame(gl,G){
     var F=G.frame;if(!F)return;
-    if(!F.pixelsDone)finalizePixels(gl,G,F);
-    var errors=[],guard=0,code;while((code=gl.getError())!==gl.NO_ERROR&&guard++<8)errors.push(code);F.glErrors=errors;S.frames.push(F);G.frame=null;
+    if(!F.pixelsDone){F.rows.forEach(function(row){row.feedRead={patchInside:false,coveredByLaterDraw:false,kind:null,late:true};row.holdMatch=null;delete row._reference;delete row._matrix;delete row._layerSize});F.under=[]}
+    F.glErrors=[];S.frames.push(F);G.frame=null;
+  }
+  function installKillSwitch(){
+    if(!S.config||!S.config.killHoldUpload)return;var api=window.__OBED_MM_FEED__;
+    if(api&&typeof api.once==='function'&&!api.__obedProbeOnce){api.__obedProbeOnce=api.once;api.once=function(id){S.killedOnce.push({objectId:id,t:performance.now()});return false}}
   }
   HTMLCanvasElement.prototype.getContext=function(type){
     var gl=originalGetContext.apply(this,arguments);
@@ -291,18 +291,22 @@ INSTRUMENT_JS = r"""
     return gl;
   };
   function configure(config){
-    S.config=config||{};S.tamper=S.config.tamper||null;
+    if(S.config)return true;
+    S.config=config||{};S.tamper=S.config.tamper?{kind:S.config.tamper,atScene:Number.isInteger(S.config.tamperScene)?S.config.tamperScene:null}:null;
     S.entries=(Array.isArray(S.config.entries)?S.config.entries:[]).map(function(source){var e=JSON.parse(JSON.stringify(source));e.feed=runtimeFeed(e);return e});
     entries().forEach(function(e){entryState[e.id]={ring:[]};var v=decoderFor(e.objectId);if(v)armDecoder(v,e)});
-    if(S.config.killHoldUpload){
-      var api=window.__OBED_MM_FEED__;
-      if(api&&typeof api.once==='function'&&!api.__obedProbeOnce){var once=api.once;api.__obedProbeOnce=once;api.once=function(id){S.killedOnce.push({objectId:id,t:performance.now()});return false}}
-    }
-    if(S.tamper==='after-feed')requestAnimationFrame(afterFeedTamper);
+    S.live.forEach(function(pair){var G=pair[1],atScene=resolveAtScene(),active=entriesAt(atScene),context=S.contexts.filter(function(c){return c.serial===G.serial})[0];G.atScene=atScene;G.entries=active;if(context){context.atScene=atScene;context.entryIds=active.map(function(e){return e.id})}active.forEach(function(e){entryState[e.id].serial=G.serial;var v=decoderForEntry(e);if(v)decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId}})});
+    installKillSwitch();
+    if(S.tamper&&S.tamper.kind==='after-feed')requestAnimationFrame(afterFeedTamper);
+    return true;
+  }
+  function bootstrap(config){
+    if(window.__OBED_CONTINUITY__)return configure(config);var value;
+    try{Object.defineProperty(window,'__OBED_CONTINUITY__',{configurable:true,get:function(){return value},set:function(plan){value=plan;Object.defineProperty(window,'__OBED_CONTINUITY__',{configurable:true,writable:true,value:plan});configure(config)}})}catch(e){noteError('bootstrap',e)}
     return true;
   }
   function afterFeedTamper(){
-    var api=moduleRead(),found=api&&api.entries&&Object.keys(api.entries).find(function(k){var e=api.entries[k];return e&&e.framesFed>0&&e.state!=='stoodDown'});
+    var found=entries().filter(function(e){return S.tamper&&(!Number.isInteger(S.tamper.atScene)||e.atScene===S.tamper.atScene)&&S.uploads.some(function(u){return u.atScene===e.atScene&&[e.feed&&e.feed.from,e.feed&&e.feed.to].some(function(p){return p&&p.upload===u.textureOrdinal})})})[0];found=found&&found.objectId;
     if(found){
       var v=decoderFor(found),start=v&&v.__obedPresentedFrames;
       if(v&&typeof v.requestVideoFrameCallback==='function')v.requestVideoFrameCallback(function(){
@@ -311,31 +315,40 @@ INSTRUMENT_JS = r"""
         S.tamper.triggerPresented=v.__obedPresentedFrames;S.tamper.triggeredAt=performance.now();
         if(typeof original==='function')seam.decoderFor=function(id){return id===found?null:original.call(seam,id)};
       });
-      S.tamper={kind:'after-feed',objectId:found,lastPresented:start,armedAt:performance.now()};return;
+      S.tamper=Object.assign({},S.tamper,{objectId:found,lastPresented:start,armedAt:performance.now()});return;
     }
     requestAnimationFrame(afterFeedTamper);
   }
-  function riderTick(){
-    S.live.forEach(function(pair){var gl=pair[0],G=pair[1],F=G.frame,canvas=gl.canvas;if(!F||G.closed||!canvas||!canvas.isConnected)return;var cr=canvas.getBoundingClientRect();
-      G.entries.forEach(function(e){var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
-        opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})});
-    settledArtwork();S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G)});requestAnimationFrame(riderTick);
+  function armSeam(){
+    var feed=window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.feed;if(!feed||feed.__obedMmFeedProbe)return;
+    feed.__obedMmFeedProbe=true;var claim=feed.claim,stand=feed.onStandDown;
+    if(typeof claim==='function')feed.claim=function(objectId){var result=claim.apply(feed,arguments),entry=entries().filter(function(e){return e.objectId===objectId})[0];S.claims.push({objectId:objectId,entryId:entry&&entry.id,atScene:entry&&entry.atScene,t:performance.now(),claimed:result===true});return result};
+    if(typeof stand==='function')feed.onStandDown=function(objectId,reason){var result=stand.apply(feed,arguments),entry=entries().filter(function(e){return e.objectId===objectId})[0];S.standDowns.push({objectId:objectId,entryId:entry&&entry.id,atScene:entry&&entry.atScene,t:performance.now(),reason:reason==null?null:String(reason),accepted:result===true});return result};
   }
+  function riderTick(){
+    armSeam();installKillSwitch();
+    S.live.forEach(function(pair){var gl=pair[0],G=pair[1],F=G.frame,canvas=gl.canvas;if(!F||G.closed||!canvas||!canvas.isConnected)return;var cr=canvas.getBoundingClientRect();
+      G.entries.forEach(function(e){if(F.riders.some(function(r){return r.entryId===e.id}))return;var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
+        opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})});
+    S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G)});settledArtwork();requestAnimationFrame(riderTick);
+  }
+  function rectsOverlap(a,b){return a&&b&&a.left<b.x+b.w&&a.right>b.x&&a.top<b.y+b.h&&a.bottom>b.y}
   function settledArtwork(){
-    entries().forEach(function(e){var state=entryState[e.id];if(!state||state.artworkDone||!Array.isArray(e.artwork)||!e.artwork.length)return;var v=decoderForEntry(e);
+    entries().forEach(function(e){var state=entryState[e.id];if(!state||state.artworkDone||!state.serial||S.live.some(function(pair){return pair[1].serial===state.serial&&pair[1].frame})||!Array.isArray(e.artwork)||!e.artwork.length)return;var v=decoderForEntry(e);
       if(!v||String(v.__obedInstance)!==String(e.dstObjectId)||!visible(v))return;var vr=v.getBoundingClientRect(),stage=document.getElementById('stage'),sr=stage&&stage.getBoundingClientRect(),info=window.__OBED_CONTINUITY_INFO__;
       if(!sr||!info||!info.authoredWidth||!info.authoredHeight)return;var serial=state.serial||null,rows=[];
       e.artwork.forEach(function(fact){var r=fact.rect;if(!r)return;var ar={x:sr.x+r.x*sr.width/info.authoredWidth,y:sr.y+r.y*sr.height/info.authoredHeight,w:r.w*sr.width/info.authoredWidth,h:r.h*sr.height/info.authoredHeight};
         var left=Math.max(vr.left,ar.x),right=Math.min(vr.right,ar.x+ar.w),top=Math.max(vr.top,ar.y),bottom=Math.min(vr.bottom,ar.y+ar.h);if(right<=left||bottom<=top)return;
         var x=(left+right)/2,y=(top+bottom)/2;if(!finite(x)||!finite(y))return;
-        var stack=document.elementsFromPoint(x,y),vi=stack.findIndex(function(node){return node===v||node.contains&&node.contains(v)||v.contains&&v.contains(node)});
-        rows.push({entryId:e.id,serial:serial,atScene:e.atScene,artworkAbove:vi>0})});if(rows.length){S.artwork=S.artwork.concat(rows);state.artworkDone=true}}
+        var style=document.createElement('style'),stack=[],vi=-1;style.textContent='*{pointer-events:auto!important}';try{(document.head||document.documentElement).appendChild(style);stack=document.elementsFromPoint(x,y);vi=stack.indexOf(v)}finally{if(style.parentNode)style.parentNode.removeChild(style)}
+        rows.push({entryId:e.id,serial:serial,atScene:e.atScene,artworkAbove:vi<0?null:stack.slice(0,vi).some(function(n){return !(n.contains&&n.contains(v))&&rectsOverlap(n.getBoundingClientRect&&n.getBoundingClientRect(),ar)})})});if(rows.length){S.artwork=S.artwork.concat(rows);state.artworkDone=true}}
     );
   }
+  function p95(values){if(!values.length)return null;var a=values.slice().sort(function(x,y){return x-y}),p=(a.length-1)*.95,l=Math.floor(p),h=Math.ceil(p);return l===h?a[l]:a[l]+(a[h]-a[l])*(p-l)}
   requestAnimationFrame(riderTick);
-  window.__obedMmFeedProbe={version:1,configure:configure,report:function(){return {kind:'mm-feed',version:1,config:S.config,
-    contexts:S.contexts,frames:S.frames.slice().sort(function(a,b){return a.t-b.t}),holds:S.holds,media:S.media,artwork:S.artwork,errors:S.errors,
-    module:moduleRead(),tamper:S.tamper,killedOnce:S.killedOnce}}};
+  window.__obedMmFeedProbe={version:1,bootstrap:bootstrap,configure:configure,report:function(){S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1])});return {kind:'mm-feed',version:1,config:S.config,
+    contexts:S.contexts,frames:S.frames.slice().sort(function(a,b){return a.t-b.t}),media:S.media.filter(function(row){return row.serial!==null}),mediaOverflow:S.mediaOverflow,artwork:S.artwork,errors:S.errors,
+    uploads:S.uploads,claims:S.claims,standDowns:S.standDowns,departures:S.departures,callbackCostP95Ms:p95(S.costs),module:moduleRead(),tamper:S.tamper,killedOnce:S.killedOnce}}};
 })();
 """
 
@@ -373,199 +386,238 @@ def verdict_records(
         (row for row in report.get("frames") or [] if isinstance(row, dict)),
         key=lambda row: row.get("t") if _finite(row.get("t")) else math.inf,
     )
-    module = report.get("module") if isinstance(report.get("module"), dict) else {}
-    module_entries = module.get("entries") if isinstance(module.get("entries"), dict) else {}
     media_rows = [row for row in report.get("media") or [] if isinstance(row, dict)]
     artwork_rows = [row for row in report.get("artwork") or [] if isinstance(row, dict)]
+    uploads = [row for row in report.get("uploads") or [] if isinstance(row, dict)]
+    claims = [row for row in report.get("claims") or [] if isinstance(row, dict)]
+    stand_downs = [row for row in report.get("standDowns") or [] if isinstance(row, dict)]
+    departures = [row for row in report.get("departures") or [] if isinstance(row, dict)]
+    media_overflow = report.get("mediaOverflow")
     records: dict[str, dict[str, Any]] = {}
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
             continue
         entry_id = entry["id"]
-        object_id = entry.get("objectId")
         moves = [
             context for context in contexts
             if context.get("atScene") == entry.get("atScene")
             and entry_id in (context.get("entryIds") or [])
         ]
-        serial = moves[0].get("serial") if len(moves) == 1 else None
-        move_frames = [
-            frame for frame in frames
-            if frame.get("serial") == serial and frame.get("atScene") == entry.get("atScene")
-        ]
-        rows = [
-            row for frame in move_frames for row in frame.get("rows") or []
-            if isinstance(row, dict) and row.get("entryId") == entry_id
-        ]
-        usable = len(moves) == 1 and moves[0].get("lost") is False
-        planned = entry.get("feed") if isinstance(entry.get("feed"), dict) else {}
-        expected = [planned.get("from"), planned.get("to")]
-        expected = [value for value in expected if isinstance(value, dict)]
-        bound = bool(rows) and all(any(
-            isinstance(texture, dict) and texture.get("ordinal") == wanted.get("upload")
-            and texture.get("size") == wanted.get("size")
-            for row in rows for texture in row.get("textures") or []
-        ) for wanted in expected)
-        times = sorted(float(row["t"]) for row in rows if _finite(row.get("t")))
-        interval = {"start": times[0], "end": times[-1]} if len(times) > 1 and times[-1] > times[0] else None
-        telemetry = module_entries.get(object_id) if isinstance(module_entries.get(object_id), dict) else {}
-        state = telemetry.get("state")
-        module_mode = telemetry.get("mode")
-        mode = "standDown" if state == "stoodDown" else module_mode
-        if mode not in ("continuous", "once", "departure", "standDown"):
-            mode = None
-        riders = [
-            rider for frame in move_frames for rider in frame.get("riders") or []
-            if isinstance(rider, dict) and rider.get("entryId") == entry_id
-        ]
-        labels = [
-            label for frame in move_frames for label in frame.get("labels") or []
-            if isinstance(label, dict) and label.get("entryId") == entry_id
-        ]
-        presented = [
-            row["decoder"].get("presentedFrames") for row in rows if isinstance(row.get("decoder"), dict)
-            and _finite(row["decoder"].get("presentedFrames"))
-        ]
-        sampled = [(row["t"], row.get("feedRead")) for row in rows if _finite(row.get("t")) and isinstance(row.get("feedRead"), dict)]
-        feed_reads: list[dict[str, Any]] = []
-        if len(sampled) >= 3 and sampled[-1][0] > sampled[0][0]:
-            start, end = sampled[0][0], sampled[-1][0]
-            for progress in READ_PROGRESS:
-                _, read = min(sampled, key=lambda pair: abs((pair[0] - start) / (end - start) - progress))
-                feed_reads.append({"progress": progress, **read})
-        hold_sampled = [(row["t"], row.get("holdMatch")) for row in rows if _finite(row.get("t")) and isinstance(row.get("holdMatch"), dict)]
-        hold_reads: list[dict[str, Any]] = []
-        if len(hold_sampled) >= 3:
-            chosen = (hold_sampled[0], hold_sampled[len(hold_sampled) // 2], hold_sampled[-1])
-            hold_reads = [{"phase": phase, **row[1]} for phase, row in zip(("first", "middle", "last"), chosen, strict=True)]
-        common = {"usableContext": usable, "boundTextures": bound, "interval": interval}
-        feed = {
-            **common, "mode": module_mode, "reads": feed_reads, "presentedFrames": presented,
-            "advancing": len(set(presented)) > 1,
-            "continuousCoverage": module_mode == "continuous" and telemetry.get("framesFed", 0) > 0 and state != "stoodDown",
-            "maxInterFeedGapMs": telemetry.get("maxInterFeedGapMs"),
-            "maxInterFeedGapLimitMs": telemetry.get("maxInterFeedGapLimitMs"),
-        }
-        media = [
-            row for row in media_rows
-            if row.get("entryId") == entry_id and row.get("serial") == serial and row.get("atScene") == entry.get("atScene")
-        ]
-        pause = next((row for row in media if row.get("kind") == "pause" and _finite(row.get("t"))), None)
-        play = next((row for row in media if row.get("kind") == "play" and pause and row.get("t", -math.inf) > pause["t"]), None)
-        after = next((row for row in media if row.get("kind") == "videoFrame" and play and row.get("t", -math.inf) >= play["t"]), None)
-        before_times = [
-            row.get("mediaTime") for row in media
-            if row.get("kind") == "videoFrame" and pause and row.get("t", math.inf) <= pause["t"] and _finite(row.get("mediaTime"))
-        ]
-        durations = [b - a for a, b in zip(before_times, before_times[1:]) if b > a]
-        frame_duration = sorted(durations)[len(durations) // 2] if durations else None
-        last_upload = telemetry.get("lastUploadedFrame")
-        poster: dict[str, Any] = {"mode": "standDown" if mode == "standDown" else "departure"}
-        if pause and play and after and _finite(frame_duration):
-            poster.update({
-                "pauseTime": pause["t"], "settleTime": play["t"],
-                "pauseCurrentTime": pause.get("currentTime"), "settleCurrentTime": play.get("currentTime"),
-                "pauseFrame": pause.get("presentedFrames"), "firstAfterFrame": after.get("presentedFrames"),
-                "pauseMediaTime": pause.get("mediaTime"), "firstAfterMediaTime": after.get("mediaTime"),
-                "frameDurationS": frame_duration, "clockToleranceS": frame_duration * 0.49,
-                "seeked": any(row.get("kind") == "seeking" and pause["t"] <= row.get("t", -math.inf) <= play["t"] for row in media),
-                "resumedFromZero": after.get("mediaTime", 1) <= 0, "lastUploadedFrame": last_upload,
-            })
-        module_samples = []
-        for frame in move_frames:
-            snapshot = frame.get("module") if isinstance(frame.get("module"), dict) else {}
-            snapshot_entries = snapshot.get("entries") if isinstance(snapshot.get("entries"), dict) else {}
-            sample = snapshot_entries.get(object_id)
-            if isinstance(sample, dict):
-                module_samples.append(sample)
-        stood_down = next((sample for sample in module_samples if sample.get("state") == "stoodDown"), None)
-        advanced = isinstance(last_upload, int) and any(
-            row.get("kind") == "videoFrame" and _finite(row.get("presentedFrames")) and row["presentedFrames"] > last_upload
-            for row in media
-        )
-        hold = {
-            **common, "mode": "standDown" if mode == "standDown" else "departure", "reads": hold_reads,
-            "lastPresentedBeforeDeparture": pause.get("presentedFrames") if pause else None,
-            "lastUploadedFrame": last_upload, "successfulFeed": telemetry.get("framesFed", 0) > 0,
-            "advancedDecoder": advanced,
-            "reuploadAfterStandDown": None if stood_down is None else any(
-                sample.get("framesFed") != stood_down.get("framesFed") for sample in module_samples[module_samples.index(stood_down):]
-            ),
-        }
-        artwork = [
-            row for row in artwork_rows
-            if row.get("entryId") == entry_id and row.get("atScene") == entry.get("atScene")
-            and (row.get("serial") is None or row.get("serial") == serial)
-        ]
-        records[entry_id] = {
-            "mode": mode, **common, "continuousExpected": continuous_expected,
-            "feed": feed, "rider": {"riders": riders}, "labels": {"labels": labels},
-            "hold": hold, "poster": poster,
-            "artwork": {"reads": artwork},
-        }
+        visits = [_visit_record(
+            report, entry, move, frames, media_rows, artwork_rows, uploads, claims, stand_downs, departures,
+            continuous_expected=continuous_expected, media_overflow=media_overflow,
+        ) for move in moves]
+        if len(visits) == 1:
+            records[entry_id] = visits[0]
+        elif visits:
+            records[entry_id] = {"mode": visits[0]["mode"] if all(v["mode"] == visits[0]["mode"] for v in visits) else "unavailable",
+                                 "reason": "repeated visits are scored independently", "visits": visits,
+                                 "continuousExpected": continuous_expected}
     return records
 
 
+def _visit_record(
+    report: dict[str, Any], entry: dict[str, Any], move: dict[str, Any], frames: list[dict[str, Any]],
+    media_rows: list[dict[str, Any]], artwork_rows: list[dict[str, Any]], uploads: list[dict[str, Any]],
+    claims: list[dict[str, Any]], stand_downs: list[dict[str, Any]], departures: list[dict[str, Any]], *,
+    continuous_expected: bool, media_overflow: Any,
+) -> dict[str, Any]:
+    entry_id, serial, at_scene = entry["id"], move.get("serial"), entry.get("atScene")
+    move_frames = [f for f in frames if f.get("serial") == serial and f.get("atScene") == at_scene]
+    rows_by_frame = [[r for r in f.get("rows") or [] if isinstance(r, dict) and r.get("entryId") == entry_id]
+                     for f in move_frames]
+    rows = [r for group in rows_by_frame for r in group]
+    usable = move.get("lost") is False
+    planned = entry.get("feed") if isinstance(entry.get("feed"), dict) else {}
+    expected = [v for v in (planned.get("from"), planned.get("to")) if isinstance(v, dict)]
+    expected_ordinals = {v.get("upload") for v in expected if isinstance(v.get("upload"), int)}
+    bound = bool(rows) and all(any(
+        isinstance(texture, dict) and texture.get("ordinal") == wanted.get("upload") and texture.get("size") == wanted.get("size")
+        for row in rows for texture in row.get("textures") or []
+    ) for wanted in expected)
+    times = sorted(float(r["t"]) for r in rows if _finite(r.get("t")))
+    interval = {"start": times[0], "end": times[-1]} if len(times) > 1 and times[-1] > times[0] else None
+    matching = lambda row: row.get("entryId") == entry_id or (row.get("entryId") is None and row.get("objectId") == entry.get("objectId"))
+    entry_claims = [r for r in claims if matching(r) and r.get("atScene") == at_scene]
+    entry_stands = [r for r in stand_downs if matching(r) and r.get("atScene") == at_scene and r.get("accepted") is True]
+    entry_departures = [r for r in departures if matching(r) and r.get("atScene") == at_scene and (r.get("serial") in (None, serial))]
+    if entry_stands:
+        mode, reason = "standDown", None
+    elif any(r.get("claimed") is True for r in entry_claims):
+        mode, reason = "continuous", None
+    elif entry_departures:
+        mode, reason = "departure", None
+    else:
+        mode, reason = "unavailable", "the core feed seam did not identify a feed or departure mode"
+    entry_uploads = [r for r in uploads if r.get("serial") == serial and r.get("atScene") == at_scene
+                     and r.get("textureOrdinal") in expected_ordinals]
+    move_uploads = [r for r in entry_uploads if times and _finite(r.get("t")) and times[0] <= r["t"] <= times[-1]]
+    upload_times = sorted(float(r["t"]) for r in move_uploads if _finite(r.get("t")))
+    gaps = [b - a for a, b in zip(upload_times, upload_times[1:])]
+    wanted_frame_ns = {f.get("n") for f, group in zip(move_frames, rows_by_frame, strict=True) if group and _finite(f.get("n"))}
+    fed_frame_ns = {r.get("frameN") for r in move_uploads if _finite(r.get("frameN"))}
+    last_upload = next((r.get("presentedFrames") for r in reversed(entry_uploads) if _finite(r.get("presentedFrames"))), None)
+    stand = entry_stands[0] if entry_stands else None
+    reupload = None if stand is None else any(_finite(r.get("t")) and r["t"] > stand.get("t", math.inf) for r in entry_uploads)
+    presented = [r["decoder"].get("presentedFrames") for r in rows if isinstance(r.get("decoder"), dict)
+                 and _finite(r["decoder"].get("presentedFrames"))]
+    sampled = [(r["t"], r.get("feedRead")) for r in rows if _finite(r.get("t")) and isinstance(r.get("feedRead"), dict)]
+    feed_reads: list[dict[str, Any]] = []
+    if len(sampled) >= 3 and sampled[-1][0] > sampled[0][0]:
+        start, end = sampled[0][0], sampled[-1][0]
+        for progress in READ_PROGRESS:
+            _, read = min(sampled, key=lambda pair: abs((pair[0] - start) / (end - start) - progress))
+            feed_reads.append({"progress": progress, **read})
+    rider_rows = [[r for r in f.get("riders") or [] if isinstance(r, dict) and r.get("entryId") == entry_id]
+                  for f in move_frames]
+    riders = [r for group in rider_rows for r in group]
+    rider_coverage = bool(move_frames) and all(len(group) == 1 and _rider_readable(group[0]) for group in rider_rows)
+    labels = [r for f in move_frames for r in f.get("labels") or [] if isinstance(r, dict) and r.get("entryId") == entry_id]
+    label_coverage = bool(move_frames) and all(
+        len([r for r in f.get("labels") or [] if isinstance(r, dict) and r.get("entryId") == entry_id])
+        == len([r for r in f.get("labelExpected") or [] if isinstance(r, dict) and r.get("entryId") == entry_id])
+        for f in move_frames
+    )
+    first_t = min((f["t"] for f in move_frames if _finite(f.get("t"))), default=None)
+    last_t = max((f["t"] for f in move_frames if _finite(f.get("t"))), default=None)
+    media = [r for r in media_rows if r.get("entryId") == entry_id and r.get("serial") == serial and r.get("atScene") == at_scene]
+    resume = next((r for r in media if r.get("kind") == "play" and _finite(r.get("t")) and _finite(last_t) and r["t"] > last_t), None)
+    pauses = [r for r in media if r.get("kind") == "pause" and resume and _finite(r.get("t")) and r["t"] < resume["t"]
+              and not any(p.get("kind") == "play" and _finite(p.get("t")) and r["t"] < p["t"] < resume["t"] for p in media)]
+    pause = pauses[-1] if pauses else None
+    after = next((r for r in media if r.get("kind") == "videoFrame" and resume and _finite(r.get("t")) and r["t"] >= resume["t"]), None)
+    video_times = [r.get("mediaTime") for r in media if r.get("kind") == "videoFrame" and _finite(r.get("mediaTime"))]
+    durations = [b - a for a, b in zip(video_times, video_times[1:]) if b > a]
+    frame_duration = sorted(durations)[len(durations) // 2] if durations else None
+    clock_rows = [r.get("decoder") for r in rows if _finite(r.get("t")) and (
+        pause is None or r["t"] >= pause["t"]
+    ) and (not resume or r["t"] <= resume["t"])]
+    clock_readable = bool(clock_rows) and all(isinstance(d, dict) and _finite(d.get("currentTime"))
+                                               and _finite(d.get("presentedFrames")) and isinstance(d.get("paused"), bool)
+                                               for d in clock_rows)
+    clock_still = clock_readable and all(d["paused"] is True for d in clock_rows) and len({d["currentTime"] for d in clock_rows}) == 1 \
+        and len({d["presentedFrames"] for d in clock_rows}) == 1
+    poster: dict[str, Any] = {
+        "mode": "standDown" if mode == "standDown" else "departure", "mediaOverflow": media_overflow,
+        "holdPauseMissing": pause is None, "clockReadable": clock_readable, "clockStill": clock_still,
+        "departurePauseBeforeMove": bool(pause and _finite(first_t) and pause["t"] <= first_t),
+        "lastUploadedFrame": last_upload, "successfulFeed": bool(entry_uploads),
+    }
+    if pause and resume and after and _finite(frame_duration):
+        poster.update({
+            "pauseTime": pause["t"], "settleTime": resume["t"], "pauseCurrentTime": pause.get("currentTime"),
+            "settleCurrentTime": clock_rows[-1].get("currentTime") if clock_readable else resume.get("currentTime"),
+            "pauseFrame": pause.get("presentedFrames"), "firstAfterFrame": after.get("presentedFrames"),
+            "pauseMediaTime": pause.get("mediaTime"), "firstAfterMediaTime": after.get("mediaTime"),
+            "frameDurationS": frame_duration, "clockToleranceS": frame_duration * .49,
+            "seeked": any(r.get("kind") == "seeking" and pause["t"] <= r.get("t", -math.inf) <= resume["t"] for r in media),
+            "resumedFromZero": after.get("mediaTime", 1) <= 0,
+        })
+    window_frames = move_frames if mode != "standDown" or stand is None else [f for f in move_frames if _finite(f.get("t")) and f["t"] >= stand["t"]]
+    chosen_frames = [] if not window_frames else [window_frames[0], window_frames[len(window_frames) // 2], window_frames[-1]]
+    hold_reads: list[dict[str, Any]] = []
+    if len(chosen_frames) == 3:
+        selected = []
+        for frame in chosen_frames:
+            match = next((r.get("holdMatch") for r in frame.get("rows") or [] if isinstance(r, dict) and r.get("entryId") == entry_id), None)
+            selected.append(match)
+        if all(isinstance(match, dict) for match in selected):
+            hold_reads = [{"phase": phase, **match} for phase, match in zip(("first", "middle", "last"), selected, strict=True)]
+    common = {"usableContext": usable, "boundTextures": bound, "interval": interval}
+    feed = {
+        **common, "mode": mode, "reads": feed_reads, "presentedFrames": presented,
+        "framesFed": len(move_uploads), "continuousCoverage": mode == "continuous" and bool(wanted_frame_ns)
+        and wanted_frame_ns <= fed_frame_ns,
+        "maxInterFeedGapMs": max(gaps, default=0.0),
+    }
+    advanced = isinstance(last_upload, (int, float)) and any(r.get("kind") == "videoFrame" and _finite(r.get("presentedFrames"))
+                                                               and r["presentedFrames"] > last_upload for r in media)
+    hold = {
+        **common, "mode": "standDown" if mode == "standDown" else "departure", "reads": hold_reads,
+        "lastPresentedBeforeDeparture": pause.get("presentedFrames") if pause else None, "lastUploadedFrame": last_upload,
+        "successfulFeed": bool(entry_uploads), "advancedDecoder": advanced, "reuploadAfterStandDown": reupload,
+        "mediaOverflow": media_overflow,
+    }
+    artwork = [r for r in artwork_rows if r.get("entryId") == entry_id and r.get("atScene") == at_scene
+               and r.get("serial") == serial]
+    return {
+        "mode": mode, "reason": reason, **common, "continuousExpected": continuous_expected,
+        "feed": feed, "rider": {"riders": riders, "coverage": rider_coverage},
+        "labels": {"labels": labels, "coverage": label_coverage}, "hold": hold, "poster": poster,
+        "artwork": {"reads": artwork}, "module": report.get("module"),
+    }
+
+
+def _rider_readable(row: Any) -> bool:
+    return isinstance(row, dict) and isinstance(row.get("visible"), bool) and _finite(row.get("opacityProduct")) \
+        and isinstance(row.get("intersectsCanvas"), bool)
+
+
 def score_feed_live(record: Any, *, continuous_expected: bool = True, alpha_floor: float = ALPHA_POSTER_FLOOR) -> dict[str, Any]:
+    def finish(value: bool | None, reason: str | None = None, **detail: Any) -> dict[str, Any]:
+        return _verdict(value, reason, alphaFloor=alpha_floor, provisional=True, **detail)
+
     if not isinstance(record, dict):
-        return _verdict(None, "feed evidence is missing")
-    if continuous_expected and record.get("mode") not in ("continuous", "once"):
-        return _verdict(None, "the feed mode is unreadable", mode=record.get("mode"))
+        return finish(None, "feed evidence is missing")
+    if continuous_expected and record.get("mode") in (None, "unavailable"):
+        return finish(None, "the feed mode is unreadable", mode=record.get("mode"))
     if continuous_expected and record.get("mode") != "continuous":
-        return _verdict(False, "continuous feed was expected", mode=record.get("mode"))
+        return finish(False, "continuous feed was expected", mode=record.get("mode"))
     if continuous_expected and record.get("continuousCoverage") is False:
-        return _verdict(False, "continuous upload coverage is incomplete")
+        return finish(False, "continuous upload coverage is incomplete")
     reads = record.get("reads")
     if not isinstance(reads, list):
-        return _verdict(None, "feed reads are unreadable")
+        return finish(None, "feed reads are unreadable")
     wanted = set(READ_PROGRESS)
     got = {float(r.get("progress")) for r in reads if isinstance(r, dict) and _finite(r.get("progress"))}
     if got != wanted:
-        return _verdict(None, f"feed reads cover {sorted(got)}, expected {sorted(wanted)}")
+        return finish(None, f"feed reads cover {sorted(got)}, expected {sorted(wanted)}")
     if record.get("usableContext") is not True or record.get("boundTextures") is not True:
-        return _verdict(None, "the GL context or bound textures were unavailable")
+        return finish(None, "the GL context or bound textures were unavailable")
     checks: list[dict[str, Any]] = []
     ambiguous = False
     for read in sorted(reads, key=lambda r: r["progress"]):
         if read.get("patchInside") is not True or read.get("coveredByLaterDraw") is not False:
-            return _verdict(None, "a feed patch is outside the leaf or covered by a later draw", reads=reads)
+            return finish(None, "a feed patch is outside the leaf or covered by a later draw", reads=reads)
         kind = read.get("kind")
         if kind == "counter":
             if not _finite(read.get("counter")) or not _finite(read.get("referenceCounter")):
-                return _verdict(None, "a counter read is undecodable", reads=reads)
+                return finish(None, "a counter read is undecodable", reads=reads)
             ok = abs(read["counter"] - read["referenceCounter"]) <= 1
         elif kind == "alpha":
-            if not _finite(read.get("dVideo")) or not _finite(read.get("dPoster")):
-                return _verdict(None, "an Alpha distance is unreadable", reads=reads)
-            if read["dPoster"] < alpha_floor:
+            if not _finite(read.get("dVideo")) or not _finite(read.get("dPoster")) or not _finite(read.get("dSep")):
+                return finish(None, "an Alpha distance is unreadable", reads=reads)
+            if read["dSep"] < alpha_floor:
                 ambiguous = True
                 ok = True
             else:
                 ok = read["dVideo"] <= read["dPoster"] / 2
         else:
-            return _verdict(None, f"unknown feed read kind {kind!r}")
+            return finish(None, f"unknown feed read kind {kind!r}")
         checks.append({"progress": read["progress"], "ok": ok})
     if not all(row["ok"] for row in checks):
-        return _verdict(False, "a sampled GL patch did not match the live decoder", checks=checks)
+        return finish(False, "a sampled GL patch did not match the live decoder", checks=checks)
     if ambiguous:
-        return _verdict(None, "the poster/live separation is below the registered floor", checks=checks)
-    advancing = record.get("advancing") is True or (
-        isinstance(record.get("presentedFrames"), list) and len(set(record["presentedFrames"])) >= 2
-    )
-    if not advancing:
-        return _verdict(False, "decoder frames did not advance", checks=checks)
+        return finish(None, "the poster/live separation is below the registered floor", checks=checks)
+    presented = [v for v in record.get("presentedFrames") or [] if _finite(v)]
+    if len(presented) < 2:
+        return finish(None, "fewer than two decoder frame readings were recorded", checks=checks)
+    if len(set(presented)) < 2:
+        return finish(False, "decoder frames did not advance", checks=checks)
     if continuous_expected:
         if record.get("continuousCoverage") is not True:
-            return _verdict(None, "continuous upload coverage is unreadable", checks=checks)
-        gap, limit = record.get("maxInterFeedGapMs"), record.get("maxInterFeedGapLimitMs")
-        if not _finite(gap) or not _finite(limit):
-            return _verdict(None, "the maximum inter-feed gap is unreadable", checks=checks)
+            return finish(None, "continuous upload coverage is unreadable", checks=checks)
+        gap, limit = record.get("maxInterFeedGapMs"), MAX_INTER_FEED_GAP_MS
+        if not _finite(gap):
+            return finish(None, "the maximum inter-feed gap is unreadable", checks=checks)
         if gap > limit:
-            return _verdict(False, "the maximum inter-feed gap exceeds the paint-coverage limit", gapMs=gap, limitMs=limit)
-    return _verdict(True, checks=checks, interval=feed_interval(record))
+            return finish(False, "the maximum inter-feed gap exceeds the paint-coverage limit", gapMs=gap, limitMs=limit)
+    return finish(True, checks=checks, interval=feed_interval(record))
 
 
 def score_no_rider_above_canvas(record: Any) -> dict[str, Any]:
+    if isinstance(record, dict) and record.get("coverage") is not True:
+        return _verdict(None, "the rider census does not cover every move frame")
     frames = record.get("riders") if isinstance(record, dict) else None
     if not isinstance(frames, list) or not frames:
         return _verdict(None, "no rider census was recorded")
@@ -578,19 +630,26 @@ def score_no_rider_above_canvas(record: Any) -> dict[str, Any]:
 
 
 def score_labels_over_feed(record: Any) -> dict[str, Any]:
+    if isinstance(record, dict) and record.get("coverage") is not True:
+        return _verdict(None, "the label reads do not cover every overlapping label draw")
     rows = record.get("labels") if isinstance(record, dict) else None
     if not isinstance(rows, list) or not rows:
         return _verdict(None, "no label-over-feed reads were recorded")
-    checks = []
+    checks, inconclusive = [], False
     for row in rows:
-        if not isinstance(row, dict) or not all(_finite(row.get(k)) for k in ("opacity", "spread", "slope")):
-            return _verdict(None, "a label-over-feed read is unreadable")
-        if row["spread"] < LABEL_SPREAD_FLOOR:
-            return _verdict(None, "the under-label spread is below 24", labels=rows)
+        if not isinstance(row, dict) or not all(_finite(row.get(k)) for k in ("opacity", "spread")):
+            inconclusive = True
+            continue
+        if row["spread"] < LABEL_SPREAD_FLOOR or not _finite(row.get("slope")):
+            inconclusive = True
+            continue
         expected = 1 - row["opacity"]
         checks.append({**row, "expected": expected, "ok": abs(row["slope"] - expected) <= LABEL_SLOPE_TOLERANCE})
-    return _verdict(all(row["ok"] for row in checks), "a label did not composite over the feed" if not all(row["ok"] for row in checks) else None,
-                    labels=checks)
+    if any(not row["ok"] for row in checks):
+        return _verdict(False, "a label did not composite over the feed", labels=checks)
+    if not checks or inconclusive:
+        return _verdict(None, "a label-over-feed read is inconclusive", labels=checks)
+    return _verdict(True, labels=checks)
 
 
 def score_hold_frame(record: Any) -> dict[str, Any]:
@@ -601,11 +660,16 @@ def score_hold_frame(record: Any) -> dict[str, Any]:
     mode = record.get("mode")
     if mode not in ("departure", "standDown"):
         return _verdict(None, f"unknown hold mode {mode!r}")
-    if mode == "standDown" and not (record.get("successfulFeed") is True and record.get("advancedDecoder") is True):
+    if record.get("mediaOverflow") not in (0, None):
+        return _verdict(None, "the media event buffer overflowed")
+    if mode == "standDown" and record.get("successfulFeed") is True and record.get("advancedDecoder") is not True:
         return _verdict(None, "post-feed stand-down lacks successful-feed and advanced-decoder evidence")
-    if mode == "standDown" and record.get("reuploadAfterStandDown") is not False:
+    if mode == "standDown" and record.get("reuploadAfterStandDown") is True:
         return _verdict(False, "a texture was uploaded after stand-down")
-    target = record.get("lastPresentedBeforeDeparture") if mode == "departure" else record.get("lastUploadedFrame")
+    if mode == "standDown" and record.get("reuploadAfterStandDown") is None:
+        return _verdict(None, "post-stand-down upload evidence is unreadable")
+    target = record.get("lastUploadedFrame") if mode == "standDown" and record.get("successfulFeed") is True \
+        else record.get("lastPresentedBeforeDeparture")
     reads = record.get("reads")
     if not isinstance(target, int) or isinstance(target, bool) or not isinstance(reads, list) or len(reads) < 3:
         return _verdict(None, "the held target or its first/middle/last reads are missing")
@@ -613,9 +677,10 @@ def score_hold_frame(record: Any) -> dict[str, Any]:
         return _verdict(None, "the held reads do not cover first, middle, and last draw")
     for read in reads:
         if not isinstance(read, dict) or not isinstance(read.get("bestFrame"), int) or not _finite(read.get("matchMargin")) \
-                or not _finite(read.get("requiredMargin")):
+                or read.get("kind") not in ("alpha", "counter"):
             return _verdict(None, "a held-frame match is unreadable", reads=reads)
-        if read["matchMargin"] < read["requiredMargin"]:
+        required = ALPHA_HOLD_MARGIN if read["kind"] == "alpha" else COUNTER_HOLD_MARGIN
+        if read["matchMargin"] < required:
             return _verdict(None, "a held-frame match is ambiguous", reads=reads)
     matches = [read["bestFrame"] for read in reads]
     return _verdict(all(frame == target for frame in matches), "the GL canvas did not retain the exact target frame" if any(frame != target for frame in matches) else None,
@@ -626,6 +691,14 @@ def score_hold_frame(record: Any) -> dict[str, Any]:
 def score_poster_hold(record: Any) -> dict[str, Any]:
     if not isinstance(record, dict):
         return _verdict(None, "poster-hold evidence is missing")
+    if record.get("mediaOverflow") not in (0, None):
+        return _verdict(None, "the media event buffer overflowed")
+    if record.get("holdPauseMissing") is True:
+        return _verdict(False if record.get("clockReadable") is True else None, "the move-anchored hold pause is missing")
+    if record.get("clockReadable") is False:
+        return _verdict(None, "a decoder read is missing from the hold window")
+    if record.get("clockStill") is False:
+        return _verdict(False, "the decoder clock advanced during the hold")
     required = (
         "pauseTime", "settleTime", "pauseCurrentTime", "settleCurrentTime",
         "pauseMediaTime", "firstAfterMediaTime", "frameDurationS", "clockToleranceS",
@@ -637,6 +710,8 @@ def score_poster_hold(record: Any) -> dict[str, Any]:
         return _verdict(None, "the poster-hold clock or frame record is unreadable")
     if record["settleTime"] < record["pauseTime"]:
         return _verdict(None, "the poster-hold interval is reversed")
+    if record.get("mode", "departure") == "departure" and record.get("departurePauseBeforeMove") is False:
+        return _verdict(False, "the decoder was not paused before the move")
     if record.get("seeked") is not False:
         return _verdict(False, "the held decoder sought during the move")
     frame_duration = record["frameDurationS"]
@@ -649,17 +724,23 @@ def score_poster_hold(record: Any) -> dict[str, Any]:
         return _verdict(False, "the decoder restarted from frame zero")
     mode = record.get("mode", "departure")
     media_step = record["firstAfterMediaTime"] - record["pauseMediaTime"]
+    frame_step = record["firstAfterFrame"] - record["pauseFrame"]
+    if frame_step > 1:
+        return _verdict(None, "the first post-resume video-frame callback was dropped")
+    if frame_step <= 0:
+        return _verdict(False, "the decoder did not present the held-plus-one frame")
     resumed_from_pause = abs(media_step - frame_duration) <= frame_duration / 2
     if not resumed_from_pause:
         return _verdict(False, "the first media time after settle was not one frame after the pause", exactHeldPlusOne=False)
     if mode != "standDown" and mode != "departure":
         return _verdict(None, f"unknown poster-hold mode {mode!r}")
     last_upload = record.get("lastUploadedFrame")
-    if mode == "standDown" and (not isinstance(last_upload, int) or isinstance(last_upload, bool)):
+    successful_feed = record.get("successfulFeed") is True
+    if mode == "standDown" and successful_feed and (not isinstance(last_upload, int) or isinstance(last_upload, bool)):
         return _verdict(None, "the last uploaded frame is unreadable")
-    if mode == "standDown" and record["pauseFrame"] < last_upload:
+    if mode == "standDown" and successful_feed and record["pauseFrame"] < last_upload:
         return _verdict(None, "the pause frame precedes the retained upload")
-    discontinuity = mode == "standDown" and record["pauseFrame"] > last_upload
+    discontinuity = mode == "standDown" and successful_feed and record["pauseFrame"] > last_upload
     return _verdict(True, mode=mode, exactHeldPlusOne=resumed_from_pause if not discontinuity else False,
                     resumedFromPausePlusOne=resumed_from_pause,
                     resumptionDiscontinuity=(record["pauseFrame"] - last_upload if discontinuity else 0),

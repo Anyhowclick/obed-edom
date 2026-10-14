@@ -972,6 +972,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Probe control: corrupt the first feed binding before the move, or force stand-down after a successful feed",
     )
     parser.add_argument(
+        "--feed-tamper-scene", type=int, default=None, metavar="N",
+        help="Limit --feed-tamper to the feed boundary whose atScene is N",
+    )
+    parser.add_argument(
         "--mm-feed", choices=("off", "auto", "on"), default="auto",
         help="Magic Move texture feed preference; off retains an eligible one-shot hold",
     )
@@ -992,6 +996,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Probe control: suppress the departure one-shot upload so holdFrame must show the baked poster",
     )
     args = parser.parse_args(argv)
+    if args.feed_tamper_scene is not None and args.feed_tamper is None:
+        parser.error("--feed-tamper-scene requires --feed-tamper")
     if args.feed_variant is not None and (args.feed_tamper is not None or args.hold_upload_kill_switch):
         parser.error("--feed-variant, --feed-tamper and --hold-upload-kill-switch run as separate controls")
     if args.hold_upload_kill_switch and args.mm_feed != "off":
@@ -1692,13 +1698,15 @@ def stripped_runtime(action: str, at_scene: int | None = None, key: str | None =
 
 
 @contextmanager
-def tampered_feed_ordinal() -> Iterator[None]:
+def tampered_feed_ordinal(at_scene: int | None = None) -> Iterator[None]:
     """Probe-only binding control: corrupt exactly the first regular upload ordinal."""
     original = live_host_module._continuity_plan_script
 
     def patched(plan: dict[str, Any], canvas: dict[str, int]) -> str:
         changed = json.loads(json.dumps(plan))
         for entry in changed.get("boundaries") or []:
+            if at_scene is not None and entry.get("atScene") != at_scene:
+                continue
             feed = entry.get("feed") if isinstance(entry, dict) else None
             source = feed.get("from") if isinstance(feed, dict) else None
             if isinstance(source, dict) and isinstance(source.get("upload"), int):
@@ -1723,20 +1731,32 @@ def injected_feed_variant(name: str | None) -> Iterator[None]:
         raise RuntimeError("feed variant requested but the feed module is unavailable")
     if not callable(mm_feed_variant_script):
         raise RuntimeError("mm_feed_variants.variant_script is unavailable")
-    original = module.mm_feed_script
+    original_loader = live_host_module._load_mm_feed_module
 
-    def patched(*args: Any, **kwargs: Any) -> str:
-        source = original(*args, **kwargs)
-        changed = mm_feed_variant_script(name, source)
-        if not isinstance(changed, str) or not changed:
-            raise RuntimeError(f"feed variant {name!r} did not produce script bytes")
-        return changed
+    class VariantModule:
+        MM_FEED_VERSION = module.MM_FEED_VERSION
 
-    module.mm_feed_script = patched
+        def __init__(self) -> None:
+            self._sha: str | None = None
+
+        def mm_feed_script(self, *, continuous: bool, once: bool) -> str:
+            changed = mm_feed_variant_script(name, module.mm_feed_script(continuous=continuous, once=once))
+            if not isinstance(changed, str) or not changed:
+                raise RuntimeError(f"feed variant {name!r} did not produce script bytes")
+            self._sha = hashlib.sha256(changed.encode()).hexdigest()
+            return changed
+
+        def js_sha256(self) -> str:
+            if self._sha is None:
+                raise RuntimeError("feed variant sha requested before script selection")
+            return self._sha
+
+    variant = VariantModule()
+    live_host_module._load_mm_feed_module = lambda: variant
     try:
         yield
     finally:
-        module.mm_feed_script = original
+        live_host_module._load_mm_feed_module = original_loader
 
 
 def bridge_disabled() -> Any:
@@ -1806,6 +1826,38 @@ def carry_destination_players(facts: dict[str, Any]) -> frozenset[int]:
     return frozenset(spec["toPlayer"] for spec in facts.get("verdicts") or [] if spec["kind"] == "carry")
 
 
+def feed_specs_for(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": spec["id"], "objectId": spec.get("srcObjectId"), "dstObjectId": spec.get("dstObjectId"),
+            "atScene": spec.get("atScene"), "feed": spec.get("feed"), "draws": spec.get("feedDraws"),
+            "artwork": spec.get("artworkAbove"),
+        }
+        for spec in (facts or {}).get("verdicts") or []
+        if spec.get("underArtwork") is True and isinstance(spec.get("feed"), dict)
+    ]
+
+
+def install_feed_instrument_before_navigation(player: LiveOutputHost, facts: dict[str, Any] | None) -> None:
+    entries = feed_specs_for(facts)
+    if not entries:
+        return
+    config = {
+        "entries": entries, "tamper": FEED_CONTROL.get("tamper"), "tamperScene": FEED_CONTROL.get("tamperScene"),
+        "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
+    }
+    source = mm_feed_instrument.INSTRUMENT_JS + "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
+    original = player._install_placement_channel
+
+    def install(version: Any, url: str) -> None:
+        player._require_transport().call(
+            "Page.addScriptToEvaluateOnNewDocument", source=source,
+        )
+        original(version, url)
+
+    player._install_placement_channel = install
+
+
 def drive_and_sample(
     player: LiveOutputHost, *, observer: Callable[[int], None] | None = None,
     carry_into: Collection[int] = (),
@@ -1823,20 +1875,12 @@ def drive_and_sample(
     carry's source."""
     transport = player._require_transport()
     transport.evaluate(SAMPLER_JS)
-    feed_specs = [
-        {
-            "id": spec["id"], "objectId": spec.get("srcObjectId"), "dstObjectId": spec.get("dstObjectId"),
-            "atScene": spec.get("atScene"), "feed": spec.get("feed"), "draws": spec.get("feedDraws"),
-            "artwork": spec.get("artworkAbove"),
-        }
-        for spec in (feed_facts or {}).get("verdicts") or []
-        if spec.get("underArtwork") is True and isinstance(spec.get("feed"), dict)
-    ]
+    feed_specs = feed_specs_for(feed_facts)
     if feed_specs:
-        transport.evaluate(mm_feed_instrument.INSTRUMENT_JS)
         transport.evaluate(
             "window.__obedMmFeedProbe.configure(" + json.dumps({
                 "entries": feed_specs, "tamper": FEED_CONTROL.get("tamper"),
+                "tamperScene": FEED_CONTROL.get("tamperScene"),
                 "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
             }) + ")"
         )
@@ -3618,7 +3662,15 @@ def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
     record = _feed_record_for_spec(evidence, spec)
     if not isinstance(record, dict):
         return _inconclusive("no in-frame GL evidence for an under-artwork carry")
+    visits = record.get("visits")
+    if isinstance(visits, list):
+        scored = [score_under_artwork({spec["id"]: visit}, spec) for visit in visits]
+        values = [row.get("verdict") for row in scored]
+        value = False if False in values else None if None in values else True
+        return {"verdict": value, "reason": "repeated visits are scored independently", "visits": scored}
     mode = record.get("mode")
+    if mode == "unavailable":
+        return _inconclusive(record.get("reason") or "the under-artwork feed mode is unavailable")
     rider = score_no_rider_above_canvas(record.get("rider"))
     artwork = score_artwork_above(record.get("artwork"))
     results: dict[str, Any] = {"noRiderAboveCanvas": rider, "artworkAbove": artwork}
@@ -4367,6 +4419,7 @@ def run_arm(
 ) -> dict[str, Any]:
     force_viewport(*viewport)
     player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs())
+    install_feed_instrument_before_navigation(player, facts_on or facts)
     result: dict[str, Any] = {"arm": name}
     try:
         player.start()
@@ -4518,6 +4571,7 @@ def run_attach_arm(
     with attach_chrome(scratch / "attach-chrome-profile", result) as port:
         with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
             player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs())
+            install_feed_instrument_before_navigation(player, facts_on or facts)
             try:
                 player.start()
                 output = player.output
@@ -9154,13 +9208,14 @@ def run_carry_cover_cli(args: argparse.Namespace) -> None:
 def main() -> None:
     global FEED_CONTROL, MM_FEED_REQUEST, MM_OPACITY_REQUEST, FEED_DWELL_S
     args = parse_args()
-    FEED_CONTROL = {"tamper": args.feed_tamper, "killHoldUpload": args.hold_upload_kill_switch}
+    FEED_CONTROL = {"tamper": args.feed_tamper, "tamperScene": args.feed_tamper_scene,
+                    "killHoldUpload": args.hold_upload_kill_switch}
     MM_FEED_REQUEST = args.mm_feed
     MM_OPACITY_REQUEST = args.mm_opacity
     FEED_DWELL_S = args.feed_dwell
     try:
         with run_scope(args.rescore if args.rescore is not None else args.artifact), (
-            tampered_feed_ordinal() if args.feed_tamper == "ordinal" else nullcontext()
+            tampered_feed_ordinal(args.feed_tamper_scene) if args.feed_tamper == "ordinal" else nullcontext()
         ), injected_feed_variant(args.feed_variant):
             run_cli(args)
     finally:

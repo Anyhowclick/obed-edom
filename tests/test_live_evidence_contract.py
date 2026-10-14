@@ -335,14 +335,15 @@ console.log(JSON.stringify({held: held, events: P.events, after: P.snapshot()}))
 
 def _mm_feed_report() -> dict[str, Any]:
     return {
-        "kind": "mm-feed", "version": 1, "config": {}, "holds": [], "media": [], "artwork": [],
-        "errors": [], "module": None,
+        "kind": "mm-feed", "version": 1, "config": {}, "media": [], "mediaOverflow": 0, "artwork": [],
+        "errors": [], "module": None, "uploads": [], "claims": [], "standDowns": [], "departures": [],
+        "callbackCostP95Ms": None,
         "tamper": None, "killedOnce": [{"objectId": "movie-a", "t": 3.0}],
         "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "atScene": 2,
                       "lost": False, "entryIds": ["carry-a"]}],
         "frames": [{
             "serial": 1, "atScene": 2, "n": 1, "t": 2.0, "draws": 1, "uploads": 2,
-            "labels": [], "riders": [],
+            "labels": [], "riders": [], "labelExpected": [],
             "glErrors": [], "module": None,
             "rows": [{"serial": 1, "atScene": 2, "entryId": "carry-a", "objectId": "movie-a",
                       "dstObjectId": "movie-b", "draw": 1, "t": 2.0, "quad": None,
@@ -350,7 +351,7 @@ def _mm_feed_report() -> dict[str, Any]:
                       "textures": [{"unit": 0, "ordinal": 1, "size": [640, 360], "video": False,
                                     "flip": True}, None],
                       "feedRead": {"patchInside": True, "coveredByLaterDraw": False, "kind": "alpha",
-                                   "dVideo": 2.0, "dPoster": 20.0}}],
+                                   "dVideo": 2.0, "dPoster": 20.0, "dSep": 20.0}}],
         }],
     }
 
@@ -383,9 +384,10 @@ def _feed_verdict_record() -> dict[str, Any]:
         "interval": {"start": 1.0, "end": 2.0},
         "feed": {"usableContext": True, "boundTextures": True, "reads": [{
             "progress": .25, "patchInside": True, "coveredByLaterDraw": False,
-            "kind": "alpha", "dVideo": 2.0, "dPoster": 20.0,
+            "kind": "alpha", "dVideo": 2.0, "dPoster": 20.0, "dSep": 20.0,
         }]},
-        "rider": {"riders": []}, "labels": {"labels": []}, "artwork": {"reads": []},
+        "rider": {"riders": [], "coverage": True}, "labels": {"labels": [], "coverage": True},
+        "artwork": {"reads": []},
     }
 
 
