@@ -135,14 +135,21 @@ class Adapter:
         self.goto_final_slide: int | None = None
         self.goto_target_reached = False
         self.goto_busy = False
+        self.recalibrating = False
 
     def capabilities(self):
-        return {
+        capabilities = {
             "advance": {"supported": True},
             "goTo": {"supported": True},
             "hide": {"supported": True},
             "show": {"supported": True},
         }
+        capabilities["recalibrate"] = (
+            {"supported": False, "reason": "Calibration is already running."}
+            if self.recalibrating
+            else {"supported": True}
+        )
+        return capabilities
 
     def observe(self):
         self.observe_calls += 1
@@ -186,6 +193,21 @@ class Adapter:
             )
         elif operation == "show":
             self.observed = PlayerObservation(original_slide=1, scene_id="one", revision=1, output_visible=True)
+        elif operation == "recalibrate":
+            self.recalibrating = True
+            self.observed = PlayerObservation(
+                original_slide=self.observed.original_slide,
+                scene_id=self.observed.scene_id,
+                build_index=self.observed.build_index,
+                revision=self.observed.revision,
+                busy=self.observed.busy,
+                output_visible=self.observed.output_visible,
+                output={
+                    "placement": {
+                        "state": "probing", "grant": None, "reason": "calibrating", "probeId": "probe-1",
+                    },
+                },
+            )
         return self.observed
 
     def stop(self):
@@ -351,6 +373,40 @@ def test_stale_request_and_reused_request_id_are_rejected_without_execution(tmp_
     assert first["outcome"] == "completed"
     assert changed["outcome"] == "rejected"
     assert adapter.calls == [("goTo", 2)]
+
+
+def test_recalibrate_completes_on_scheduling_without_visibility_or_navigation_ack(tmp_path):
+    service, adapter, state, _claims, _releases = make_service(tmp_path)
+    adapter.wait = Event()
+    adapter.release = Event()
+    responses = []
+    thread = Thread(target=lambda: responses.append(service.command(state["sessionId"], "cal-1", "recalibrate")))
+    thread.start()
+    assert adapter.wait.wait(1)
+    inflight_replay = service.command(state["sessionId"], "cal-1", "recalibrate")
+    adapter.release.set()
+    thread.join(5)
+    assert not thread.is_alive()
+
+    first = responses[0]
+    replay = service.command(state["sessionId"], "cal-1", "recalibrate")
+    second = service.command(state["sessionId"], "cal-2", "recalibrate")
+
+    assert inflight_replay["outcome"] == "accepted"
+    assert first["outcome"] == "completed"
+    assert first == replay
+    assert first["state"]["revision"] > state["revision"]
+    assert first["state"]["status"] == state["status"] == "ready"
+    assert first["state"]["originalSlide"] == state["originalSlide"]
+    assert first["state"]["outputVisible"] == state["outputVisible"]
+    assert first["state"]["output"]["placement"] == {
+        "state": "probing", "grant": None, "reason": "calibrating", "probeId": "probe-1",
+    }
+    assert service._session.pending_navigation == {}
+    assert service._session.pending_visibility == {}
+    assert adapter.calls == [("recalibrate", None)]
+    assert second["outcome"] == "rejected"
+    assert second["reason"] == "Calibration is already running."
 
 
 def test_skipped_go_to_and_failed_command_do_not_move_state(tmp_path):

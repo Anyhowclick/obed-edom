@@ -22,11 +22,15 @@ P2 slide JSON with the real builder, so the representation check reads Keynote-s
 """
 from __future__ import annotations
 
+import contextlib
 import functools
+import io
 import json
 import re
 import shutil
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -43,9 +47,11 @@ import binary_counter_movie  # noqa: E402
 import live_continuity_probe as lcp  # noqa: E402
 import loop_fixture  # noqa: E402
 import managed_obs_qualify as q  # noqa: E402
+from obed_edom import live_runtime, managed_obs, placement_probe  # noqa: E402
 from obed_edom.fixture_paths import fixture  # noqa: E402
 
 from test_loop_fixture import _binary_manifest, _committed_source  # noqa: E402
+from test_placement_probe import _input as placement_input  # noqa: E402
 
 SHAPE = (1080, 1920)
 ARMED = {
@@ -105,6 +111,107 @@ def test_dissolve_sessions_are_the_p2_crossfade_cut_and_opaque_arms_plus_cef_ski
     assert sessions[0] == "opaque-off"
     assert {"off", "on", "on2", "cut-on", "cut-off", "opaque-on", "cef-skip", "cef-skip-dsk"} <= set(sessions)
     assert not [s for s in sessions if s.startswith(("m-", "screen-", "delay-", "life-", "grant-", "perfect")) or s == "on-sw"]
+    assert q.PLACEMENT_ARMS[:len(q._PLACEMENT_CONTROL_ARMS)] == q._PLACEMENT_CONTROL_ARMS
+    assert set(q.PLACEMENT_ARMS) == set(q.dissolve_probe.CEF_PLACEMENT.arms)
+    assert tuple(q.PLACEMENT_CONTROL_SPECS) == q.PLACEMENT_CONTROL_SESSIONS
+
+
+def test_placement_capture_retries_only_for_sole_coverage_shortage_and_scores_every_saved_attempt(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from test_dissolve_probe import H as SCORER_H, W as SCORER_W, media_run
+
+    monkeypatch.setattr(q.dissolve_probe, "VIEWPORT", (SCORER_W, SCORER_H))
+    complete, complete_images = media_run("m-snap-cef-dsk")
+    q.dissolve_probe.record_dsk_counter_timing(complete, q.dissolve_probe.ARMS["m-snap-cef-dsk"])
+    cal = q.dissolve_probe.Calibration(tau=5.0)
+    expected_coverage = q.dissolve_probe.capture_coverage(
+        complete, complete_images, q.dissolve_probe.ARMS["m-snap-cef-dsk"],
+        q.dissolve_probe.CEF_PLACEMENT.mid_frames, cal,
+    )
+    sessions, rows = q.capture_placement_sessions(
+        q.dissolve_probe.ARMS["m-snap-cef-dsk"],
+        lambda attempt: ({"runDir": str(tmp_path / f"real-{attempt}")}, complete, complete_images), cal,
+    )
+    assert len(sessions) == 1
+    assert rows[0]["problems"] == expected_coverage["problems"]
+
+    threshold = q.dissolve_probe.CEF_PLACEMENT.mid_frames
+    rows = iter((
+        {"midFrames": threshold - 1, "fitted": [], "problems": [f"{threshold - 1} mid frames < {threshold}"]},
+        {"midFrames": threshold, "fitted": [], "problems": []},
+    ))
+    seen_calibrations = []
+    monkeypatch.setattr(q.dissolve_probe, "capture_coverage",
+                        lambda *_args: (seen_calibrations.append(_args[-1]) or next(rows)))
+
+    class ForwardOnlyHost:
+        def __init__(self) -> None:
+            self.scene = 0
+
+        def drive(self) -> None:
+            for scene in (15, 17):
+                if scene <= self.scene:
+                    raise RuntimeError(f"scene {scene} not reached")
+                self.scene = scene
+
+    hosts = []
+
+    def session_attempt(name, ctx, decision, *, run_name, attempt=None):
+        host = ForwardOnlyHost()
+        hosts.append(host)
+        host.drive()
+        record = {"arm": name, "shots": [], "attemptValue": attempt}
+        images = {"pixel": np.full((1, 1, 4), attempt or 0, np.uint8)}
+        q.dissolve_probe.save_run(ctx["shots"], run_name, record, images)
+        return {"runDir": str(ctx["shots"] / "runs" / run_name), "timingS": {"script": 1}}, record, images
+
+    monkeypatch.setattr(q, "_placement_session_attempt", session_attempt)
+    run_dir = tmp_path / "runs" / "m-snap-cef-dsk"
+    captured = q.placement_session(
+        "m-snap-cef-dsk", {"shots": tmp_path, "placementScoringCalibration": cal}, None)
+    parent = json.loads((run_dir / "record.json").read_text())
+    assert len(hosts) == 2 and len({id(host) for host in hosts}) == 2
+    assert [host.scene for host in hosts] == [17, 17]
+    assert [row["midFrames"] for row in parent["captureAttempts"]] == [threshold - 1, threshold]
+    assert seen_calibrations == [cal, cal]
+    assert [row["runDir"] for row in captured["attempts"]] == [
+        str(run_dir / "attempt-1"), str(run_dir / "attempt-2")]
+    assert [json.loads((run_dir / f"attempt-{attempt}" / "record.json").read_text())["attemptValue"]
+            for attempt in (1, 2)] == [1, 2]
+    assert all((run_dir / f"attempt-{attempt}" / "pixel.png").is_file() for attempt in (1, 2))
+    outcomes = iter(("MATCH", "INCONCLUSIVE"))
+    monkeypatch.setattr(q.dissolve_probe, "score_arm", lambda *_args, **_kwargs: {
+        "outcome": next(outcomes), "problems": [], "mismatch": ["cost"]
+    })
+    scored = q.score_placement_capture_attempts(
+        run_dir, q.dissolve_probe.ARMS["m-snap-cef-dsk"], q.dissolve_probe.Calibration(), None
+    )
+    assert scored["verdict"] == "INCONCLUSIVE"
+    assert [row["outcome"] for row in scored["detail"]["attempts"]] == ["MATCH", "INCONCLUSIVE"]
+
+    problem_rows = iter((
+        {"midFrames": threshold - 1, "fitted": [],
+         "problems": [f"{threshold - 1} mid frames < {threshold}", "class out: 0 px < 1000"]},
+    ))
+    monkeypatch.setattr(q.dissolve_probe, "capture_coverage",
+                        lambda *_args: next(problem_rows))
+    hosts.clear()
+    other = tmp_path / "other"
+    captured = q.placement_session("m-snap-cef-dsk", {"shots": other}, None)
+    assert len(hosts) == 1 and len(captured["attempts"]) == 1
+
+    shortage = {"midFrames": threshold - 1, "fitted": [],
+                "problems": [f"{threshold - 1} mid frames < {threshold}"]}
+    problem_rows = iter((shortage, shortage, shortage))
+    monkeypatch.setattr(q.dissolve_probe, "capture_coverage", lambda *_args: next(problem_rows))
+    hosts.clear()
+    captured = q.placement_session("m-snap-cef-dsk", {"shots": tmp_path / "max-three"}, None)
+    assert len(hosts) == 3 and len(captured["attempts"]) == 3
+
+    monkeypatch.setattr(q.dissolve_probe, "capture_coverage",
+                        lambda *_args: pytest.fail("single-attempt arms do not need coverage scoring"))
+    single = q.placement_session("m-snap-cef", {"shots": tmp_path}, None)
+    assert single["runDir"] == str(tmp_path / "runs" / "m-snap-cef")
 
 
 @pytest.mark.parametrize("g2_mode, g2, missing", [("off", None, False), ("off", "IDLE", True), ("injected", "IDLE", False),
@@ -1636,3 +1743,564 @@ def test_m5_unreadable_failsafe_containers_make_the_run_invalid(reads: dict[str,
     gates = q.arm_gates("failsafe", _failsafe_run(**reads), types.SimpleNamespace(), ARMED, invalid)
     assert gates["M5"]["verdict"] == "INVALID"
     assert len(invalid) == 1 and invalid[0].startswith("M5 INCONCLUSIVE: ")
+
+
+def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = None,
+                           gpu: bool = False) -> tuple[dict[str, Any], placement_probe.ProbeResult]:
+    run_dir = tmp_path / backend
+    run_dir.mkdir()
+    evidence = placement_input("gpu-frac")
+    if backend == "chrome-harness" and gpu:
+        evidence = q._swap_candidate_rules(evidence)
+    elif backend == "chrome-harness":
+        evidence = placement_input("snap")
+    if backend == "chrome-harness":
+        identity = q.replace(evidence.identity, source_uuid=None)
+        evidence = q.replace(evidence, identity=identity,
+                             freshness=tuple(q.replace(capture, identity=identity) for capture in evidence.freshness),
+                             captures=tuple(q.replace(capture, identity=identity) for capture in evidence.captures))
+    result = placement_probe.classify_probe(evidence)
+    spec = evidence.spec
+    engine = managed_obs.EngineIdentity(7, 8.0, 1)
+    request = managed_obs.CalibrationRequest(spec, f"http://127.0.0.1:1/__obed_probe/{spec.run_id}/index.html",
+                                             engine, "program", "context", 1)
+    program = managed_obs.ProgramCheck(True, 0, 16.0, 20.0,
+                                       ({"id": "movie", "playing": True, "monotonic": True,
+                                         "maxStallMs": 10.0, "frameMs": 33.0},), None)
+    persistence_check = managed_obs.PersistenceCheck("cleanup", True, True, (), ())
+    transaction = managed_obs.CalibrationResult(request, evidence, program, True, True, True,
+                                                persistence_check, (), 1.0, 2.0)
+    if omit == "ownership":
+        transaction = q.replace(transaction, evidence=None,
+                                errors=("ManagedObsError: Calibration engine ownership could not be verified.",))
+    if omit == "ownership-w3":
+        transaction = q.replace(
+            transaction, evidence=None, program=None, cleanup_verified=False, restored=False,
+            errors=("refused: ManagedObsError: Calibration engine ownership could not be verified.",),
+        )
+    if omit == "ownership-isolation-failed":
+        transaction = q.replace(
+            transaction, evidence=None, isolation_ok=False,
+            errors=("ManagedObsError: Calibration engine ownership could not be verified.",),
+        )
+    if omit == "ownership-program-failed":
+        transaction = q.replace(
+            transaction, evidence=None, program=q.replace(program, ok=False, reason="program changed"),
+            errors=("ManagedObsError: Calibration engine ownership could not be verified.",),
+        )
+    raw_collection = {"name": "AK", "sources": [{"name": "Program", "uuid": "u", "id": "browser_source", "settings": {}}]}
+    refs = {}
+    for index, name in enumerate(("baseline", "nullBefore", "nullAfter", "cleanup", "quit"), 2):
+        path = run_dir / f"{name}.json"
+        path.write_text(json.dumps(raw_collection))
+        refs[name] = q.dissolve_probe.placement_file_ref(path, run_dir, mtime_ns=index, saved_by_obs=True)
+    telemetry = {
+        "programGuard": {"null": {"ok": True}, "candidate": {"ok": True}, "toggle": {"ok": False}},
+        "programRecording": {"lossless": True, "continuous": True, "decodedFrames": 5, "identicalFrames": 5,
+                             "transactionStartedS": 1.0, "transactionFinishedS": 1.1, "fps": 25,
+                             "startedAt": 0.9, "stoppedAt": 1.2,
+                             "minimumFrames": 3, "frameCountComplete": True,
+                             "statsBefore": {"outputSkippedFrames": 4, "renderSkippedFrames": 7},
+                             "statsAfter": {"outputSkippedFrames": 4, "renderSkippedFrames": 7},
+                             "skippedFrames": {"outputSkippedFrames": 0, "renderSkippedFrames": 0},
+                             "skippedFramesZero": True,
+                             "audioPresent": True, "audioSilent": True},
+        "recordingControls": {"flash": {"verdict": "FAIL"},
+                              "audio": {"verdict": "REPORTED", "reason": "seeded Program reroute_audio=false"}},
+        "alpha": {"transparent": True, "halfTransparent": True, "sampleCount": 6, "allChannelsEqual": True,
+                  "allPhasesCovered": True},
+        "classifierControls": q.classifier_controls(evidence, result, result.verdict),
+        "liveProbeControls": {name: {"verdict": "PASS"} for name in ("replay", "transparent", "frozen-video")},
+        "liveControls": {
+            "isolation": {name: {"verdict": verdict} for name, verdict in (
+                ("null", "PASS"), ("startup", "PASS"), ("priorStudioStates", "PASS"), ("visibleOrigin", "FAIL"),
+                ("behindTransparentProgram", "FAIL"), ("failedOnAir", "PASS"))},
+            "alpha": {name: {"verdict": verdict} for name, verdict in (
+                ("null", "PASS"), ("behindProgramLeak", "FAIL"), ("alphaOnly", "FAIL"))},
+        },
+        "toneRows": {"complete": True, "applied": "identity", "problems": []},
+        "chromeGpu": gpu if backend == "chrome-harness" else None,
+        "drivePlacement": {"state": "valid", "grant": result.verdict.value, "method": "probe",
+                           "tone": {"observed": result.tone_map.value if result.tone_map else None, "applied": "identity"}},
+    }
+    telemetry_ref = q.write_placement_json(run_dir, "telemetry", telemetry)
+    stock = next(iter(live_runtime.SUPPORTED_PLAYERS))
+    record = q.placement_record(
+        backend=backend, placement="preview" if backend == "cef" else None, obs_version="32.2.2" if backend == "cef" else None,
+        engine=engine if backend == "cef" else None, request=request if backend == "cef" else None,
+        evidence=None if omit in ("input", "ownership", "ownership-w3", "ownership-isolation-failed",
+                                  "ownership-program-failed") else evidence, classification=result,
+        transaction=transaction if backend == "cef" else None,
+        events=[{"at": 1.0, "event": "placement", "placement": {"state": "probing"}},
+                {"at": 2.0, "event": "placement", "placement": telemetry["drivePlacement"]}] if backend == "cef" else [],
+        persistence={**refs, "backup": [], "lastRemovalMtimeNs": 1, "checks": []} if backend == "cef" else None,
+        integrity={"recording": None, "rgba": [], "telemetry": None if omit == "telemetry" else telemetry_ref},
+        stock_sha256=stock,
+    )
+    return q.dissolve_probe.serialize_placement_calibration(record, run_dir), result
+
+
+def _placement_control(tmp_path: Path, name: str, *, host_reason: bool = True) -> dict[str, Any]:
+    run_dir = tmp_path / name
+    run_dir.mkdir(parents=True)
+    placement, studio, measure = q.PLACEMENT_CONTROL_SPECS[name]
+    rows = []
+    if measure in ("replay", "transparent") and host_reason:
+        rows.append({"kind": "placementProbeRejected", "reason": "probe-failed"})
+    if measure == "frozen-video" and host_reason:
+        rows.append({"kind": "placementClassifier", "reason": "stale-capture"})
+    control = {
+        "session": name, "placement": placement, "studioEnabled": studio, "measureControl": measure,
+        "output": ({"state": "valid", "grant": "frac", "method": "probe"} if measure is None else
+                   {"state": "invalid", "grant": None, "reason": "probe-failed"}),
+        "transaction": {"isolationOk": True, "cleanupVerified": True, "restored": True,
+                        "program": {"ok": True},
+                        "errors": (["calibration: LiveHostError: Probe capture freshness could not be verified."]
+                                   if measure in ("replay", "transparent") else []),
+                        "evidencePresent": measure is None},
+        "control": {"kind": measure, "captures": 1 if measure == "transparent" else 2}, "studioAfter": studio,
+        "hostLog": q.write_placement_json(run_dir, "host-log", rows),
+    }
+    if name == "failed-preview-off":
+        control["onAir"] = {"initialOutput": {"state": "valid", "grant": "frac", "method": "probe"},
+                            "shown": True, "live": True, "recalibrateScheduled": True}
+    control["recordedVerdict"] = q.score_placement_control(control, run_dir)["verdict"]
+    (run_dir / "record.json").write_text(json.dumps({"placementControl": control}))
+    return {"session": name, "runDir": str(run_dir), "verdict": control["recordedVerdict"]}
+
+
+@pytest.mark.parametrize(("backend", "gpu", "omit", "verdict", "gate"), [
+    pytest.param("cef", False, None, "PASS", "probe-cef", id="cef-complete"),
+    pytest.param("chrome-harness", False, None, "PASS", "probe-chrome-harness", id="chrome-software-complete"),
+    pytest.param("chrome-harness", True, None, "PASS", "probe-chrome-harness", id="chrome-gpu-complete"),
+    pytest.param("cef", False, "telemetry", "INCONCLUSIVE", "program-wire-integrity", id="missing-telemetry"),
+    pytest.param("cef", False, "input", "INCONCLUSIVE", "probe-cef", id="missing-classifier-input"),
+    pytest.param("cef", False, "ownership", "INCONCLUSIVE", "iso-obs-preview", id="ownership-abort"),
+    pytest.param("cef", False, "ownership-w3", "INCONCLUSIVE", "iso-obs-preview", id="ownership-abort-w3-shape"),
+    pytest.param("cef", False, "ownership-isolation-failed", "FAIL", "iso-obs-preview",
+                 id="ownership-error-does-not-mask-isolation-failure"),
+    pytest.param("cef", False, "ownership-program-failed", "FAIL", "iso-obs-preview",
+                 id="ownership-error-does-not-mask-program-failure"),
+])
+def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str,
+                                                       gpu: bool, omit: str | None, verdict: str, gate: str) -> None:
+    calibration, classified = _placement_calibration(tmp_path, backend, omit=omit, gpu=gpu)
+    scored = q.score_placement_calibration(calibration, tmp_path / backend)
+    assert scored["overall"] == verdict
+    assert scored["gates"][gate]["verdict"] == verdict
+    if omit is None:
+        decoded = q.dissolve_probe.deserialize_placement_calibration(calibration, tmp_path / backend)
+        assert placement_probe.classify_probe(decoded["input"]) == classified
+        tone = q.probe_tone_rows(decoded["input"], classified)
+        assert (len(tone["ramp"]), len(tone["patches"]), tone["problems"]) == (16, 8, [])
+        if decoded["transaction"] is not None:
+            non_authoritative_root = tmp_path / "non-authoritative"
+            non_authoritative_root.mkdir()
+            non_authoritative, _ = _placement_calibration(non_authoritative_root, "cef")
+            non_authoritative["persistence"]["lastRemovalMtimeNs"] = 6
+            persistence = q.score_placement_calibration(
+                non_authoritative, tmp_path / "non-authoritative" / "cef")["gates"]["persistence-worker"]
+            assert persistence["verdict"] == "PASS"
+            assert persistence["detail"]["checks"][0]["authoritative"] is False
+            null_path = non_authoritative_root / "cef" / non_authoritative["persistence"]["nullAfter"]["path"]
+            null_path.write_text(json.dumps({"changed": True}))
+            non_authoritative["persistence"]["nullAfter"] = q.dissolve_probe.placement_file_ref(
+                null_path, non_authoritative_root / "cef", mtime_ns=4, saved_by_obs=True)
+            unstable = q.score_placement_calibration(
+                non_authoritative, non_authoritative_root / "cef")["gates"]["persistence-worker"]
+            assert unstable["verdict"] == "FAIL" and unstable["detail"]["nullStable"] is False
+
+            skipped_root = tmp_path / "skipped-rescore"
+            skipped_root.mkdir()
+            skipped_calibration, _ = _placement_calibration(skipped_root, "cef")
+            skipped_dir = skipped_root / "cef"
+            skipped_telemetry = q._read_ref_json(skipped_calibration["integrity"]["telemetry"], skipped_dir)
+            skipped_telemetry["programRecording"]["statsAfter"]["outputSkippedFrames"] += 1
+            skipped_calibration["integrity"]["telemetry"] = q.write_placement_json(
+                skipped_dir, "telemetry", skipped_telemetry)
+            assert q.score_placement_calibration(
+                skipped_calibration, skipped_dir)["gates"]["program-wire-integrity"]["verdict"] == "INCONCLUSIVE"
+
+            fake_order = json.loads(json.dumps(calibration))
+            fake_order["events"] = [
+                {"at": 1.0, "event": "calibration-start", "placement": {"state": "probing"}},
+                {"at": 2.0, "event": "placement", "placement": fake_order["events"][-1]["placement"]},
+            ]
+            assert q.score_placement_calibration(fake_order, tmp_path / backend)["gates"]["life-cal-preview"]["verdict"] == "INCONCLUSIVE"
+
+            assert decoded["transaction"].evidence is decoded["input"]
+            delegate_future: q.Future[managed_obs.CalibrationResult] = q.Future()
+
+            class Delegate:
+                def identity(self) -> managed_obs.EngineIdentity:
+                    return decoded["engine"]
+
+                def start(self, request: managed_obs.CalibrationRequest, **kwargs: Any) -> q.Future[managed_obs.CalibrationResult]:
+                    assert request.placement == "offcanvas"
+                    kwargs["guard"].begin()
+                    kwargs["guard"].sample("before-install")
+                    kwargs["guard"].sample("restored")
+                    kwargs["guard"].finish()
+                    delegate_future.set_result(q.replace(decoded["transaction"], request=request))
+                    return delegate_future
+
+                def cancel(self, _run_id: str, *, timeout_s: float = 5.0) -> bool:
+                    return timeout_s >= 0
+
+            class Guard:
+                def begin(self) -> None: pass
+                def sample(self, _phase: str) -> None: pass
+                def finish(self) -> managed_obs.ProgramCheck: return decoded["transaction"].program
+
+            recording_order = []
+            adapter = q.QualificationCalibrationAdapter(
+                Delegate(), placement="offcanvas", settle=lambda: recording_order.append("settled") or {"equal": True},
+                start_recording=lambda: recording_order.append("started"),
+                stop_recording=lambda: recording_order.append("stopped") or "program.mkv",
+            )
+            host_future = adapter.start(decoded["request"], measure=lambda _channel: decoded["input"], guard=Guard())
+            assert host_future.result().request.placement == "preview"
+            assert adapter.result is not None and adapter.result.request.placement == "offcanvas"
+            assert recording_order == ["settled", "started", "stopped"]
+            assert adapter.phase_times_ns["restored"] >= adapter.phase_times_ns["before-install"]
+
+            controls_root = tmp_path / "controls"
+            control_sessions = [_placement_control(controls_root, name) for name in q.PLACEMENT_CONTROL_SESSIONS]
+            control_rows = q.placement_control_rows(control_sessions)
+            assert {name: row["verdict"] for name, row in control_rows["isolation"].items()} == {
+                "startup": "PASS", "failedOnAir": "PASS", "priorStudioStates": "PASS"}
+            assert all(row["verdict"] == "PASS" for row in control_rows["probe"].values())
+            bad_control = _placement_control(tmp_path / "bad-controls", "probe-replay", host_reason=False)
+            bad_saved = json.loads((Path(bad_control["runDir"]) / "record.json").read_text())
+            bad_saved["placementControl"]["recordedVerdict"] = "PASS"
+            assert q.score_placement_control(bad_saved["placementControl"], Path(bad_control["runDir"]))["verdict"] == "FAIL"
+
+            source_png = q._png_bytes(np.full((2, 2, 4), 255, np.uint8))
+
+            class ControlChannel:
+                request = decoded["request"]
+                source_uuid = "source"
+                cdp_endpoint = "http://127.0.0.1:1"
+                cancel_event = threading.Event()
+                deadline_s = time.monotonic() + 30
+
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def check_current(self) -> None: pass
+
+                def capture_png(self, *, timeout_s: float = 2.0) -> bytes:
+                    self.calls += 1
+                    return source_png + bytes([self.calls])
+
+            class ControlDelegate(Delegate):
+                def __init__(self, channel: ControlChannel, capture: Any) -> None:
+                    self.channel, self.capture = channel, capture
+
+                def start(self, request: managed_obs.CalibrationRequest, **kwargs: Any) -> q.Future[managed_obs.CalibrationResult]:
+                    future: q.Future[managed_obs.CalibrationResult] = q.Future()
+                    try:
+                        self.capture(kwargs["measure"](self.channel))
+                        future.set_result(q.replace(decoded["transaction"], request=request))
+                    except Exception as exc:
+                        future.set_exception(exc)
+                    return future
+
+            observed: list[Any] = []
+            replay = q.QualificationCalibrationAdapter(ControlDelegate(ControlChannel(), observed.append), measure_control="replay")
+            assert replay.start(decoded["request"], measure=lambda io: (io.capture_png(), io.capture_png()), guard=Guard()).result()
+            assert observed.pop() == (source_png + b"\x01", source_png + b"\x01")
+            transparent = q.QualificationCalibrationAdapter(ControlDelegate(ControlChannel(), observed.append), measure_control="transparent")
+            assert transparent.start(decoded["request"], measure=lambda io: io.capture_png(), guard=Guard()).result()
+            assert np.asarray(Image.open(io.BytesIO(observed.pop()))).shape == (1080, 1920, 4)
+            frozen_calls = []
+            monkeypatch.setattr(q, "freeze_probe_video", lambda _channel: frozen_calls.append(True))
+            frozen = q.QualificationCalibrationAdapter(ControlDelegate(ControlChannel(), observed.append), measure_control="frozen-video")
+            assert frozen.start(decoded["request"], measure=lambda io: io.capture_png(), guard=Guard()).result()
+            assert frozen_calls == [True] and frozen.control_detail["videoPaused"] is True
+            failed = q.QualificationCalibrationAdapter(ControlDelegate(ControlChannel(), observed.append), measure_control="capture-error")
+            with pytest.raises(RuntimeError, match="qualification calibration failed"):
+                failed.start(decoded["request"], measure=lambda io: (io.capture_png(), io.capture_png()), guard=Guard()).result()
+
+            class OnAirDelegate(Delegate):
+                def __init__(self) -> None:
+                    self.calls = 0
+                    self.faults = []
+
+                def start(self, request: managed_obs.CalibrationRequest, **kwargs: Any) -> q.Future[managed_obs.CalibrationResult]:
+                    self.calls += 1
+                    future: q.Future[managed_obs.CalibrationResult] = q.Future()
+                    errors = ()
+                    evidence = decoded["input"]
+                    try:
+                        kwargs["measure"](ControlChannel())
+                    except RuntimeError as exc:
+                        self.faults.append(str(exc))
+                        evidence = None
+                        errors = (str(exc),)
+                    future.set_result(q.replace(decoded["transaction"], request=request, evidence=evidence, errors=errors))
+                    return future
+
+            on_air_delegate = OnAirDelegate()
+            host_operations = []
+
+            class ControlHost:
+                def __init__(self, *_args: Any, calibration: q.QualificationCalibrationAdapter, **_kwargs: Any) -> None:
+                    self.calibration = calibration
+                    self.output = {"placement": {"state": "invalid", "grant": None}}
+                    self.visible = False
+                    self._log_path = None
+
+                def _probe(self) -> None:
+                    result = self.calibration.start(
+                        decoded["request"], measure=lambda io: (io.capture_png(), io.capture_png()), guard=Guard()).result()
+                    self.output["placement"] = ({"state": "valid", "grant": "frac", "method": "probe"}
+                                                if result.evidence is not None else
+                                                {"state": "invalid", "grant": None, "reason": "probe-failed"})
+
+                def start(self) -> None:
+                    self._probe()
+
+                def observe(self) -> Any:
+                    return types.SimpleNamespace(output_visible=self.visible, busy=False, output=self.output)
+
+                def execute(self, operation: str, _slide: int | None = None) -> Any:
+                    host_operations.append(operation)
+                    if operation == "show":
+                        self.visible = True
+                        return self.observe()
+                    self.output["placement"] = {"state": "probing", "grant": None}
+                    scheduled = types.SimpleNamespace(output_visible=True, busy=False,
+                                                      output={"placement": dict(self.output["placement"])})
+                    self._probe()
+                    return scheduled
+
+                def _require_transport(self) -> Any:
+                    return object()
+
+                def stop(self) -> None: pass
+
+            class ControlWs:
+                studio = True
+
+                def __init__(self, *_args: Any, **_kwargs: Any) -> None: pass
+                def __enter__(self) -> "ControlWs": return self
+                def __exit__(self, *_args: Any) -> None: pass
+                def request(self, method: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+                    if method == "GetStudioModeEnabled":
+                        return {"studioModeEnabled": self.studio}
+                    if method == "SetStudioModeEnabled":
+                        type(self).studio = bool((data or {})["studioModeEnabled"])
+                    return {}
+
+            with monkeypatch.context() as on_air_patch:
+                on_air_patch.setattr(q, "LiveOutputHost", ControlHost)
+                on_air_patch.setattr(q, "ObsWebsocket", ControlWs)
+                on_air_patch.setattr(q, "await_input", lambda _transport: 0.1)
+                on_air_patch.setattr(q.dissolve_probe, "resolve", lambda *_args, **_kwargs: types.SimpleNamespace(
+                    root=tmp_path, slides=[], resolver=None))
+                on_air_patch.setattr(q.dissolve_probe, "serving", lambda _splice: contextlib.nullcontext())
+                on_air = q.placement_control_session(
+                    "failed-preview-off",
+                    {"calibration": on_air_delegate, "creds": (1, "p"), "shots": tmp_path / "on-air",
+                     "endpoint": "ws://example", "target": "target", "rate": 25},
+                    None, placement="preview", studio_enabled=False, measure_control="capture-error")
+            assert on_air["verdict"] == "PASS"
+            assert host_operations == ["show", "recalibrate"]
+            assert on_air_delegate.calls == 2 and on_air_delegate.faults == ["injected capture failure after first capture"]
+            offline = tmp_path / "offline"
+            for index in range(2):
+                source = tmp_path / f"source-{index}"
+                source.mkdir()
+                encoded, _result = _placement_calibration(source, "cef")
+                encoded["engine"]["launch_date"] = 10.0 + index
+                destination = offline / f"take-{index}" / "runs" / "candidate"
+                destination.parent.mkdir(parents=True)
+                shutil.move(source / "cef", destination)
+                (destination / "record.json").write_text(json.dumps({"placementCalibration": encoded}))
+            for name in q.PLACEMENT_CONTROL_SESSIONS:
+                _placement_control(offline / "take-controls" / "runs", name)
+            assert q.score_placement_runs(offline) == 0
+            rgba = np.zeros((4, 4, 4), np.uint8)
+            rgba[0, 0] = (255, 128, 0, 128)
+            rgba_paths = []
+            phases = ["before-install", "installed", "before-capture", "after-capture", "before-cleanup", "restored"]
+            for index, phase in enumerate(phases):
+                path = tmp_path / f"rgba-{index}-{phase}.png"
+                Image.fromarray(rgba).save(path)
+                rgba_paths.append(path)
+            analyzed = q.analyze_rgba_samples(rgba_paths, phases)
+            assert {key: analyzed[key] for key in ("transparent", "halfTransparent", "sampleCount", "allChannelsEqual",
+                                                    "allPhasesCovered", "phases")} == {
+                "transparent": True, "halfTransparent": True, "sampleCount": 6, "allChannelsEqual": True,
+                "allPhasesCovered": True, "phases": phases,
+            }
+            frames = [np.zeros((2, 2, 3), np.uint8), np.zeros((2, 2, 3), np.uint8)]
+            monkeypatch.setattr(q.obs_cadence_decode, "read_frames", lambda _path: ({"codec": "ffv1", "pix_fmt": "yuv444p", "size": (2, 2)}, iter(frames)))
+            monkeypatch.setattr(q.obs_cadence_decode, "check_lossless", lambda _meta: None)
+            monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: types.SimpleNamespace(stdout=b"\0\0"))
+            recording = q.analyze_program_recording(
+                tmp_path / "program.mkv", started_s=1.0, stopped_s=1.05,
+                transaction_started_s=1.01, transaction_finished_s=1.04, fps=25,
+                stats_before={"outputSkippedFrames": 4, "renderSkippedFrames": 7},
+                stats_after={"outputSkippedFrames": 4, "renderSkippedFrames": 7})
+            assert (recording["lossless"], recording["continuous"], recording["decodedFrames"],
+                    recording["identicalFrames"], recording["audioSilent"], recording["skippedFramesZero"]) == (
+                        True, True, 2, 2, True, True)
+            frames[1][0, 0, 0] = 1
+            monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: types.SimpleNamespace(stdout=b"\0\1"))
+            injected = q.analyze_program_recording(
+                tmp_path / "program-control.mkv", started_s=1.0, stopped_s=1.05,
+                transaction_started_s=1.01, transaction_finished_s=1.04, fps=25)
+            assert (injected["identicalFrames"], injected["audioSilent"]) == (1, False)
+            assert injected["flashDetected"] is False
+            missing_audio = q.subprocess.CalledProcessError(1, ["ffmpeg"], stderr=b"does not contain any stream")
+            monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(missing_audio))
+            absent = q.analyze_program_recording(
+                tmp_path / "program-no-audio.mkv", started_s=1.0, stopped_s=1.05,
+                transaction_started_s=1.01, transaction_finished_s=1.04, fps=25)
+            assert absent["audioPresent"] is False
+            monkeypatch.setattr(q.subprocess, "run", lambda *_args, **_kwargs: types.SimpleNamespace(stdout=b"\0\0"))
+            truncated = q.analyze_program_recording(
+                tmp_path / "program-short.mkv", started_s=1.0, stopped_s=2.0,
+                transaction_started_s=1.1, transaction_finished_s=1.9, fps=25)
+            assert truncated["frameCountComplete"] is False
+
+            canvas_frames = [np.zeros((2, 2, 3), np.uint8) for _ in range(25)]
+            canvas_frames[11][1, 1] = 255
+            canvas_frames[12][1, 1] = 255
+            monkeypatch.setattr(q.obs_cadence_decode, "read_frames",
+                                lambda _path: ({"codec": "ffv1", "pix_fmt": "yuv444p", "size": (2, 2)}, iter(canvas_frames)))
+            complete = q.analyze_program_recording(
+                tmp_path / "program-25fps.mkv", started_s=1.0, stopped_s=3.0,
+                transaction_started_s=1.1, transaction_finished_s=1.9, fps=25,
+                stats_before={"outputSkippedFrames": 3, "renderSkippedFrames": 5},
+                stats_after={"outputSkippedFrames": 3, "renderSkippedFrames": 5})
+            assert complete["frameCountComplete"] is True
+            assert complete["minimumFrames"] == 20 and complete["wallClockFrameCountComplete"] is False
+            assert complete["skippedFramesZero"] is True
+            assert complete["flashDetected"] is True and complete["flashFrames"] == [11, 12]
+            dropped = q.analyze_program_recording(
+                tmp_path / "program-dropped.mkv", started_s=1.0, stopped_s=2.0,
+                transaction_started_s=1.1, transaction_finished_s=1.9, fps=25,
+                stats_before={"outputSkippedFrames": 3, "renderSkippedFrames": 5},
+                stats_after={"outputSkippedFrames": 4, "renderSkippedFrames": 5})
+            assert dropped["skippedFramesZero"] is False
+            assert q.canvas_fps({"fpsNumerator": 25, "fpsDenominator": 1}, 25) == 25
+
+            seed = tmp_path / "seed.json"
+            seed.write_text(json.dumps({"modules": {}, "scaling_level": 0}))
+            assert q.collection_saved_by_obs(seed) is False
+            seed.write_text(json.dumps({"modules": {"scripts-tool": []}, "scaling_level": -49}))
+            assert q.collection_saved_by_obs(seed) is True
+
+            retention_source = tmp_path / "retention-source"
+            retention_source.mkdir()
+            retained_calibration, _ = _placement_calibration(retention_source, "cef")
+            retained_dir = retention_source / "cef"
+            candidate_recording = retained_dir / "candidate.mkv"
+            control_recording = retained_dir / "control.mkv"
+            candidate_recording.write_bytes(b"candidate")
+            control_recording.write_bytes(b"control")
+            retained_calibration["integrity"]["recording"] = q.dissolve_probe.placement_file_ref(
+                candidate_recording, retained_dir)
+            retained_telemetry = q._read_ref_json(retained_calibration["integrity"]["telemetry"], retained_dir)
+            retained_telemetry["recordingControls"]["flash"]["recording"] = q.dissolve_probe.placement_file_ref(
+                control_recording, retained_dir)
+            retained_calibration["integrity"]["telemetry"] = q.write_placement_json(
+                retained_dir, "telemetry", retained_telemetry)
+
+            def retention_run(args: list[str], **_kwargs: Any) -> Any:
+                if args[0] == "/usr/bin/trash":
+                    Path(args[1]).unlink()
+                    return types.SimpleNamespace(stdout="", stderr="")
+                return types.SimpleNamespace(stdout=b"framemd5", stderr=b"")
+
+            with monkeypatch.context() as retention_patch:
+                retention_patch.setattr(q.subprocess, "run", retention_run)
+                q._retire_passing_recordings(retained_calibration, retained_dir)
+            assert not candidate_recording.exists() and not control_recording.exists()
+            assert retained_calibration["integrity"]["recording"]["retained"] is False
+            retired_telemetry = q._read_ref_json(retained_calibration["integrity"]["telemetry"], retained_dir)
+            assert retired_telemetry["recordingControls"]["flash"]["recording"]["retained"] is False
+            assert q.score_placement_calibration(retained_calibration, retained_dir)["overall"] == "PASS"
+
+            gate_root = tmp_path / "placement-gate"
+            gate_controls = [_placement_control(gate_root, name) for name in q.PLACEMENT_CONTROL_SESSIONS]
+            gate_sessions = list(gate_controls)
+            for name in (*q.PLACEMENT_ARMS, "probe-chrome-gpu", "probe-chrome-software"):
+                session_dir = gate_root / name
+                session_dir.mkdir(parents=True, exist_ok=True)
+                if name.startswith("probe-chrome-"):
+                    encoded, _ = _placement_calibration(
+                        session_dir, "chrome-harness", gpu=name == "probe-chrome-gpu")
+                    session_dir /= "chrome-harness"
+                    (session_dir / "record.json").write_text(json.dumps({"placementCalibration": encoded}))
+                elif name == "m-snap-cef-dsk":
+                    attempts = []
+                    for attempt in (1, 2):
+                        attempt_dir = session_dir / f"attempt-{attempt}"
+                        attempt_dir.mkdir()
+                        (attempt_dir / "record.json").write_text(json.dumps({"placementCalibration": {}}))
+                        attempts.append({"attempt": attempt, "record": f"attempt-{attempt}/record.json"})
+                    (session_dir / "record.json").write_text(json.dumps({"captureAttempts": attempts}))
+                else:
+                    (session_dir / "record.json").write_text(json.dumps({"placementCalibration": {}}))
+                row = {"session": name, "runDir": str(session_dir)}
+                if name == "opaque-off":
+                    calibration_row = q.dissolve_probe.Calibration()
+                    row["calibration"] = {"n": 0, "model": "PASS", "calibration": q.asdict(calibration_row)}
+                gate_sessions.append(row)
+            with monkeypatch.context() as gate_patch:
+                rescored_paths = []
+
+                def passing_calibration(encoded, run_dir, **_kwargs):
+                    rescored_paths.append(Path(run_dir))
+                    chrome = Path(run_dir).name not in q.PLACEMENT_ARMS and not Path(run_dir).name.startswith("attempt-")
+                    verdict = "PASS" if not chrome or encoded.get("backend") == "chrome-harness" else "INCONCLUSIVE"
+                    return {"overall": verdict, "gates": {"probe-chrome-harness": {"verdict": verdict}}}
+
+                gate_patch.setattr(q.dissolve_probe, "launch_lut",
+                                   lambda *_args, **_kwargs: ({}, {"kind": "identity", "samples": 1, "problems": []}))
+                gate_patch.setattr(q, "score_placement_calibration", passing_calibration)
+                gate_patch.setattr(q, "score_placement_capture_attempts",
+                                   lambda *_args, **_kwargs: {"verdict": "PASS", "problems": [], "detail": {}})
+                gate_patch.setattr(q.dissolve_probe, "score_runs", lambda *_args, **_kwargs: {
+                    "gates": {}, "arms": {name: "MATCH" for name in q.PLACEMENT_ARMS}, "overall": "PASS"})
+                placement_gate = q.placement_gates({"sessions": gate_sessions}, None)["CEF-placement"]
+                missing_chrome_record = [dict(session) for session in gate_sessions]
+                next(session for session in missing_chrome_record
+                     if session["session"] == "probe-chrome-gpu")["runDir"] = str(gate_root / "missing-chrome")
+                missing_chrome_gate = q.placement_gates(
+                    {"sessions": missing_chrome_record}, None)["CEF-placement"]
+                missing_run_dir = [dict(session) for session in gate_sessions]
+                next(session for session in missing_run_dir
+                     if session["session"] == q.PLACEMENT_ARMS[0]).pop("runDir")
+                empty_cwd = tmp_path / "missing-run-dir-cwd"
+                empty_cwd.mkdir()
+                gate_patch.chdir(empty_cwd)
+                q.placement_gates({"sessions": missing_run_dir}, None)
+            assert placement_gate["verdict"] == "PASS"
+            assert checks_of(placement_gate)["every placement session ran"]["ok"] is True
+            assert checks_of(placement_gate)["probe-chrome-gpu: classifier"]["value"] == "PASS"
+            assert checks_of(placement_gate)["probe-chrome-software: classifier"]["value"] == "PASS"
+            assert checks_of(missing_chrome_gate)["probe-chrome-gpu: classifier"] == {
+                "check": "probe-chrome-gpu: classifier", "value": "INCONCLUSIVE", "limit": "PASS",
+                "ok": False, "enforced": True,
+            }
+            assert {path.name for path in rescored_paths if path.parent.name == "m-snap-cef-dsk"} == {
+                "attempt-1", "attempt-2"}
+            assert not (empty_cwd / "record.json").exists()
+            q.finalize_placement_persistence([{"session": "control-without-run-dir"}], tmp_path / "missing-collection.json")
+
+            monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=10 ** 15))
+            disk = q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
+            assert disk["recordings"] == (len(q.PLACEMENT_ARMS) + 2) * len(q.MMO_RATES) * 2
+            assert disk["retainedBytes"] == 0
+            monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=1))
+            with pytest.raises(RuntimeError, match="placement needs about"):
+                q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
+            large = tmp_path / "large-recording.mkv"
+            large.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
+            large_ref = q.dissolve_probe.placement_file_ref(large, tmp_path)
+            assert q.dissolve_probe._placement_ref_bytes(large_ref, tmp_path, load=False) == b""

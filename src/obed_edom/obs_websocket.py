@@ -1,8 +1,4 @@
-"""Minimal synchronous obs-websocket v5 client (loopback only).
-
-Product code sends read-only requests (`GetVersion`, `GetOutputStatus`); the
-qualification harness alone may send state-changing ones.
-"""
+"""Minimal synchronous obs-websocket v5 client for owned loopback OBS."""
 
 from __future__ import annotations
 
@@ -49,8 +45,12 @@ def auth_response(password: str, salt: str, challenge: str) -> str:
 class ObsWebsocket:
     """One authenticated connection to `ws://127.0.0.1:<port>`; use as a context manager."""
 
-    def __init__(self, port: int, password: str | None, *, timeout: float = 3.0) -> None:
+    def __init__(self, port: int, password: str | None, *, timeout: float = 3.0,
+                 max_message_bytes: int | None = None) -> None:
         self.port, self.timeout = int(port), timeout
+        self.max_message_bytes = int(_MAX_MESSAGE_BYTES if max_message_bytes is None else max_message_bytes)
+        if self.max_message_bytes <= 0:
+            raise ValueError("max_message_bytes must be positive.")
         self._password = password
         self._ws: Any = None
         self._stack = contextlib.ExitStack()
@@ -66,7 +66,10 @@ class ObsWebsocket:
     def connect(self) -> None:
         deadline = time.monotonic() + self.timeout
         try:
-            self._ws = self._stack.enter_context(connect(f"ws://127.0.0.1:{self.port}", subprotocols=["obswebsocket.json"], open_timeout=self.timeout, max_size=_MAX_MESSAGE_BYTES))
+            self._ws = self._stack.enter_context(
+                connect(f"ws://127.0.0.1:{self.port}", subprotocols=["obswebsocket.json"],
+                        open_timeout=self.timeout, max_size=self.max_message_bytes)
+            )
         except TimeoutError as exc:
             raise ObsWebsocketTimeout("obs-websocket did not accept the connection in time.") from exc
         except Exception as exc:
@@ -90,10 +93,14 @@ class ObsWebsocket:
         try: self._stack.close()
         except Exception: pass
 
-    def request(self, request_type: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    def request(self, request_type: str, data: dict[str, Any] | None = None, *,
+                timeout: float | None = None) -> dict[str, Any]:
         if self._ws is None:
             raise ObsWebsocketError("obs-websocket is not connected.")
-        deadline = time.monotonic() + self.timeout
+        request_timeout = self.timeout if timeout is None else min(self.timeout, timeout)
+        if request_timeout <= 0:
+            raise ObsWebsocketTimeout("obs-websocket request deadline elapsed.")
+        deadline = time.monotonic() + request_timeout
         self._next_id += 1
         request_id = str(self._next_id)
         payload: dict[str, Any] = {"requestType": request_type, "requestId": request_id}

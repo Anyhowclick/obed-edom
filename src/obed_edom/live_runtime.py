@@ -10,14 +10,14 @@ MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 # 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
 SUPPORTED_PLAYERS = {
     "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
-        "aa0ae4bb655cf347878a2394cf9eadf199126f41e97ca85e968dc46afdc2dfc1",
+        "d3ddd770dae1cd4aeb67a68a7e6aa12ef3d890b5ce4cd1cb19db81ec5e709d54",
         "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
-        "416613aa2cbcc0a4d9397d1cb291cb5b0a8d58450255a426cc5ce5de04875330",
+        "8202717a2699a2e4691aac6848675e3636f5d26ac1336f9ae6faba0a48cc72dd",
     ),
     "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
-        "134114e01b14f76914e06c563d1d0672b08e60ae432d18806e7bf5671e929d2f",
+        "1036a8e26fae661c0cde23291f1726643bfb7aa0e781b7f95da1739c7cda3732",
         "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
-        "7d9eb308cadd02908732575a71e6eff437b63bc4d7ef46418805362905aa68dd",
+        "c0faaa3c99c88705931f686d96d4e891a8d10b6b59aa2da62faae5cf56b2c4fc",
     ),
 }
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
@@ -127,7 +127,8 @@ _DISSOLVE_METHODS = (
     b'innerHeight],a=G,w,b;a;a=a.parentElement)w=cs(a),"visible"!==w.overflowX&&(vp(a)||"static"!==w.position)'
     b"&&(b=vp(a)?{left:0,top:0,right:innerWidth,bottom:innerHeight}:a.getBoundingClientRect(),V=[Math.max(V[0],b.left),"
     b"Math.max(V[1],b.top),Math.min(V[2],b.right),Math.min(V[3],b.bottom)]);if(!(R.width>0&&R.height>0)"
-    b'||[1,1.5,2].indexOf(devicePixelRatio)<0||"snap"!==pl||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,'
+    b'||!("snap"===pl&&[1,1.5,2].indexOf(devicePixelRatio)>=0||"frac"===pl&&1===devicePixelRatio&&'
+    b'Number.isInteger(R.left)&&Number.isInteger(R.top))||1!==kx||1!==ky||document.querySelector(":modal,:popover-open,'
     b':fullscreen")||!Array.prototype.every.call(N,function(n){return!n.shadowRoot&&(pc(n)||!G.contains(n)'
     b'&&!n.contains(G)&&xo(n))}))return;var ad=[];Array.prototype.slice.call(document.querySelectorAll("video")).reverse('
     b").forEach(function(v){try{if(!G.contains(v)||v.readyState<2||!v.videoWidth||!v.videoHeight"
@@ -154,8 +155,16 @@ _DISSOLVE_METHODS = (
     b"ky),a0=sn(c[0],R.left,kx),b0=sn(c[1],R.top,ky),a1=sn(c[2],R.left,kx),b1=sn(c[3],R.top,ky),"
     b"ww=Math.round((a1-a0)/kx*p),hh=Math.round((b1-b0)/ky*p),dx=(u0-a0)/kx*p,dy=(v0-b0)/ky*p,dw=(u1-u0)/kx*p,"
     b'dh=(v1-v0)/ky*p,x,g,d,j;if(ww<1||hh<1)return;x=document.createElement("canvas");x.width=ww,x.height=hh;'
-    b'g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;'
-    b"j+=4)if(d[j]<255)return;Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);"
+    b'g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);if("frac"===pl){var fx=dx+(r.left-R.left)'
+    b'+Math.round(cx-r.left)-u0,fy=dy+(r.top-R.top)+Math.round(cy-r.top)-v0,fw=Math.round(cw),'
+    b'fh=Math.round(ch2);if(fx>.5||fy>.5||fx+fw<ww-.5||fy+fh<hh-.5)return;g.drawImage(v,fx,fy,fw,fh)}'
+    b'for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;j+=4)if(d[j]<255)return;if("frac"===pl){var ex=[],'
+    b'ey=[],ei,ej;for(ei=0;ei<ww;ei++)if(ei<fx||ei+1>fx+fw)ex.push(ei);for(ei=0;ei<hh;ei++)if(ei<fy||'
+    b'ei+1>fy+fh)ey.push(ei);var sx=ex.map(function(e){return Math.max(0,Math.min(vw-1,(e+.5-fx)*vw/fw-.5))}),'
+    b'sy=ey.map(function(e){return Math.max(0,Math.min(vh-1,(e+.5-fy)*vh/fh-.5))});for(ei=0;ei<ey.length;'
+    b'ei++)g.drawImage(v,0,sy[ei],vw,1,fx,ey[ei],fw,1);for(ei=0;ei<ex.length;ei++)g.drawImage(v,sx[ei],0,1,'
+    b'vh,ex[ei],fy,1,fh);for(ei=0;ei<ex.length;ei++)for(ej=0;ej<ey.length;ej++)g.drawImage(v,sx[ei],sy[ej],'
+    b'1,1,ex[ei],ey[ej],1,1)}Y.forEach(function(y){var l=sn(y[1].left,R.left,kx),m=sn(y[1].top,R.top,ky);'
     b"g.globalAlpha=y[2],g.drawImage(y[0],(l-a0)/kx*p,(m-b0)/ky*p,(sn(y[1].right,R.left,kx)-l)/kx*p,(sn(y[1].bottom,"
     b'R.top,ky)-m)/ky*p)}),g.globalAlpha=1;var h=document.createElement("div"),s=h.style,t=x.style;'
     b's.position=t.position="absolute",s.overflow="hidden",s.left=a0+"px",s.top=b0+"px",s.width=t.width=a1-a0+"px",'
@@ -303,6 +312,14 @@ _MM_OPACITY_REPLACEMENTS = (
     ),
 )
 
+_DISSOLVE_RENDERING_METHODS = _DISSOLVE_METHODS[: _DISSOLVE_METHODS.index(b"__obedFreezeTake(U,A){")]
+_RENDERING_REPLACEMENTS = (
+    *_MM_OPACITY_REPLACEMENTS[:8],
+    (b"return B}renderEffects(A){", b"return B}" + _DISSOLVE_RENDERING_METHODS + b"renderEffects(A){"),
+    _MM_OPACITY_REPLACEMENTS[9],
+    *_MM_OPACITY_REPLACEMENTS[12:],
+)
+
 _INSTALL = r"""
 (function(controller) {
   let revision = 0;
@@ -393,11 +410,12 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
     Dissolves and swap cuts without showing both slides, and freeze admitted outgoing movies into the transition.
     It also draws admitted Line Draw builds along their authored path with a moving filled arrowhead when present.
 
-    A freeze is a snapshot of the decoded frame at identity tone (no pixel writes), drawn into the movie's content box
-    with every edge snapped to the device grid (1/DPR px) and kept only if every backing pixel is opaque. It is taken
-    only when the host has granted the snapped placement (`window.__obedPlacement` reads `"snap"`), behind the geometry
-    guard (device pixel ratio 1, 1.5 or 2, base layer = slide, translation-only stage and scene transforms, integer scene
-    `left`/`top`), with no top-layer element and no open shadow root on the page, and when every element passes the paint
+    A freeze is a snapshot of the decoded frame at identity tone (no pixel writes), drawn first with every edge snapped
+    to the device grid (1/DPR px). A `frac` grant at DPR 1 overlays the unsnapped compositor quad, checks opacity, then
+    redraws its partially covered boundary cells from the video. The geometry guard requires the base layer to equal
+    the slide, translation-only stage and scene transforms, and integer scene `left`/`top`; `frac` additionally requires
+    an integer stage origin. The take also
+    requires no top-layer element and no open shadow root on the page, and every element must pass the paint
     gate or, outside the stage, is clipped by an HTML `div` proven disjoint from the visible stage. Supported pages
     create no author shadow roots (a checked invariant), since a closed one cannot be detected; anything else keeps
     today's look."""
@@ -414,11 +432,11 @@ def patch_player(player: bytes, *, mm_opacity: bool = True) -> bytes:
 
 
 def patch_rendering(player: bytes) -> bytes:
-    """Apply only the rendering fidelity patch of `patch_player`, without the observation hook."""
+    """Apply rendering fidelity without observation or the executable movie-freeze lifecycle."""
     pins = SUPPORTED_PLAYERS.get(hashlib.sha256(player).hexdigest())
     if pins is None:
         raise LiveRuntimeUnsupported("This Keynote HTML player version is not supported for the preview opacity patch.")
-    return _pinned(_apply_mm_opacity(player), pins[2])
+    return _pinned(_apply_replacements(player, _RENDERING_REPLACEMENTS), pins[2])
 
 
 def _pinned(patched: bytes, expected: str) -> bytes:
@@ -428,10 +446,14 @@ def _pinned(patched: bytes, expected: str) -> bytes:
 
 
 def _apply_mm_opacity(player: bytes) -> bytes:
-    for before, after in _MM_OPACITY_REPLACEMENTS:
+    return _apply_replacements(player, _MM_OPACITY_REPLACEMENTS)
+
+
+def _apply_replacements(player: bytes, replacements: tuple[tuple[bytes, bytes], ...]) -> bytes:
+    for before, after in replacements:
         if player.count(before) != 1:
             raise LiveRuntimeUnsupported("The supported player Magic Move opacity anchor is missing or ambiguous.")
         player = player.replace(before, after)
-        if player.count(after) != 1:
+        if player.count(before) != 0 or player.count(after) != 1:
             raise LiveRuntimeUnsupported("The supported player Magic Move opacity patch is ambiguous.")
     return player
