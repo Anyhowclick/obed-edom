@@ -771,12 +771,13 @@ def _synthetic_pinned_player(tmp_path: Path, monkeypatch, name: str) -> tuple[Pa
     return player, raw
 
 
-def _hook_only(raw: bytes) -> bytes:
-    """The pre-W5 GL-arm bytes, built independently of `patch_player`."""
-    return raw.replace(
+def _hook_and_continuity_take(raw: bytes) -> bytes:
+    """The MM-opacity-off GL-arm bytes, built independently of `patch_player`."""
+    hooked = raw.replace(
         live_runtime._ANCHOR,
         b"UC=new Eg," + live_runtime._INSTALL + b",UC.displayManager.showWaitingIndicator()",
     )
+    return hooked.replace(live_runtime._CONTINUITY_TAKE_ANCHOR, live_runtime._CONTINUITY_TAKE_REPLACEMENT)
 
 
 def test_mm_opacity_mode_defaults_auto_and_rejects_unknown(monkeypatch):
@@ -821,14 +822,17 @@ def test_off_non_gl_arms_serve_the_stock_main_js_from_disk(tmp_path, monkeypatch
         httpd.shutdown()
 
 
-def test_off_gl_arm_serves_the_hook_only_bytes(tmp_path, monkeypatch):
+def test_off_gl_arm_serves_the_hook_and_continuity_take_bytes(tmp_path, monkeypatch):
     player, raw = _synthetic_pinned_player(tmp_path, monkeypatch, "off-gl")
     main_js, meta = drv._served_main_js(player, gl_auto=True, mm_opacity=False)
-    assert main_js == _hook_only(raw)
+    assert main_js == _hook_and_continuity_take(raw)
     assert meta["mmOpacity"] is False
     assert meta["patchedMainJsSha256"] == hashlib.sha256(main_js).hexdigest()
-    for _, after in live_runtime._MM_OPACITY_REPLACEMENTS:
+    assert main_js.count(live_runtime._CONTINUITY_TAKE_REPLACEMENT) == 1
+    for before, after in live_runtime._MM_OPACITY_REPLACEMENTS:
         assert after not in main_js
+        if before != live_runtime._CONTINUITY_TAKE_ANCHOR:
+            assert before in main_js
 
 
 @pytest.mark.parametrize("gl_auto", [False, True], ids=["fast-slow-bridge-off", "gl-replay"])
