@@ -6,8 +6,8 @@ on-stage rect on both sides -- the live `<video>` keeps playing untouched), `bri
 same asset, the rect changes -- the live `<video>` is moved/resized in place instead of
 Keynote's export restarting it from a fresh decoder), `restart` (dissolve or no transition --
 Keynote's own fresh-decoder behaviour is correct), or `retire` (a carried instance no instance
-continues). Repeated instances of one asset pair across a Magic Move by minimum total centre
-distance, as Keynote pairs them. Geometry is derived from the export's authored layer tree
+continues). Repeated instances of one asset pair from the Magic Move transition's recorded
+correspondence. Geometry is derived from the export's authored layer tree
 (`renderMovie` node baseLayer + `isVideoLayer` sub-layer, centre-anchored), never measured on
 screen. A movie or transition the export encodes in a way this module cannot map exactly
 (rotation, animated geometry, an unknown transition kind) is never carried (R11), and anything
@@ -20,11 +20,11 @@ no `<video>`) is refused on its own, as a `retire`, and the rest of the deck sta
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import math
 import re
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,9 +40,9 @@ _MOVIE_START_BUILD = "apple:movie-start"
 _RENDER_MOVIE_BUILD = "renderMovie"
 _CUT_TRANSITIONS: frozenset[str | None] = frozenset({None, "none", "apple:dissolve"})
 """No transition (absent, or exported as `none`) and Dissolve: the player restarts each movie."""
-_PAIRING_MARGIN_PX = 16.0
-_MAX_ASSIGNMENTS = 5040
-"""The pairing search cap, the same as `validate.MM_MAX_ASSIGNMENTS`."""
+_PAIRING_ENDPOINT_TOLERANCE = 0.5
+_PAIRING_UNIQUENESS_MARGIN = 1.0
+_PAIRING_TRANSITIONS: frozenset[str] = frozenset({"apple:magic-move-implied-motion-path"})
 
 _MOVIE_SUBTREE_KEYS: dict[str, frozenset[str]] = {
     "<movie node>": frozenset(
@@ -224,7 +224,13 @@ combined with `sublayerTransform[11]`'s measured range, the worst-case perspecti
 within the plan's 1px rect contract on a 1920px layer."""
 
 
-def _v_animation_leaf(value: Any, path: str) -> None:
+def _v_animation_leaf(
+    value: Any,
+    path: str,
+    *,
+    timing_required: bool = True,
+    timing_function: Callable[[Any, str], None] = _v_one_of(_EFFECT_TIMING_FUNCTIONS),
+) -> None:
     if not isinstance(value, dict):
         raise _Refuse(f"{path} is not a readable animation")
     property_ = value.get("property")
@@ -234,8 +240,6 @@ def _v_animation_leaf(value: Any, path: str) -> None:
     required = {
         "additive": _v_bool_equals(False),
         "autoreverses": _v_bool_equals(False),
-        "beginTime": _v_nonneg_number,
-        "duration": _v_nonneg_number,
         "fillMode": _v_one_of(_EFFECT_FILL_MODES),
         "from": endpoint,
         "property": _v_one_of(_EFFECT_PROPERTIES),
@@ -244,23 +248,33 @@ def _v_animation_leaf(value: Any, path: str) -> None:
         "timeOffset": _v_number_equals(0),
         "to": endpoint,
     }
-    optional = {"timingFunction": _v_one_of(_EFFECT_TIMING_FUNCTIONS)}
+    timing = {"beginTime": _v_nonneg_number, "duration": _v_nonneg_number}
+    optional = {"timingFunction": timing_function}
+    (required if timing_required else optional).update(timing)
     _v_dict_exact(required, optional)(value, path)
 
 
-def _v_animation_group(value: Any, path: str) -> None:
+def _v_animation_group(
+    value: Any,
+    path: str,
+    *,
+    timing_required: bool = True,
+    animation: Callable[[Any, str], None] = _v_animation_leaf,
+) -> None:
     required = {
         "additive": _v_bool_equals(False),
-        "animations": _v_list_of(_v_animation_leaf),
+        "animations": _v_list_of(animation),
         "autoreverses": _v_bool_equals(False),
-        "beginTime": _v_nonneg_number,
-        "duration": _v_nonneg_number,
         "fillMode": _v_one_of(_EFFECT_FILL_MODES),
         "removedOnCompletion": _v_bool_equals(False),
         "repeatCount": _v_number_equals(0),
         "timeOffset": _v_number_equals(0),
     }
-    _v_dict_exact(required)(value, path)
+    timing = {"beginTime": _v_nonneg_number, "duration": _v_nonneg_number}
+    optional = {} if timing_required else timing
+    if timing_required:
+        required.update(timing)
+    _v_dict_exact(required, optional)(value, path)
 
 
 def _v_motion_leaf(value: Any, path: str) -> None:
@@ -329,6 +343,24 @@ _v_initial_state = _v_dict_exact(
         "edgeAntialiasingMask": _v_finite_int,
         "height": _v_finite_number,
         "hidden": _v_bool_equals(False),
+        "masksToBounds": _v_bool_equals(False),
+        "opacity": _v_finite_number,
+        "position": _v_point,
+        "rotation": _v_finite_number,
+        "scale": _v_finite_number,
+        "sublayerTransform": _v_list_of(_v_finite_number, length=16),
+        "width": _v_finite_number,
+    }
+)
+
+_v_pairing_initial_state = _v_dict_exact(
+    {
+        "affineTransform": _v_list_of(_v_finite_number, length=6),
+        "anchorPoint": _v_point,
+        "contentsRect": _v_pinned_unit_rect,
+        "edgeAntialiasingMask": _v_finite_int,
+        "height": _v_finite_number,
+        "hidden": _v_bool,
         "masksToBounds": _v_bool_equals(False),
         "opacity": _v_finite_number,
         "position": _v_point,
@@ -652,6 +684,10 @@ class _Refuse(Exception):
     """Internal control-flow only: carries the reason for an `Unsupported` result."""
 
 
+class _DestinationDrawRefuse(_Refuse):
+    pass
+
+
 def plan_signature(runtime: dict[str, Any]) -> str:
     """The runtime plan's content signature: the host reports it and the gate tests pin it."""
     return hashlib.sha256(json.dumps(runtime, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -708,7 +744,7 @@ class MovieContinuity:
     loop: bool = False
     """The source instance's loop setting, which a carried decoder keeps."""
     code: str | None = None
-    """The refusal's code (`overlap`, `R1`, `R1b`, `R2`, `R4`, `R7`, `R8`, `R9`, `R10`, `R11`) when `refusal` is set."""
+    """The refusal code (`overlap`, `R1`, `R2`, `R4`, `R7`, `R8`, `R9`, `R10`, `R11`, or `R12`)."""
     under_artwork: bool = False
     feed: dict[str, Any] | None = None
     feed_reason: str | None = None
@@ -1539,41 +1575,236 @@ def _build_targets(events: list[Any], build_type: str) -> tuple[set[str], list[s
     return targets, unattributed
 
 
-def _pair_instances(
-    outgoing: list[_MovieInstance], incoming: list[_MovieInstance], building: set[str]
-) -> tuple[list[tuple[_MovieInstance, _MovieInstance]], None] | tuple[None, tuple[str, str]]:
-    """Keynote's Magic Move pairing of one asset's instances (F3, plan section 2.2): the
-    assignment of minimum total centre distance. When there is a choice it is refused (R2) if
-    any candidate is in `building` (it builds out on the source or in on the destination, so
-    Keynote leaves it unpaired, but how the rest then pair is unmeasured for movies), (R1b) when
-    the candidates differ in exported opacity, since Keynote's tier-1 preference would then
-    override distance, and (R1) when the runner-up assignment is within `_PAIRING_MARGIN_PX` or
-    the search exceeds the cap."""
-    several = len(outgoing) > 1 or len(incoming) > 1
-    if several and any(i.object_id in building for i in outgoing + incoming):
-        return None, (
-            "R2",
-            "an instance builds in or out, which Magic Move leaves unpaired, and how Keynote then "
-            "pairs the rest of a movie is unmeasured",
+@dataclass(frozen=True)
+class _PairingDescriptor:
+    center_x: float
+    center_y: float
+    width: float
+    height: float
+    outgoing_fade: bool = False
+    hidden: bool = False
+
+    def error(self, other: _PairingDescriptor) -> float:
+        return max(
+            abs(self.center_x - other.center_x),
+            abs(self.center_y - other.center_y),
+            abs(self.width - other.width),
+            abs(self.height - other.height),
         )
-    if several and len({i.opacity for i in outgoing + incoming}) > 1:
-        return None, ("R1b", "its instances differ in opacity, which Keynote pairs by before distance")
-    swapped = len(outgoing) > len(incoming)
-    smaller, larger = (incoming, outgoing) if swapped else (outgoing, incoming)
-    if math.perm(len(larger), len(smaller)) > _MAX_ASSIGNMENTS:
-        return None, ("R1", f"{len(outgoing)} x {len(incoming)} instances exceed the pairing search cap")
-    ranked = sorted(
-        (sum(math.dist(smaller[i].rect.centre(), larger[j].rect.centre()) for i, j in enumerate(chosen)), chosen)
-        for chosen in itertools.permutations(range(len(larger)), len(smaller))
+
+
+@dataclass(frozen=True)
+class _PairingResult:
+    pairs: tuple[tuple[_MovieInstance, _MovieInstance], ...]
+    unpaired: tuple[_MovieInstance, ...]
+    refusals: tuple[tuple[_MovieInstance, tuple[str, str]], ...]
+
+
+_PAIRING_ANIMATION_LEAF = partial(
+    _v_animation_leaf,
+    timing_required=False,
+    timing_function=_v_nonempty_str,
+)
+_PAIRING_ANIMATION_GROUP = partial(
+    _v_animation_group,
+    timing_required=False,
+    animation=_PAIRING_ANIMATION_LEAF,
+)
+
+
+def _pairing_state(node: Any, where: str) -> dict[str, Any]:
+    if not isinstance(node, dict):
+        raise _Refuse(f"{where} is not a readable object")
+    state = node.get("initialState")
+    _v_pairing_initial_state(state, f"{where}.initialState")
+    _check_effect_node_geometry(state, where)
+    return state
+
+
+def _pairing_root(base_layer: Any, where: str) -> dict[str, Any]:
+    state = _pairing_state(base_layer, where)
+    _v_empty_list(base_layer.get("animations"), f"{where}.animations")
+    residual_x, residual_y = _root_position_residual_px(state)
+    if max(residual_x, residual_y) > _PAIRING_ENDPOINT_TOLERANCE:
+        raise _Refuse(f"{where} origin is not within {_PAIRING_ENDPOINT_TOLERANCE:g} px of the canvas origin")
+    return state
+
+
+def _pairing_animation_map(chain: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    found: dict[str, dict[str, Any]] = {}
+    for depth, node in enumerate(chain):
+        path = f"transition slot layer {depth}.animations"
+        _v_list_of(_PAIRING_ANIMATION_GROUP)(node.get("animations"), path)
+        for leaf in _effect_leaves(node):
+            property_ = leaf["property"]
+            if property_ in found:
+                raise _Refuse(f"the transition slot has more than one {property_!r} animation")
+            if depth != len(chain) - 1 and property_ in _EFFECT_LEAF_ONLY_PROPERTIES:
+                raise _Refuse(f"the transition slot has a {property_!r} animation on a non-leaf node")
+            if depth != len(chain) - 1 and property_ == "contents":
+                raise _Refuse("the transition slot has a 'contents' animation on a non-leaf node")
+            found[property_] = leaf
+    return found
+
+
+def _composed_leaf_descriptor(
+    root_state: dict[str, Any],
+    chain: list[dict[str, Any]],
+    *,
+    scale_x: float = 1.0,
+    scale_y: float = 1.0,
+    translation_x: float = 0.0,
+    translation_y: float = 0.0,
+) -> tuple[float, float, float, float]:
+    origin_x = root_state["position"]["pointX"] - root_state["anchorPoint"]["pointX"] * root_state["width"]
+    origin_y = root_state["position"]["pointY"] - root_state["anchorPoint"]["pointY"] * root_state["height"]
+    for depth, node in enumerate(chain):
+        state = node["initialState"]
+        leaf = depth == len(chain) - 1
+        sx = scale_x if leaf else 1.0
+        sy = scale_y if leaf else 1.0
+        tx = translation_x if leaf else 0.0
+        ty = translation_y if leaf else 0.0
+        origin_x += state["position"]["pointX"] + tx - state["anchorPoint"]["pointX"] * state["width"] * sx
+        origin_y += state["position"]["pointY"] + ty - state["anchorPoint"]["pointY"] * state["height"] * sy
+    leaf_state = chain[-1]["initialState"]
+    width = leaf_state["width"] * scale_x
+    height = leaf_state["height"] * scale_y
+    result = (origin_x + width / 2, origin_y + height / 2, width, height)
+    if width <= 0 or height <= 0 or not all(_math_isfinite(value) for value in result):
+        raise _Refuse("the transition slot has a non-finite or non-positive endpoint")
+    return result
+
+
+def _transition_pairing_evidence(
+    transition: dict[str, Any], src: _MovieInstance, slide_name: str
+) -> tuple[int, _PairingDescriptor]:
+    base_layer = transition.get("baseLayer") if isinstance(transition, dict) else None
+    root_state = _pairing_root(base_layer, "transition baseLayer")
+    if root_state["hidden"] is not False:
+        raise _Refuse("transition baseLayer starts hidden")
+    slot_index, chain = _bridge_slot(transition, src, slide_name)
+    if len(chain) != 2:
+        raise _Refuse(f"transition slot {slot_index} is not a wrapper and one textured leaf")
+    for depth, node in enumerate(chain):
+        state = _pairing_state(node, f"transition slot {slot_index} layer {depth}")
+        if state["hidden"] is not False:
+            raise _Refuse(f"transition slot {slot_index} layer {depth} starts hidden")
+    leaf = chain[-1]
+    _v_empty_list(leaf.get("layers"), f"transition slot {slot_index} leaf.layers")
+    _v_textured_rectangle(leaf.get("texturedRectangle"), f"transition slot {slot_index} leaf.texturedRectangle")
+    animations = _pairing_animation_map(chain)
+    outgoing_fade = False
+    opacity = animations.get("opacity")
+    if opacity is not None:
+        start, end = opacity["from"]["scalar"], opacity["to"]["scalar"]
+        if start == 1 and end == 0:
+            outgoing_fade = True
+        elif start != 1 or end != 1:
+            raise _Refuse(f"transition slot {slot_index} has an unsupported opacity change {start!r} -> {end!r}")
+    hidden = animations.get("hidden")
+    if hidden is not None and (
+        not outgoing_fade or hidden["from"]["scalar"] is not True or hidden["to"]["scalar"] is not True
+    ):
+        raise _Refuse(f"transition slot {slot_index} has an unsupported 'hidden' animation")
+    z_position = animations.get("zPosition")
+    if z_position is not None and z_position["from"] != z_position["to"]:
+        raise _Refuse(f"transition slot {slot_index} has a changing 'zPosition' animation")
+    scale_x = animations.get("transform.scale.x")
+    scale_y = animations.get("transform.scale.y")
+    translation = animations.get("transform.translation")
+    if scale_x is not None and scale_x["from"]["scalar"] != 1:
+        raise _Refuse(f"transition slot {slot_index} scale.x does not start at 1")
+    if scale_y is not None and scale_y["from"]["scalar"] != 1:
+        raise _Refuse(f"transition slot {slot_index} scale.y does not start at 1")
+    if translation is not None and translation["from"] != {"pointX": 0, "pointY": 0}:
+        raise _Refuse(f"transition slot {slot_index} translation does not start at zero")
+    sx = scale_x["to"]["scalar"] if scale_x is not None else 1.0
+    sy = scale_y["to"]["scalar"] if scale_y is not None else 1.0
+    if sx <= 0 or sy <= 0:
+        raise _Refuse(f"transition slot {slot_index} has a non-positive endpoint scale")
+    tx = translation["to"]["pointX"] if translation is not None else 0.0
+    ty = translation["to"]["pointY"] if translation is not None else 0.0
+    center_x, center_y, width, height = _composed_leaf_descriptor(
+        root_state, chain, scale_x=sx, scale_y=sy, translation_x=tx, translation_y=ty
     )
-    if len(ranked) > 1 and ranked[1][0] - ranked[0][0] <= _PAIRING_MARGIN_PX:
-        return None, (
-            "R1",
-            f"the best and runner-up pairings differ by {ranked[1][0] - ranked[0][0]:.1f} px "
-            f"(margin {_PAIRING_MARGIN_PX:g} px)",
+    return slot_index, _PairingDescriptor(center_x, center_y, width, height, outgoing_fade=outgoing_fade)
+
+
+def _destination_pairing_descriptor(
+    destination: _Slide, instance: _MovieInstance, asset: str
+) -> _PairingDescriptor:
+    try:
+        slots = _draw_slots(destination.events[0], destination.uuid)
+        slot_index = _movie_slot_index(slots, instance.object_id, destination.uuid)
+    except _Refuse as exc:
+        raise _DestinationDrawRefuse(str(exc)) from exc
+    if slot_index is None:
+        raise _DestinationDrawRefuse(f"movie '{asset}' has no draw slot on slide {destination.uuid}")
+    base_layer = destination.events[0].get("baseLayer")
+    root_state = _pairing_root(base_layer, f"slide {destination.uuid} draw root")
+    chain = _effect_chain(slots[slot_index], slot_index)
+    if len(chain) != 3 or chain[1].get("objectID") != instance.object_id:
+        raise _Refuse(f"destination object {instance.object_id} has an unmeasured draw chain")
+    hidden = root_state["hidden"] is True
+    for depth, node in enumerate(chain):
+        state = _pairing_state(node, f"destination draw slot {slot_index} layer {depth}")
+        _v_empty_list(node.get("animations"), f"destination draw slot {slot_index} layer {depth}.animations")
+        hidden = hidden or state["hidden"] is True
+    leaf = chain[-1]
+    _v_empty_list(leaf.get("layers"), f"destination draw slot {slot_index} leaf.layers")
+    _v_textured_rectangle(leaf.get("texturedRectangle"), f"destination draw slot {slot_index} leaf.texturedRectangle")
+    center_x, center_y, width, height = _composed_leaf_descriptor(root_state, chain)
+    return _PairingDescriptor(center_x, center_y, width, height, hidden=hidden)
+
+
+def _pair_instances(
+    outgoing: list[_MovieInstance],
+    incoming: list[_MovieInstance],
+    evidence: dict[str, _PairingDescriptor],
+    destination: _Slide,
+    built_in: set[str],
+    asset: str,
+) -> _PairingResult:
+    pairs: list[tuple[_MovieInstance, _MovieInstance]] = []
+    unpaired = [src for src in outgoing if evidence[src.object_id].outgoing_fade]
+    refusals: list[tuple[_MovieInstance, tuple[str, str]]] = []
+    claimed: dict[str, _MovieInstance] = {}
+    continuing = [src for src in outgoing if not evidence[src.object_id].outgoing_fade]
+    if not continuing:
+        return _PairingResult((), tuple(unpaired), ())
+    destinations = [
+        (instance, _destination_pairing_descriptor(destination, instance, asset)) for instance in incoming
+    ]
+    for src in continuing:
+        descriptor = evidence[src.object_id]
+        ranked = sorted(
+            ((descriptor.error(candidate), candidate_instance, candidate) for candidate_instance, candidate in destinations),
+            key=lambda item: (item[0], item[1].object_id or ""),
         )
-    pairs = [(smaller[i], larger[j]) for i, j in enumerate(ranked[0][1])]
-    return [(b, a) if swapped else (a, b) for a, b in pairs], None
+        qualifying = [item for item in ranked if item[0] <= _PAIRING_ENDPOINT_TOLERANCE]
+        if not qualifying:
+            raise _Refuse("no destination draw endpoint matches the transition endpoint")
+        if len(qualifying) != 1:
+            raise _Refuse(f"{len(qualifying)} destination draw endpoints match the transition endpoint")
+        best_error, dst, candidate = qualifying[0]
+        if len(ranked) > 1 and ranked[1][0] - best_error <= _PAIRING_UNIQUENESS_MARGIN:
+            raise _Refuse(
+                f"the destination endpoint runner-up is only {ranked[1][0] - best_error:.3f} px farther away"
+            )
+        if dst.object_id in built_in or candidate.hidden:
+            reason = (
+                f"destination object {dst.object_id} is hidden at its slide's first event, so it builds in"
+                if candidate.hidden
+                else f"destination object {dst.object_id} builds in"
+            )
+            refusals.append((src, ("R2", reason)))
+            continue
+        if dst.object_id in claimed:
+            raise _Refuse(f"two source slots claim destination object {dst.object_id}")
+        claimed[dst.object_id] = src
+        pairs.append((src, dst))
+    return _PairingResult(tuple(pairs), tuple(unpaired), tuple(refusals))
 
 
 def _gl_replay_attempt(
@@ -1582,7 +1813,7 @@ def _gl_replay_attempt(
     transition_name: str | None,
     continuing_count: int,
     src_events: list[Any],
-    src_instance: "_MovieInstance",
+    src_instance: _MovieInstance,
     src_slide_name: str,
     dst_events: list[Any],
 ) -> MovieContinuity:
@@ -1617,7 +1848,13 @@ def _gl_replay_attempt(
     return replace(movie, gl_replay=result, gl_replay_reason=None, gl_replay_slot=slot)
 
 
-def _bridge_slot(transition: dict[str, Any], src: "_MovieInstance", slide_name: str) -> dict[str, Any]:
+def _bridge_slot(
+    transition: dict[str, Any], src: _MovieInstance, slide_name: str
+) -> tuple[int, list[dict[str, Any]]]:
+    """The carried movie's layer chain in the transition: the one slot whose top-level layer starts
+    at the source movie layer's rect within `_GEOMETRY_TOLERANCE`. The transition's layers carry no
+    `objectID`, and a slide whose builds add objects draws fewer slots on its earlier events, so no
+    draw order indexes the slot reliably; Keynote copies the movie layer's frame onto the slot."""
     if src.layer_rect is None:
         raise _Refuse("the carried movie has no readable layer rect")
     base_layer = transition.get("baseLayer")
@@ -1644,18 +1881,12 @@ def _bridge_slot(transition: dict[str, Any], src: "_MovieInstance", slide_name: 
         raise _Refuse("no transition slot starts at the carried movie's rect")
     if len(matches) > 1:
         raise _Refuse(f"transition slots {matches} all start at the carried movie's rect")
-    return slots[matches[0]]
+    index = matches[0]
+    return index, _effect_chain(slots[index], index)
 
 
-def _bridge_slot_chain(transition: dict[str, Any], src: "_MovieInstance", slide_name: str) -> list[dict[str, Any]]:
-    """The carried movie's layer chain in the transition: the one slot whose top-level layer starts
-    at the source movie layer's rect within `_GEOMETRY_TOLERANCE`. The transition's layers carry no
-    `objectID`, and a slide whose builds add objects draws fewer slots on its earlier events, so no
-    draw order indexes the slot reliably; Keynote copies the movie layer's frame onto the slot."""
-    slot = _bridge_slot(transition, src, slide_name)
-    slots = transition["baseLayer"]["layers"]
-    index = next(index for index, candidate in enumerate(slots) if candidate is slot)
-    return _effect_chain(slot, index)
+def _bridge_slot_chain(transition: dict[str, Any], src: _MovieInstance, slide_name: str) -> list[dict[str, Any]]:
+    return _bridge_slot(transition, src, slide_name)[1]
 
 
 def _layer_offset(layer: dict[str, Any], slide_name: str) -> tuple[float, float]:
@@ -1788,8 +2019,8 @@ def _feed_binding(
     try:
         if not isinstance(transition, dict):
             raise _Refuse("no transition effect")
-        slot = _bridge_slot(transition, src, source.uuid)
-        leaves = _transition_leaves(slot, source.uuid)
+        _slot_index, chain = _bridge_slot(transition, src, source.uuid)
+        leaves = _transition_leaves(chain[0], source.uuid)
         if len(leaves) != 1:
             raise _Refuse(f"movie slot has {len(leaves)} textured leaves")
         leaf = leaves[0][0]
@@ -1825,7 +2056,7 @@ def _feed_binding(
 
 
 def _bridge_timing_refusal(
-    transition: dict[str, Any] | None, src: "_MovieInstance", slide_name: str, asset: str, desc: str
+    transition: dict[str, Any] | None, src: _MovieInstance, slide_name: str, asset: str, desc: str
 ) -> str | None:
     """R10: the bridge overlay eases the carried movie with EaseInEaseOut from the transition's
     start over its `duration`, so every motion animation on the movie's transition slot must run
@@ -1874,7 +2105,7 @@ def _bridge_timing_refusal(
 
 
 def _drawn_slot_index(
-    events: list[Any], instance: "_MovieInstance", slide_name: str, slot_count: int
+    events: list[Any], instance: _MovieInstance, slide_name: str, slot_count: int
 ) -> int | None:
     """The instance's slot in the source slide's draw order, which `slotSizes`/`slotRects` index
     positionally. The transition effect's own layers carry no `objectID`, so the index cannot be
@@ -2075,22 +2306,78 @@ def _magic_move_movies(
     may hold a decoder into it (R11)."""
     movies: list[MovieContinuity] = []
     carried: list[tuple[MovieContinuity, _MovieInstance, _MovieInstance]] = []
-    building = _build_targets(source.events, "buildOut")[0] | _build_targets(destination.events, "buildIn")[0]
+    built_out = _build_targets(source.events, "buildOut")[0]
+    built_in = _build_targets(destination.events, "buildIn")[0]
+    continuing_count = sum(
+        min(len(outgoing), len(destination.instances[asset]))
+        for asset, outgoing in source.instances.items()
+        if asset in destination.instances
+    )
+    evidence: dict[str, dict[str, _PairingDescriptor]] = {}
+    evidence_errors: dict[str, str] = {}
+    slot_claims: dict[int, list[tuple[str, _MovieInstance]]] = {}
+    if transition_name in _PAIRING_TRANSITIONS:
+        for asset, outgoing in sorted(source.instances.items()):
+            if asset not in destination.instances or source.unmeasured.get(asset) or destination.unmeasured.get(asset):
+                continue
+            for src in outgoing:
+                if src.object_id in built_out:
+                    continue
+                try:
+                    slot, descriptor = _transition_pairing_evidence(transition, src, source.uuid)
+                except _Refuse as exc:
+                    evidence_errors.setdefault(asset, str(exc))
+                    continue
+                evidence.setdefault(asset, {})[src.object_id] = descriptor
+                slot_claims.setdefault(slot, []).append((asset, src))
+        for slot, claims in slot_claims.items():
+            if len(claims) < 2:
+                continue
+            reason = f"transition slot {slot} is claimed by more than one source movie"
+            for asset, _src in claims:
+                evidence_errors.setdefault(asset, reason)
     for asset, outgoing in sorted(source.instances.items()):
         incoming = destination.instances.get(asset)
         unmeasured = [*source.unmeasured.get(asset, ()), *destination.unmeasured.get(asset, ())]
         if unmeasured and (incoming or asset in destination.unmeasured):
             movies.extend(_retire(asset, src, ("R11", unmeasured[0][1])) for src in outgoing)
             continue
-        pairs, refusal = _pair_instances(outgoing, incoming, building) if incoming else ([], None)
-        if refusal is not None:
-            code, reason = refusal
-            movies.extend(_retire(asset, src, (code, f"'{asset}' pairing at {desc}: {reason}")) for src in outgoing)
+        if not incoming:
+            movies.extend(_retire(asset, src) for src in outgoing if src.object_id in held)
             continue
-        paired = {id(src) for src, _ in pairs}
-        for src, dst in pairs:
+        available = []
+        for src in outgoing:
+            if src.object_id in built_out:
+                reason = f"'{asset}' builds out at {desc}, so Magic Move does not pair it"
+                movies.append(_retire(asset, src, ("R2", reason)))
+            else:
+                available.append(src)
+        if not available:
+            continue
+        if transition_name not in _PAIRING_TRANSITIONS:
+            reason = f"'{asset}' at {desc}: Magic Move variant {transition_name!r} has an unmeasured export shape"
+            movies.extend(_retire(asset, src, ("R11", reason)) for src in available)
+            continue
+        failure = evidence_errors.get(asset)
+        if failure is not None:
+            reason = f"'{asset}' pairing at {desc}: {failure}"
+            movies.extend(_retire(asset, src, ("R1", reason)) for src in available)
+            continue
+        try:
+            result = _pair_instances(available, incoming, evidence.get(asset, {}), destination, built_in, asset)
+        except _DestinationDrawRefuse as exc:
+            movies.extend(_retire(asset, src, ("R11", str(exc))) for src in available)
+            continue
+        except _Refuse as exc:
+            reason = f"'{asset}' pairing at {desc}: {exc}"
+            movies.extend(_retire(asset, src, ("R1", reason)) for src in available)
+            continue
+        for src, refusal in result.refusals:
+            code, reason = refusal
+            movies.append(_retire(asset, src, (code, f"'{asset}' at {desc}: {reason}")))
+        for src, dst in result.pairs:
             carried.append((_carry(asset, src, dst), src, dst))
-        movies.extend(_retire(asset, src) for src in outgoing if id(src) not in paired and src.object_id in held)
+        movies.extend(_retire(asset, src) for src in result.unpaired if src.object_id in held)
     planned: list[tuple[MovieContinuity, _MovieInstance, _MovieInstance]] = []
     for movie, src, dst in carried:
         try:
@@ -2121,7 +2408,7 @@ def _magic_move_movies(
                 movie = replace(movie, gl_replay_reason="a glReplay boundary is already planned (one per plan)")
             else:
                 movie = _gl_replay_attempt(
-                    movie, transition, transition_name, len(carried),
+                    movie, transition, transition_name, continuing_count,
                     source.events, src, source.uuid, destination.events,
                 )
                 gl_replay_used = movie.gl_replay is not None
@@ -2131,11 +2418,24 @@ def _magic_move_movies(
             feed, reason = _feed_binding(transition, source, src)
             planned[index] = (replace(movie, feed=feed, feed_reason=reason), src, dst)
     movies.extend(movie for movie, _src, _dst in planned)
-    if sum(
-        m.action == "bridge" and not m.under_artwork and (m.refusal is None or m.gl_replay is not None)
-        for m in movies
-    ) > 1:
-        raise _Refuse(f"more than one movie changes geometry at {desc}")
+    bridges = [
+        movie for movie in movies
+        if movie.action == "bridge" and not movie.under_artwork and movie.refusal is None
+    ]
+    if len(bridges) > 1:
+        reason = f"more than one otherwise admissible movie changes geometry at {desc}"
+        movies = [
+            replace(
+                movie,
+                refusal=reason,
+                code="R12",
+                gl_replay=None,
+                gl_replay_reason=reason if gl_replay else movie.gl_replay_reason,
+                gl_replay_slot=None,
+            )
+            if movie in bridges else movie
+            for movie in movies
+        ]
     return sorted(movies, key=lambda movie: movie.asset)
 
 

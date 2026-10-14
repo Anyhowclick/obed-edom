@@ -37,25 +37,24 @@ from tests.test_live_continuity import (
     SLIDES,
     _add_build,
     _add_scaled_movie_above_the_bridge,
+    _add_wa0125_clear_of_the_carry_to_slide4,
+    _add_wa0125_to_slide4,
     _clone_second_instance_onto_slide2,
     _copy_fixture_tree,
+    _drop_transition_slots,
     _each_leaf,
     _map_transitions,
     _move_green_square_below_the_movie,
-    _move_slide2_movie_centre,
     _resolver,
     _rewrite_slide_json,
     _set_loop_mode,
     _set_movie_field,
     _set_opacity,
-    _set_slide1_small_opacity,
-    _slide1_centres,
+    _turn_wa0125_fade_into_bridge,
     _with_object_id,
 )
 
 _CLEAN = (SLIDE2, _move_green_square_below_the_movie)
-_BETWEEN_SLIDE1_INSTANCES = tuple(sum(axis) / 2 for axis in zip(*_slide1_centres()))
-_BOTH_SLIDE1 = ("slide1", "slide1_small")
 
 
 def _move_transition_to_the_first_event(data):
@@ -85,43 +84,58 @@ def _carries(runtime: dict, skip: set[int]) -> list[tuple]:
 
 
 PER_MOVE = [
-    pytest.param("overlap", [], 0, ("slide1",), "later-authored artwork overlaps the carried 'untitled.mov'", (), id="overlap"),
     pytest.param(
-        "R1", [_CLEAN, (SLIDE2, _move_slide2_movie_centre(*_BETWEEN_SLIDE1_INSTANCES))], 0, _BOTH_SLIDE1,
-        "(margin 16 px)", (), id="R1",
-    ),
-    pytest.param("R1b", [_CLEAN, (SLIDE1, _set_slide1_small_opacity(0.5))], 0, _BOTH_SLIDE1, "differ in opacity", (), id="R1b"),
-    pytest.param(
-        "R2", [_CLEAN, (SLIDE4, _add_build("buildIn", "apple:dissolve", P2_OBJECT_IDS["slide4"]))], 2, ("slide3",),
-        "builds in or out at player index 2 -> 3", (), id="R2",
+        "overlap", [], 0, ("slide1",), ("untitled.mov",),
+        "later-authored artwork overlaps the carried 'untitled.mov'", (), id="overlap",
     ),
     pytest.param(
-        "R4", [_CLEAN, (SLIDE3, _set_loop_mode((P2_OBJECT_IDS["slide3"],), "looping"))], 2, ("slide3",),
+        "R1", [_CLEAN, (SLIDE3, _drop_transition_slots)], 2, ("slide3",), ("untitled.mov",),
+        "no transition slot starts at the carried movie's rect", (), id="R1",
+    ),
+    pytest.param(
+        "R2", [_CLEAN, (SLIDE4, _add_build("buildIn", "apple:dissolve", P2_OBJECT_IDS["slide4"]))], 2,
+        ("slide3",), ("untitled.mov",),
+        "builds in", (), id="R2",
+    ),
+    pytest.param(
+        "R4", [_CLEAN, (SLIDE3, _set_loop_mode((P2_OBJECT_IDS["slide3"],), "looping"))], 2,
+        ("slide3",), ("untitled.mov",),
         "loops on one side of player index 2 -> 3 only", (), id="R4",
     ),
     pytest.param(
-        "R7", [_CLEAN, (SLIDE4, _set_movie_field(P2_OBJECT_IDS["slide4"], "isStreaming", True))], 2, ("slide3",),
+        "R7", [_CLEAN, (SLIDE4, _set_movie_field(P2_OBJECT_IDS["slide4"], "isStreaming", True))], 2,
+        ("slide3",), ("untitled.mov",),
         "is a web movie, which the player draws without a <video>", (), id="R7",
     ),
     pytest.param(
-        "R8", [_CLEAN, (SLIDE4, _set_movie_field(P2_OBJECT_IDS["slide4"], "endTime", 40.0))], 2, ("slide3",),
+        "R8", [_CLEAN, (SLIDE4, _set_movie_field(P2_OBJECT_IDS["slide4"], "endTime", 40.0))], 2,
+        ("slide3",), ("untitled.mov",),
         "is trimmed differently on each side of player index 2 -> 3", (), id="R8",
     ),
     pytest.param(
-        "R9", [_CLEAN, (SLIDE4, _set_opacity(P2_OBJECT_IDS["slide4"], 0.5))], 2, ("slide3",),
+        "R9", [_CLEAN, (SLIDE4, _set_opacity(P2_OBJECT_IDS["slide4"], 0.5))], 2,
+        ("slide3",), ("untitled.mov",),
         "is not fully opaque on the destination slide", (), id="R9",
     ),
     pytest.param(
-        "R10", [_CLEAN, (SLIDE3, _each_leaf(lambda leaf: leaf.__setitem__("timingFunction", "Linear")))], 2, ("slide3",),
+        "R10", [_CLEAN, (SLIDE3, _each_leaf(lambda leaf: leaf.__setitem__("timingFunction", "Linear")))], 2,
+        ("slide3",), ("untitled.mov",),
         "does not move with the bridge's eased timing", (), id="R10",
     ),
     pytest.param(
-        "R11", [_CLEAN, (SLIDE2, lambda data: _map_transitions(data, lambda _name: "apple:push"))], 0, ("slide1",),
+        "R11", [_CLEAN, (SLIDE2, lambda data: _map_transitions(data, lambda _name: "apple:push"))], 0,
+        ("slide1",), ("untitled.mov",),
         "the next transition 'apple:push' is unmeasured", (1,), id="R11-unmeasured-outgoing-transition",
     ),
     pytest.param(
-        "R11", [_CLEAN, (SLIDE4, _add_scaled_movie_above_the_bridge)], 2, ("slide3",),
+        "R11", [_CLEAN, (SLIDE4, _add_scaled_movie_above_the_bridge)], 2,
+        ("slide3",), ("untitled.mov",),
         "an unmeasured movie 'other.mov' is drawn above the carried 'untitled.mov'", (), id="R11-unmeasured-movie-above",
+    ),
+    pytest.param(
+        "R12", [_CLEAN, (SLIDE3, _turn_wa0125_fade_into_bridge), (SLIDE4, _add_wa0125_clear_of_the_carry_to_slide4)], 2,
+        ("slide3", "slide3_wa0125"), ("untitled.mov", "vid-20250608-wa0125.mp4"),
+        "more than one otherwise admissible movie changes geometry", (), id="R12",
     ),
 ]
 
@@ -135,8 +149,10 @@ DECK_WIDE = [
 ]
 
 
-@pytest.mark.parametrize("code, mutations, boundary, refused, fragment, silenced", PER_MOVE)
-def test_a_per_move_refusal_retires_only_its_own_carry(code, mutations, boundary, refused, fragment, silenced, tmp_path):
+@pytest.mark.parametrize("code, mutations, boundary, refused, assets, fragment, silenced", PER_MOVE)
+def test_a_per_move_refusal_retires_only_its_own_carry(
+    code, mutations, boundary, refused, assets, fragment, silenced, tmp_path
+):
     """The deck installs (a runtime, not `Unsupported`); at the refused boundary each named source
     instance becomes a `retire` with `reason: "refused"` and nothing there is carried; the plan's
     refusal records and the operator's `notCarried` lines name exactly those instances, the code
@@ -153,7 +169,8 @@ def test_a_per_move_refusal_retires_only_its_own_carry(code, mutations, boundary
     (_, base_runtime), (plan, runtime) = base, derived
     assert base[0].refusals == ()
 
-    object_ids = sorted(P2_OBJECT_IDS[key] for key in refused)
+    expected = sorted((P2_OBJECT_IDS[key], asset) for key, asset in zip(refused, assets, strict=True))
+    object_ids = [object_id for object_id, _asset in expected]
     scene = plan.scene_index_by_player[boundary + 1]
     at_scene = [e for e in runtime["boundaries"] if e["atScene"] == scene]
     assert sorted(e["src"]["objectId"] for e in at_scene) == object_ids
@@ -164,9 +181,9 @@ def test_a_per_move_refusal_retires_only_its_own_carry(code, mutations, boundary
     ]
     assert all(fragment in r["reason"] for r in plan.refusals), plan.refusals
     lines = not_carried(plan, SLIDES)
-    assert sorted((e["code"], e["asset"], e["fromSlide"], e["toSlide"], e["objectId"]) for e in lines) == [
-        (code, "untitled.mov", boundary + 1, boundary + 2, object_id) for object_id in object_ids
-    ]
+    assert sorted((e["code"], e["asset"], e["fromSlide"], e["toSlide"], e["objectId"]) for e in lines) == sorted([
+        (code, asset, boundary + 1, boundary + 2, object_id) for object_id, asset in expected
+    ])
 
     quiet = {plan.scene_index_by_player[index + 1] for index in silenced}
     assert not [e for e in runtime["boundaries"] if e["atScene"] in quiet]

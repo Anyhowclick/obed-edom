@@ -111,10 +111,9 @@ the runtime's version and sha256):
   injected, and the served page is identical to a session with continuity never
   built.
 - `unsupported` — the plan could not be derived or installed, with a `reason`
-  (a deck-wide refusal below, more than one ordinary overlay movie changing
-  across one cut, an unreadable export, the stage isn't the authored size, the
-  stage scale is non-uniform, or the runtime failed to install); the raw export
-  plays untouched.
+  (a deck-wide refusal below, an unreadable export, the stage isn't the authored
+  size, the stage scale is non-uniform, or the runtime failed to install); the raw
+  export plays untouched.
 - `qualified` — the runtime installed and confirmed itself from the page. When
   qualified, `output.continuity` also carries `scale` (the uniform factor applied
   to the authored stage, e.g. `1.3333`).
@@ -147,8 +146,11 @@ movie's asset exactly (without query or trim suffix, case-insensitive).
 - **Movie ends:** a carried movie with no instance on the next slide is handed back
   to the player.
 - **Repeated movies:** when a slide shows the same movie more than once, each
-  instance is paired with its partner by minimum total distance, as Keynote pairs
-  images.
+  source instance is identified from its transition slot and paired with the
+  destination draw object at that slot's recorded endpoint. There is no distance
+  fallback.
+- **Fades:** a validated outgoing fade ends rather than carrying, and an incoming
+  fade does not prove a correspondence.
 - **Loops:** a carried pair must agree on Repeat → Loop. A carried decoder keeps
   its source slide's loop setting. Repeat → Back and Forth is not yet measured,
   so that movie is declined (`R11`).
@@ -174,10 +176,11 @@ per instance on `output.continuity.notCarried`, with its slides, movie, the
 instance's `objectId`, a refusal `code` and a `reason`, and under the presenter's
 continuity badge. The codes:
 
-- `R1`: two pairings of a repeated movie are within 16 px of each other.
-- `R1b`: the paired instances differ in opacity, so Keynote may pair them
-  differently.
-- `R2`: a continuing instance builds in on the destination or out on the source.
+- `R1`: Magic Move transition correspondence is missing, contradictory or
+  ambiguous. The affected asset is declined rather than paired by distance.
+- `R2`: the carried instance itself builds out or in (including a destination hidden
+  at its first event), or either slide has a build that names no object, so the export
+  cannot prove that it belongs to some other object.
 - `R4`: the pair disagrees on Repeat → Loop.
 - `R7`: the movie is a web video or an image movie.
 - `R8`: the pair is trimmed differently.
@@ -193,7 +196,12 @@ continuity badge. The codes:
   as the export plays it); an unreadable destination draw order declines that
   carry; and a carry into a slide whose outgoing transition is not Magic Move,
   Dissolve or none is declined, so nothing is held into that transition and
-  that slide restarts its movie where it might have carried.
+  that slide restarts its movie where it might have carried. An unrecognised
+  Magic Move variant also declines the affected asset because its transition
+  record has not been measured.
+- `R12`: more than one otherwise admissible movie changes geometry at the same
+  cut. Every moving instance at that cut is declined; independent pinned movies,
+  under-artwork carries and continuity at other cuts remain eligible.
 - `overlap`: artwork above the carried movie on a click-driven or multi-build
   destination. A destination that settles directly into its movie layer uses the
   under-artwork feed or poster hold instead. `R11` remains unchanged. GL replay may
@@ -202,12 +210,12 @@ continuity badge. The codes:
 Deck-wide refusals make the whole deck `unsupported`, with the code at the start
 of the `reason`: `R3` (a transition is not on the slide's last build), `R5` (an
 object ID repeats across slides) and `R6` (the carried instances do not chain from
-slide to slide). A slide with more than one transition, more than one ordinary
-overlay movie changing geometry at one cut, an unreadable header, slide list or
-slide JSON, a movie without an asset ID or object ID, or a plan that fails its own
-integrity checks also makes the deck `unsupported`, as do the host's checks: the
-stage gate, a runtime that fails to install, a movie codec this output cannot
-play, and `OBED_LIVE_CONTINUITY=off` (reported as `off`). The deck still plays.
+slide to slide). A slide with more than one transition, an unreadable header,
+slide list or slide JSON, a movie without an asset ID or object ID, or a plan
+that fails its own integrity checks also makes the deck `unsupported`, as do the
+host's checks: the stage gate, a runtime that fails to install, a movie codec
+this output cannot play, and `OBED_LIVE_CONTINUITY=off` (reported as `off`). The
+deck still plays.
 
 **Not carried (named residuals).**
 

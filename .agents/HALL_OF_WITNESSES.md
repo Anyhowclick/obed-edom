@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-14 · *ask Keynote, don't guess* 🧭
+
+> We guessed which movie Keynote paired with which by centre distance, and refused whenever the guess was close.
+> But the Magic Move transition already records the answer: each slot starts at one object and ends at another,
+> to 0 px. So we read it instead. Every fixture deck's runtime plan stayed byte-identical. One deck-wide refusal
+> shrank to the single cut it was about.
+>
+> Two reviews passed, and then the full suite found what they missed. Texture ids looked like a free second
+> witness, but Stage T exists because Keynote mis-maps them, and its repair rewrites one side and not the other.
+> Our audit had read only the raw exports, never the repaired ones the live path uses. Audit the thing that runs.
+
+---
+
 ### Claude Opus 5.5 · 2026-10-14 · *let the frame say when* ⏱️
 
 > The Line Draw probe kept guessing when each screenshot was taken, and its guess drifted by one frame from run to

@@ -231,7 +231,7 @@
             "pointY": 0.5
            }
           },
-          "texture": "SANITIZED-TEXTURE-0"
+          "texture": "SANITIZED-TEXTURE-7"
          }
         ]
        }
@@ -355,7 +355,7 @@
             "pointY": 0.5
            }
           },
-          "texture": "SANITIZED-TEXTURE-1"
+          "texture": "SANITIZED-TEXTURE-8"
          },
          {
           "animations": [],
@@ -474,7 +474,7 @@
             "pointY": 0.5008669322347407
            }
           },
-          "texture": "SANITIZED-TEXTURE-3"
+          "texture": "SANITIZED-TEXTURE-9"
          }
         ]
        },
@@ -957,7 +957,7 @@
             "pointY": 0.5
            }
           },
-          "texture": "SANITIZED-TEXTURE-5"
+          "texture": "SANITIZED-TEXTURE-6"
          }
         ]
        }
@@ -1131,7 +1131,7 @@
             "pointY": 0.5
            }
           },
-          "texture": "SANITIZED-TEXTURE-0"
+          "texture": "SANITIZED-TEXTURE-7"
          }
         ]
        }
@@ -1312,7 +1312,7 @@
             "pointY": 0.5
            }
           },
-          "texture": "SANITIZED-TEXTURE-6"
+          "texture": "SANITIZED-TEXTURE-10"
          },
          {
           "animations": [
@@ -1394,7 +1394,7 @@
             "pointY": 0.5
            }
           },
-          "texture": "SANITIZED-TEXTURE-7"
+          "texture": "SANITIZED-TEXTURE-11"
          }
         ]
        }
@@ -1579,7 +1579,7 @@
           "pointY": 0.5
          }
         },
-        "texture": "SANITIZED-TEXTURE-7"
+        "texture": "SANITIZED-TEXTURE-11"
        }
       ]
      }
