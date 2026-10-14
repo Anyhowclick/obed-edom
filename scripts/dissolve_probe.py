@@ -67,7 +67,7 @@ import binary_counter_movie as binary  # noqa: E402
 import mm_opacity_probe as mmo  # noqa: E402
 from obs_cadence_decode import read_strip  # noqa: E402
 
-from obed_edom import live_runtime, placement_probe  # noqa: E402
+from obed_edom import dsk_movie_export, live_runtime, placement_probe  # noqa: E402
 
 FIXTURES = REPO / "output" / "fixtures"
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -220,8 +220,25 @@ CUT_ANIMATION = {"additive": False, "timeOffset": 0, "beginTime": 0, "from": {"s
                  "removedOnCompletion": False}
 FOREGROUND_TEXTURES = ("74EE7166AEA70C8FD2FEDE82CCDC7157", "3652165F1CC62CFCEB8D764941CC3950")
 FOREGROUND_RECTS = ((20.0, 4.0, 80.0, 20.0), (60.0, 8.0, 80.0, 20.0))
+FOREGROUND_FRAME = "3231B69B05EF0523B6E951F3B1F2B938"
 FOREGROUND_SQUARE = "3F22E494EE111203282E35DDB772C32F"
 FOREGROUND_SQUARE_RECT = (120.0, 2.0, 120.0, 30.0)
+EDGE_FOREGROUND_RECTS = ((-8.0, 80.0, 80.0, 20.0), (180.0, 100.0, 80.0, 20.0))
+EDGE_FOREGROUND_SQUARE_RECT = (300.0, 140.0, 120.0, 30.0)
+DSK_COUNTER_MOVIE = (FIXTURES / "p2-binary/html-player/assets/08C861A1-CB39-4832-B189-6DF95B7F3396/assets/"
+                     "Untitled.mov-0.0000-46.0333.mov")
+DSK_COUNTER_SHA256 = "947f8944ba743878133bd0749d3a154c552e0a3cb4482b67ddbe8c23f2bd7203"
+DSK_COUNTER_OFFSETS = {
+    "clip-10-1000001.mov-0.0000-20.8000.mov": 0.0,
+    "clip-10-1000002.mov-0.0000-50.2000.mov": 5.0,
+}
+DSK_COUNTER_DELTA_S = 5.0
+DSK_COUNTER_TIME_TOLERANCE_S = 0.25
+DSK_PLAYER_SRC_ANCHORS = (
+    (b'A.setAttribute("src",this.src),this.showControls', 1),
+    (b'const Q=C.url.native;return null!=Q', 2),
+)
+NOOFFSET_Y_DISPLACEMENT = 125.0
 
 
 @dataclass(frozen=True)
@@ -255,6 +272,7 @@ class Arm:
     forgery: str | None = None
     placement_value: str | None = None
     placement_mode: str | None = None
+    counter_strip: str = "required"
     reason: str | None = None
     regrant: str | None = None
     min_class_px: int = MIN_CLASS_PX
@@ -414,7 +432,7 @@ ARMS["wrongrule-chrome"] = replace(ARMS["m-snap"], placement_value="frac", place
 ARMS["wrongrule-chrome-twin"] = replace(ARMS["m-snap-twin"], placement_value="frac", placement_mode="probe")
 
 _CEF_SNAP_ROWS = {
-    "m-snap-cef": ARMS["m-snap"],
+    "m-snap-cef": replace(ARMS["m-snap"], overrides=("edgefg",)),
     "m-snap-cef-far-x": ARMS["m-snap-clipx"],
     "m-snap-cef-far-y": ARMS["m-snap-clipy"],
     "m-snap-cef-near-x": replace(ARMS["m-snap"], overrides=("clipnearx",)),
@@ -431,18 +449,29 @@ ARMS["m-fg-omit-cef"] = replace(ARMS["m-fg-omit"], placement_value="frac")
 ARMS["m-fg-swap-cef"] = replace(ARMS["m-fg-swap"], placement_value="frac")
 ARMS["m-tone-cef"] = replace(ARMS["m-tone"], placement_value="frac", twin="m-tone-cef-twin")
 ARMS["m-tone-cef-twin"] = replace(ARMS["m-tone-twin"], placement_value="frac")
-ARMS["m-tone-raw-cef"] = replace(ARMS["m-tone-raw"], placement_value="frac")
-ARMS["wrongrule-cef"] = replace(ARMS["m-snap"], placement_value="snap", expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"},
+ARMS["m-tone-raw-cef"] = replace(ARMS["m-tone-raw"], placement_value="frac", twin="m-tone-cef-twin")
+ARMS["wrongrule-cef"] = replace(ARMS["m-snap-cef"], placement_value="snap", expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"},
                                       twin="wrongrule-cef-twin")
-ARMS["wrongrule-cef-twin"] = replace(ARMS["m-snap-twin"], placement_value="snap")
+ARMS["wrongrule-cef-twin"] = replace(ARMS["m-snap-cef-twin"], placement_value="snap")
 ARMS["m-snap-cef-nooffset-x"] = replace(ARMS["m-snap-cef-near-x"], splice="frac-nooffset-x",
+                                              counter_strip="displaced-x",
                                               expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="m-snap-cef-nooffset-x-twin")
-ARMS["m-snap-cef-nooffset-x-twin"] = replace(ARMS["m-snap-cef-near-x-twin"], splice="frac-nooffset-x+fg-omit")
+ARMS["m-snap-cef-nooffset-x-twin"] = replace(
+    ARMS["m-snap-cef-near-x-twin"], splice="frac-nooffset-x+fg-omit", counter_strip="displaced-x"
+)
 ARMS["m-snap-cef-nooffset-y"] = replace(ARMS["m-snap-cef-near-y"], splice="frac-nooffset-y",
+                                              overrides=("nooffsety",),
+                                              counter_strip="displaced-y",
                                               expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="m-snap-cef-nooffset-y-twin")
-ARMS["m-snap-cef-nooffset-y-twin"] = replace(ARMS["m-snap-cef-near-y-twin"], splice="frac-nooffset-y+fg-omit")
-ARMS["m-snap-cef-dsk"] = replace(ARMS["cef-skip-dsk"], placement_value="frac", grant="driver", holders=2,
-                                        expect={"frozen_frame": "PASS", "frozen_region": "PASS", "cost": "PASS", "geometry": "PASS"})
+ARMS["m-snap-cef-nooffset-y-twin"] = replace(
+    ARMS["m-snap-cef-near-y-twin"], overrides=("nooffsety",), splice="frac-nooffset-y+fg-omit",
+    counter_strip="displaced-y"
+)
+ARMS["m-snap-cef-dsk"] = replace(
+    ARMS["cef-skip-dsk"], placement_value="frac", grant="driver", holders=2, movies="dsk-counter",
+    overrides=("dskcounter",), counter_strip="distinct",
+    expect={"frozen_frame": "PASS", "frozen_region": "PASS", "cost": "PASS", "geometry": "PASS"},
+)
 ARMS["m-snap-cef-underlay-omit"] = replace(
     ARMS["m-snap-cef"], splice="frac-underlay-omit", capture="engage", holders=0, twin=None,
     expect={"holder_pixels": "FAIL"},
@@ -1328,6 +1357,29 @@ def _foreground(doc: dict[str, Any], event: int) -> None:
     parent["layers"].extend([_texture_layer(t, r, node) for t, r in zip(FOREGROUND_TEXTURES, FOREGROUND_RECTS)] + [branch])
 
 
+def _edge_foreground(doc: dict[str, Any], event: int) -> None:
+    _foreground(doc, event)
+    builds = list(_effects(doc["events"]))
+    video = [(n, p) for n, p in _layers(builds[0]["baseLayer"]) if n.get("isVideoLayer")]
+    if len(video) != 1 or video[0][1] is None:
+        raise ValueError("expected one video layer inside the renderMovie build")
+    parent = video[0][1]
+    parent["layers"] = [child for child in parent["layers"] if child.get("texture") != FOREGROUND_FRAME]
+    textures = {child.get("texture"): child for child in parent["layers"] if child.get("texture") in FOREGROUND_TEXTURES}
+    branches = [child for child in parent["layers"]
+                if any(grandchild.get("texture") == FOREGROUND_SQUARE for grandchild in child.get("layers") or [])]
+    if set(textures) != set(FOREGROUND_TEXTURES) or len(branches) != 1:
+        raise ValueError("expected the inset foreground layers")
+    for texture, rect in zip(FOREGROUND_TEXTURES, EDGE_FOREGROUND_RECTS):
+        x, y, w, h = rect
+        textures[texture]["initialState"].update(position={"pointX": x + w / 2, "pointY": y + h / 2}, width=w, height=h)
+    x, y, w, h = EDGE_FOREGROUND_SQUARE_RECT
+    branch = branches[0]
+    branch["initialState"].update(position={"pointX": x + w / 2, "pointY": y + h / 2}, width=w, height=h)
+    for child in branch["layers"]:
+        child["initialState"].update(position={"pointX": w / 2, "pointY": h / 2}, width=w, height=h)
+
+
 def _video_layer(doc: dict[str, Any]) -> dict[str, Any]:
     builds = list(_effects(doc["events"]))
     video = [n for b in builds for n, _ in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
@@ -1360,15 +1412,59 @@ def _clip_near(axis: str) -> Callable[[dict[str, Any], int], None]:
         hits = [(n, p) for b in builds for n, p in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
         if len(hits) != 1 or hits[0][1] is None:
             raise ValueError("expected one video layer with a parent in the slide's renderMovie builds")
-        video, parent = (h["initialState"] for h in hits[0])
+        video_node, parent_node = hits[0]
+        video, parent = video_node["initialState"], parent_node["initialState"]
+        origin = parent.get("boundsOrigin")
+        if origin is None and isinstance(parent.get("bounds"), dict):
+            origin = parent["bounds"].get("origin")
+        origin_values = ([origin.get("pointX"), origin.get("pointY")] if isinstance(origin, dict)
+                         else list(origin) if isinstance(origin, (list, tuple)) else [0.0, 0.0] if origin is None else [origin])
+        identity4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        if (len(origin_values) != 2 or not all(number(value) and value == 0 for value in origin_values)
+                or parent.get("affineTransform") != [1, 0, 0, 1, 0, 0]
+                or parent.get("sublayerTransform") != identity4
+                or parent.get("rotation") != 0 or parent.get("scale") != 1):
+            raise ValueError("near clipping requires a zero bounds origin and an untransformed parent")
         size, coord = ("width", "pointX") if axis == "x" else ("height", "pointY")
-        near = video["position"][coord] - video["anchorPoint"][coord] * video[size]
-        far = parent["position"][coord] + (1 - parent["anchorPoint"][coord]) * parent[size]
-        new_near = near + 0.4 * video[size] + 0.37
-        parent[size] = far - new_near
-        parent["position"] = {**parent["position"], coord: new_near + parent["anchorPoint"][coord] * parent[size]}
+        content_near = video["position"][coord] - video["anchorPoint"][coord] * video[size]
+        clip_near = content_near + 0.4 * video[size] + 0.37
+        parent_far = parent["position"][coord] + (1 - parent["anchorPoint"][coord]) * parent[size]
+        parent[size] -= clip_near
+        parent["position"] = {**parent["position"], coord: parent_far - (1 - parent["anchorPoint"][coord]) * parent[size]}
+        for child in parent_node["layers"]:
+            state = child["initialState"]
+            state["position"] = {**state["position"], coord: state["position"][coord] - clip_near}
         parent["masksToBounds"] = True
     return edit
+
+
+def _dsk_counter(doc: dict[str, Any], event: int) -> None:
+    builds = list(_effects(doc["events"]))
+    by_asset = {build.get("movie", {}).get("asset"): build for build in builds}
+    expected = {Path(name).stem for name in DSK_COUNTER_OFFSETS}
+    if set(by_asset) != expected:
+        raise ValueError(f"expected the two DSK movie assets, found {sorted(by_asset)}")
+    for filename, offset in DSK_COUNTER_OFFSETS.items():
+        asset = (doc.get("assets") or {}).get(Path(filename).stem)
+        urls = asset.get("url") if isinstance(asset, dict) else None
+        expected_url = f"assets/{filename}"
+        if not isinstance(urls, dict) or urls.get("native") != expected_url:
+            raise ValueError(f"expected native DSK movie URL {expected_url!r}")
+        if offset:
+            urls["native"] = f"{expected_url}#t={offset:g}"
+            if urls.get("web") == expected_url:
+                urls["web"] = urls["native"]
+
+
+def _nooffset_y(doc: dict[str, Any], event: int) -> None:
+    _clip_near("y")(doc, event)
+    hits = [(n, p) for b in _effects(doc["events"]) for n, p in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
+    if len(hits) != 1 or hits[0][1] is None:
+        raise ValueError("expected one video layer with a parent in the slide's renderMovie builds")
+    video, parent = (node["initialState"] for node in hits[0])
+    parent_top = parent["position"]["pointY"] - parent["anchorPoint"]["pointY"] * parent["height"]
+    video_top = parent_top + video["position"]["pointY"] - video["anchorPoint"]["pointY"] * video["height"]
+    parent["position"] = {**parent["position"], "pointY": parent["position"]["pointY"] + NOOFFSET_Y_DISPLACEMENT - video_top}
 
 
 def _scale(doc: dict[str, Any], event: int) -> None:
@@ -1383,6 +1479,9 @@ def _base(doc: dict[str, Any], event: int) -> None:
 
 
 SLIDE_OVERRIDES: dict[str, Callable[[dict[str, Any], int], None]] = {"cut": _cut, "automatic": _automatic, "fg": _foreground,
+                                                                    "edgefg": _edge_foreground,
+                                                                    "dskcounter": _dsk_counter,
+                                                                    "nooffsety": _nooffset_y,
                                                                     "scale": _scale, "base": _base, "clipx": _clip("x"), "clipy": _clip("y"),
                                                                     "clipnearx": _clip_near("x"), "clipneary": _clip_near("y")}
 HEADER_OVERRIDES: dict[str, Callable[[dict[str, Any]], None]] = {"loop": lambda header: header.update(loopSlideshow=1)}
@@ -1417,6 +1516,27 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
         if rel in files:
             return files[rel]
         if rel.lower().endswith(MOVIE_SUFFIXES) and arm.movies:
+            if arm.movies == "dsk-counter":
+                filename = Path(rel).name
+                target_prefix = f"assets/{header['slideList'][arm.slide - 1]}/assets/"
+                if filename in DSK_COUNTER_OFFSETS and rel.startswith(target_prefix):
+                    digest = binary.sha256_file(DSK_COUNTER_MOVIE) if DSK_COUNTER_MOVIE.is_file() else None
+                    if digest != DSK_COUNTER_SHA256:
+                        raise ValueError(f"DSK counter movie digest {digest!r} does not match its release pin")
+                    fps = dsk_counter_fps()
+                    if fps is None:
+                        raise ValueError("DSK counter movie frame rate is unavailable")
+                    info = {"path": str(DSK_COUNTER_MOVIE), "bytes": DSK_COUNTER_MOVIE.stat().st_size,
+                            "sha256": digest, "seconds": binary.SECONDS, "fps": fps,
+                            "frames": binary.frame_count(binary.SECONDS, round(fps)),
+                            "seekOffsetS": DSK_COUNTER_OFFSETS[filename]}
+                else:
+                    info = h264_copy(scratch, unmod / rel) if (unmod / rel).is_file() else None
+                    if info is None:
+                        return unmod / rel
+                movies[rel] = info
+                files[rel] = Path(info["path"])
+                return files[rel]
             if arm.movies == "h264":
                 info = h264_copy(scratch, unmod / rel) if (unmod / rel).is_file() else None
                 if info is not None:
@@ -1447,6 +1567,9 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
         return path
 
     header = read_doc(unmod / "assets/header.json")
+    stock = (unmod / "assets/player/main.js").read_bytes()
+    if arm.movies == "dsk-counter" and any(stock.count(anchor) != count for anchor, count in DSK_PLAYER_SRC_ANCHORS):
+        raise ValueError("DSK player does not have the pinned native-URL-to-video-src path")
     overrides: dict[str, str] = {}
     out_dir = scratch / "overrides" / tag
     if arm.overrides:
@@ -1474,7 +1597,6 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
             if path.suffix.lower() in MOVIE_SUFFIXES and path.is_file():
                 resolver(unmod, str(path.relative_to(unmod)))
     target = find_target(lambda rel: read_doc(resolver(unmod, rel)), arm.slide)
-    stock = (unmod / "assets/player/main.js").read_bytes()
     served = {"mode": arm.mode, "splice": arm.splice, "stockSha256": sha256_bytes(stock),
               "expected": sha256_bytes(served_player(stock, arm.mode, arm.splice))}
     slides = [{"originalOrdinal": i + 1, "playerIndex": i, "exportedUuid": u, "skipped": False}
@@ -2044,6 +2166,24 @@ def holder_strip(image: np.ndarray, holder: dict[str, Any], decoder: dict[str, A
     return decode_strip(image, ((cx - hx) * dsf, (cy - hy) * dsf), cw * dsf / decoder["size"][0])
 
 
+def holder_strip_geometry(holder: dict[str, Any], decoder: dict[str, Any]) -> str | None:
+    canvas, content, size = holder.get("canvasRect"), decoder.get("content"), decoder.get("size")
+    if not box_ok(canvas) or not box_ok(content) or not isinstance(size, list) or len(size) != 2 or not all(number(v) for v in size):
+        return None
+    if canvas[2] <= 0 or canvas[3] <= 0 or size[0] <= 0 or size[1] <= 0:
+        return None
+    sx, sy, sw, sh = binary.STRIP_RECT
+    scale = content[2] / size[0]
+    ax0, ay0, aw, ah = content[0] + sx * scale, content[1] + sy * scale, sw * scale, sh * scale
+    bx0, by0, bw, bh = canvas
+    ax1, ay1, bx1, by1 = ax0 + aw, ay0 + ah, bx0 + bw, by0 + bh
+    if ax1 <= bx0 or bx1 <= ax0 or ay1 <= by0 or by1 <= ay0:
+        return "outside"
+    if bx0 <= ax0 and by0 <= ay0 and ax1 <= bx1 and ay1 <= by1:
+        return "inside"
+    return "partial"
+
+
 def production_support(record: dict[str, Any], images: Mapping[str, np.ndarray], decoder_id: Any, shape: tuple[int, int],
                        dsf: float, holder: Iterable[float]) -> tuple[np.ndarray, list[str]]:
     """α > 0 support of every inventoried later canvas (independent of the take) at its device rect, snapped as fix A's
@@ -2163,6 +2303,68 @@ def score_holder_pixels(a0: np.ndarray | None, live: np.ndarray | None, box: tup
     if None in split.values():
         return result(None, ["no kept interior or edge-band px"], **split)
     return result(max(split.values()) <= cal.tau, **split)
+
+
+def score_displaced_holder(a0: np.ndarray | None, live: np.ndarray | None, holder: dict[str, Any] | None,
+                           decoder: dict[str, Any] | None, stage: dict[str, Any] | None, mask: np.ndarray | None,
+                           lut: np.ndarray | None, axis: str, dsf: float,
+                           cal: Calibration = Calibration()) -> dict[str, Any]:
+    problems = []
+    if axis not in ("x", "y"):
+        problems.append(f"invalid displacement axis {axis!r}")
+    if a0 is None or live is None or a0.shape != live.shape:
+        problems.append("A0 or S_live missing or of different sizes")
+    if not isinstance(holder, dict) or not box_ok(holder.get("canvasRect")):
+        problems.append("holder canvas geometry missing or malformed")
+    if not isinstance(decoder, dict) or not box_ok(decoder.get("rect")) or not box_ok(decoder.get("content")):
+        problems.append("decoder geometry missing or malformed")
+    if not isinstance(stage, dict) or not number(stage.get(axis)):
+        problems.append("stage geometry missing or malformed")
+    if mask is None:
+        problems.append("no verified production mask")
+    if lut is None or np.shape(lut) != (256,):
+        problems.append("no L_path for the arm's compositing path")
+    if problems:
+        return result(None, problems)
+    index = 0 if axis == "x" else 1
+    displacement_css = decoder["rect"][index] - stage[axis]
+    displacement_px = displacement_css * dsf
+    if displacement_px <= 0:
+        return result(None, [f"predicted {axis} displacement is not positive"], displacementCss=displacement_css)
+    canvas = holder["canvasRect"]
+    shifted = list(decoder["content"])
+    shifted[index] -= displacement_css
+    target_canvas = list(canvas)
+    target_canvas[index] -= displacement_css
+    x0, y0 = max(canvas[0], shifted[0], target_canvas[0]), max(canvas[1], shifted[1], target_canvas[1])
+    x1 = min(canvas[0] + canvas[2], shifted[0] + shifted[2], target_canvas[0] + target_canvas[2])
+    y1 = min(canvas[1] + canvas[3], shifted[1] + shifted[3], target_canvas[1] + target_canvas[3])
+    if x1 <= x0 or y1 <= y0:
+        return result(None, ["predicted displaced content overlap is empty"],
+                      displacementCss=displacement_css, displacementPx=displacement_px)
+    px0, py0, px1, py1 = math.ceil(x0 * dsf), math.ceil(y0 * dsf), math.floor(x1 * dsf), math.floor(y1 * dsf)
+    lo, hi = math.floor(displacement_px), math.ceil(displacement_px)
+    shifts = ((lo, 0), (hi, 0)) if axis == "x" else ((0, lo), (0, hi))
+    px0 = max(0, px0, *(-dx for dx, _ in shifts))
+    py0 = max(0, py0, *(-dy for _, dy in shifts))
+    px1 = min(a0.shape[1], px1, *(live.shape[1] - dx for dx, _ in shifts))
+    py1 = min(a0.shape[0], py1, *(live.shape[0] - dy for _, dy in shifts))
+    if px1 <= px0 or py1 <= py0:
+        return result(None, ["predicted displaced overlap falls outside the captured images"], displacementCss=displacement_css)
+    keep = ~mask[py0:py1, px0:px1]
+    for dx, dy in shifts:
+        keep &= ~mask[py0 + dy:py1 + dy, px0 + dx:px1 + dx]
+    if not keep.any():
+        return result(None, ["no unmasked pixels in the predicted displaced overlap"], displacementCss=displacement_css)
+    toned = a0.copy()
+    toned[py0:py1, px0:px1, :3] = np.asarray(lut, np.uint8)[toned[py0:py1, px0:px1, :3]]
+    reference = premul(toned[py0:py1, px0:px1])
+    samples = [premul(live[py0 + dy:py1 + dy, px0 + dx:px1 + dx]) for dx, dy in shifts]
+    lower, upper = np.minimum(*samples) - cal.tau, np.maximum(*samples) + cal.tau
+    outside = np.maximum(np.maximum(lower - reference, reference - upper), 0).max(axis=2)
+    worst = float(outside[keep].max())
+    return result(worst == 0, displacementCss=displacement_css, displacementPx=displacement_px,
+                  sampleOffsetsPx=[lo, hi], overlapPx=int(keep.sum()), worst=worst, attribution="displaced content")
 
 
 def score_perfect(perfect: np.ndarray | None, live: np.ndarray | None, box: tuple[int, int, int, int] | None,
@@ -2488,7 +2690,7 @@ CEF_PLACEMENT_ARMS = (
 )
 CEF_PLACEMENT = Profile(
     "CEF-placement", CEF_PLACEMENT_ARMS,
-    reported=("no_flash", "screen", "exterior", "hidden", "shown", "overlay", "scope", "grant"),
+    reported=("no_flash", "screen", "cut", "exterior", "hidden", "shown", "tone", "overlay", "scope", "grant"),
     headless=False, lifecycle=False, placement="frac",
     overrides=(
         ("frozen_frame", (("m-paused-cef",), ("m-off-cef",))),
@@ -2533,8 +2735,8 @@ def integer(value: Any) -> bool:
 
 def anim_problem(a: Any) -> str | None:
     """One transition-animation record: leaf and CSS play state from their enums, finite value, positive duration;
-    `ct`/`start` present, finite when populated, null only outside a timed state (`start` also while a running
-    animation's start is still pending at ct 0)."""
+    `ct`/`start` present, finite when populated, resolved current time in a timed state, and resolved start time for a
+    finished animation. Paused animations and running animations with a pending play task may have no start time."""
     if not isinstance(a, dict):
         return "not a record"
     if a.get("leaf") not in ("in", "out") or a.get("state") not in ANIM_STATES:
@@ -2548,7 +2750,7 @@ def anim_problem(a: Any) -> str | None:
             return f"{key} not finite"
     if a["ct"] is not None and a["ct"] < 0:
         return "negative currentTime"
-    if a["state"] in TIMED_STATES and (a["ct"] is None or (a["start"] is None and a["ct"] != 0)):
+    if a["state"] in TIMED_STATES and (a["ct"] is None or (a["state"] == "finished" and a["start"] is None)):
         return f"null timing while {a['state']}"
     return None
 
@@ -2976,6 +3178,52 @@ def media_arm(arm: Arm) -> bool:
 MEDIA_CHECKS = ("frozen_frame", "frozen_region", "foreground", "tone", "overlay")
 
 
+def dsk_counter_fps() -> float | None:
+    if not DSK_COUNTER_MOVIE.is_file() or binary.sha256_file(DSK_COUNTER_MOVIE) != DSK_COUNTER_SHA256:
+        return None
+    try:
+        _, _, fps, _ = dsk_movie_export._ffprobe(DSK_COUNTER_MOVIE)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return fps if number(fps) and fps > 0 else None
+
+
+def _dsk_first_rvfc_times(decoder: dict[str, Any]) -> tuple[float, float] | None:
+    rv = decoder.get("rv") or []
+    rows = [row for row in rv if isinstance(row, (list, tuple)) and len(row) == 3
+            and number(row[0]) and number(row[1])]
+    if rows and rows[0][1] == 0:
+        rows = rows[1:]
+    return (float(rows[0][0]), float(rows[0][1])) if rows else None
+
+
+def _dsk_decoder_offset(decoder: dict[str, Any]) -> float | None:
+    src = decoder.get("src")
+    if not isinstance(src, str):
+        return None
+    for filename, offset in DSK_COUNTER_OFFSETS.items():
+        expected = f"{filename}#t={offset:g}" if offset else filename
+        if src == expected:
+            return offset
+    return None
+
+
+def record_dsk_counter_timing(record: dict[str, Any], arm: Arm) -> None:
+    if arm.counter_strip != "distinct":
+        return
+    first = ((record.get("dump") or {}).get("first") or {})
+    holders = first.get("holders") or []
+    outgoing = [decoder for decoder in decoders_of(record)
+                if decoder.get("region") and decoder.get("detach") is not None]
+    bound, _ = bind_holders(holders, outgoing)
+    rows = [{"holderIndex": index, "id": decoder.get("id"),
+             "firstMediaTimeS": (times[1] if (times := _dsk_first_rvfc_times(decoder)) else None)}
+            for index, decoder in bound]
+    record["dskCounterTiming"] = {"expectedDeltaS": DSK_COUNTER_DELTA_S,
+                                  "toleranceS": DSK_COUNTER_TIME_TOLERANCE_S,
+                                  "counterFps": dsk_counter_fps(), "decoders": rows}
+
+
 def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm,
                     es: list[float]) -> tuple[dict[str, Any] | None, int | None, list[str]]:
     """Shared media evidence (§9.1) for every outgoing movie: a patch-on arm with holders binds each to a distinct decoder
@@ -3013,10 +3261,18 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
     if not pairs:
         problems.append("no decoder for the outgoing movie")
     reference = None
+    decoder_references: dict[Any, int] = {}
+    holder_indices: dict[Any, int] = {}
+    first_media_times: dict[Any, float] = {}
+    first_rvfc_times: dict[Any, tuple[float, float]] = {}
+    counter_fps = dsk_counter_fps() if arm.counter_strip == "distinct" else None
+    if arm.counter_strip == "distinct" and counter_fps is None:
+        problems.append("pinned DSK counter frame rate is unavailable")
     insert = next((r["t"] for r in (record.get("dump") or {}).get("raf") or [] if isinstance(r, dict) and "eff" in r), None)
     advance = record.get("advanceAt")
     foreground = record.get("foreground") if isinstance(record.get("foreground"), dict) else {}
     for k, (index, decoder) in enumerate(pairs):
+        holder_index = None
         if not isinstance(decoder.get("tuple"), str) or not COLOUR_TUPLE.fullmatch(decoder["tuple"]):
             problems.append(f"decoder colour tuple missing or malformed: {decoder.get('tuple')!r} (an error is not a tuple)")
         inventory = foreground.get(str(decoder.get("id")))
@@ -3027,18 +3283,74 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
             problems.append("decoder geometry malformed")
         elif index is not None and "fg" not in arm.overrides:
             img = images.get(f"holder-{index}")
-            if img is None or holder_strip(img, holders[index], decoder, arm.dsf) is None:
-                problems.append("holder pixels missing or the holder strip does not decode at its device scale")
+            if img is None:
+                problems.append("holder pixels missing")
+            else:
+                holder_index = holder_strip(img, holders[index], decoder, arm.dsf)
+            if img is not None and holder_index is None:
+                geometry = holder_strip_geometry(holders[index], decoder)
+                displaced = arm.counter_strip in ("displaced-x", "displaced-y") and geometry == "inside"
+                clipped = geometry == "outside" and arm.capture in PAUSED
+                if not displaced and not clipped:
+                    problems.append("holder pixels missing or the holder strip does not decode at its device scale")
         if not (number(advance) and number(insert) and number(decoder.get("detach")) and advance <= decoder["detach"] <= insert):
             problems.append(f"detach {decoder.get('detach')} not inside [advance {advance}, transition DOM {insert}]")
         before = pre_detach(decoder)
         if not before:
             problems.append("no well-formed, ordered rVFC record before the detach")
         else:
+            first_rvfc = _dsk_first_rvfc_times(decoder)
+            if first_rvfc is not None:
+                first_rvfc_times[decoder.get("id")] = first_rvfc
+                first_media_times[decoder.get("id")] = first_rvfc[1]
+            decoder_reference = round(before[-1][1] * (counter_fps or FPS))
             if k == 0:
-                reference = round(before[-1][1] * FPS)
+                reference = decoder_reference
+            if arm.counter_strip == "distinct" and index is not None:
+                decoder_references[decoder.get("id")] = decoder_reference
+                if holder_index is not None:
+                    holder_indices[decoder.get("id")] = holder_index
+                if holder_index is not None and holder_index != decoder_reference:
+                    problems.append(f"holder {index} frame {holder_index} != decoder {decoder.get('id')} frame {decoder_reference}")
             if arm.mode == "off" and before[-1][2] < MIN_PRESENTED:
                 problems.append(f"fewer than {MIN_PRESENTED} presented frames before the advance")
+    if arm.counter_strip == "distinct" and (len(decoder_references) != arm.holders
+                                             or len(set(decoder_references.values())) != len(decoder_references)):
+        problems.append(f"holder decoder frame identities are not distinct: {list(decoder_references.values())}")
+    if arm.counter_strip == "distinct":
+        timing = record.get("dskCounterTiming")
+        rows = timing.get("decoders") if isinstance(timing, dict) else None
+        recorded = ({row.get("id"): (row.get("holderIndex"), row.get("firstMediaTimeS")) for row in rows}
+                    if isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
+                    and len({row.get("id") for row in rows}) == len(rows) else {})
+        paired = {decoder.get("id"): (index, first_media_times.get(decoder.get("id"))) for index, decoder in pairs}
+        if (not isinstance(timing, dict) or timing.get("expectedDeltaS") != DSK_COUNTER_DELTA_S
+                or timing.get("toleranceS") != DSK_COUNTER_TIME_TOLERANCE_S
+                or timing.get("counterFps") != counter_fps or recorded != paired):
+            problems.append("DSK first-rVFC media-time record missing or inconsistent")
+        elif len(first_media_times) != 2:
+            problems.append(f"{len(first_media_times)} DSK first-rVFC media times (need 2)")
+        offsets = {_dsk_decoder_offset(decoder): decoder.get("id") for _, decoder in pairs}
+        if set(offsets) != set(DSK_COUNTER_OFFSETS.values()) or len(offsets) != len(pairs):
+            problems.append("DSK decoder sources do not identify the base and #t=5 clips")
+        elif len(first_media_times) == 2:
+            base_id, offset_id = offsets[0.0], offsets[DSK_COUNTER_DELTA_S]
+            delta = first_media_times[offset_id] - first_media_times[base_id]
+            if abs(delta - DSK_COUNTER_DELTA_S) > DSK_COUNTER_TIME_TOLERANCE_S:
+                problems.append(f"DSK #t=5 first-rVFC media time is not {DSK_COUNTER_DELTA_S:g}s after the base clip: "
+                                f"{[first_media_times.get(base_id), first_media_times.get(offset_id)]}")
+            if counter_fps is not None and set(holder_indices) == {base_id, offset_id}:
+                frame_delta = holder_indices[offset_id] - holder_indices[base_id]
+                expected_frames = DSK_COUNTER_DELTA_S * counter_fps
+                index_tolerance = round(DSK_COUNTER_TIME_TOLERANCE_S * counter_fps)
+                if abs(frame_delta - expected_frames) > index_tolerance:
+                    problems.append(f"DSK #t=5 holder frame is not {expected_frames:g} ± "
+                                    f"{index_tolerance} after the base holder: "
+                                    f"{[holder_indices[base_id], holder_indices[offset_id]]}; first rVFC "
+                                    f"presentation/media times: base {first_rvfc_times.get(base_id)}, "
+                                    f"#t=5 {first_rvfc_times.get(offset_id)}")
+            else:
+                problems.append("DSK holder frame indices are missing for the paired decoders")
     if arm.capture in PAUSED:
         requested = (record.get("paused") or {}).get("frame")
         if reference is None or requested != reference:
@@ -3072,8 +3384,14 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
     first_holders = ((record.get("dump") or {}).get("first") or {}).get("holders") or []
     holder_index = (holder_strip(holder_img, first_holders[0], decoder, arm.dsf)
                     if needs_holder and holder_img is not None and first_holders and origin is not None else None)
+    strip_geometry = (holder_strip_geometry(first_holders[0], decoder)
+                      if needs_holder and first_holders and decoder is not None else None)
+    if holder_index is None and strip_geometry == "outside" and arm.capture in PAUSED:
+        holder_index = reference
     o_indices = [decode_strip(straight(o), origin, scale) for o in demixed] if origin else []
     out["frozen_frame"] = _voided(score_frozen(holder_index, reference, o_indices, holder=needs_holder), problems)
+    if strip_geometry == "outside":
+        out["frozen_frame"]["detail"]["strip"] = "strip clipped by geometry"
     region_rect = device_rects([decoder["region"]], arm.dsf)[0] if decoder and decoder.get("region") else None
     region_mask = rect_mask(ev.A.shape[:2], [region_rect]) if region_rect and ev.A is not None else None
     if region_mask is not None and region_mask.any():
@@ -3280,6 +3598,21 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
                                                alphaRefusal=not refusal_problems)
         else:
             checks["holder_pixels"] = score_holder_pixels(images.get("ref-A0-0"), live, box, mask, lut, cal)
+            decoder = next((d for d in decoders_of(record) if d.get("id") == (record.get("paused") or {}).get("id")), None)
+            if arm.counter_strip in ("displaced-x", "displaced-y"):
+                attribution = score_displaced_holder(
+                    images.get("ref-A0-0"), live, holders[0] if holders else None, decoder, record.get("stage"), mask,
+                    lut, arm.counter_strip[-1], arm.dsf, cal,
+                )
+                checks["holder_pixels"]["detail"]["attribution"] = attribution
+                if attribution["verdict"] != "PASS":
+                    checks["holder_pixels"] = result(
+                        None, [f"displaced-holder attribution {attribution['verdict']}: "
+                               f"{'; '.join(attribution['problems']) or attribution['detail']!r}"],
+                        holderPixels=checks["holder_pixels"], attribution=attribution,
+                    )
+            if decoder is not None and holders and holder_strip_geometry(holders[0], decoder) == "outside":
+                checks["holder_pixels"]["detail"]["strip"] = "strip clipped by geometry"
         checks["reference"] = score_perfect(images.get("ref-perfect-0"), live, box, cal)
         checks["mask"] = result(mask is not None, [] if mask is not None else ["production mask not verified"])
     for name in ("geometry", "exterior", "scope"):
@@ -3915,6 +4248,10 @@ def reference_burst(host: Any, target: dict[str, Any], capture: Callable[[], np.
     return record, images
 
 
+def _shot_record(name: str, t0: float, t1: float) -> dict[str, Any]:
+    return {"name": name, "t0": t0, "t1": t1, "durationMs": t1 - t0}
+
+
 def burst(host: Any, target: dict[str, Any], capture: Callable[[], np.ndarray], *, actions: Iterable[tuple[float, str]] = (),
           screencast: Callable[[], Any] | None = None, lead_s: float = 0.0, tag: str = "",
           drop: str | None = None, handoff: bool = False) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
@@ -3962,7 +4299,7 @@ def burst(host: Any, target: dict[str, Any], capture: Callable[[], np.ndarray], 
             img = capture()
             name = f"{tag}shot-{len(record['shots']):03d}"
             images[name] = img
-            record["shots"].append({"name": name, "t0": t0, "t1": now()})
+            record["shots"].append(_shot_record(name, t0, now()))
         if thread is not None:
             thread.join(timeout=30)
     for k, (ts, img) in enumerate(cast):
@@ -4035,6 +4372,7 @@ def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.
                                    handoff="handoff" in arm.expect,
                                    drop=arm.drop)
     record.update(shots)
+    record_dsk_counter_timing(record, arm)
     images.update(shot_images)
     settle(host)
     images["settled"] = capture()

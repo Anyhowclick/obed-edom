@@ -287,7 +287,7 @@ FG_RECT = [60.0, 20.0, 40.0, 10.0]
 IDENTITY_LUT = np.arange(256, dtype=np.uint8)
 TONE_LAYOUT = {"ramp": [[400 + 200 * i, 200, 160, 160, 60 + 40 * i] for i in range(4)],
                "patches": [[400 + 200 * i, 370, 160, 160, [200, 40, 40]] for i in range(4)]}
-SHARED_MUTATIONS = ("holder-shift", "edge-step", "tone-step", "tex-zero", "tex-in-opaque")
+SHARED_MUTATIONS = ("holder-shift", "holder-shift-undecodable", "edge-step", "tone-step", "tex-zero", "tex-in-opaque")
 INJECTED = {"caption": {"box": [-60.0, 300.0, 40.0, 20.0], "paint": [-60.0, 300.0, 456.0, 48.0]},
             "script": {"box": [-60.0, 300.0, 40.0, 20.0], "paint": [-60.0, 300.0, 480.0, 48.0]},
             "svgclip": {"box": [-300.0, 100.0, 200.0, 200.0], "paint": [-50.0, 130.0, 150.0, 40.0]},
@@ -307,10 +307,32 @@ def paint_textures(img: np.ndarray) -> np.ndarray:
     return out
 
 
-def paint_fg(img: np.ndarray) -> np.ndarray:
+def edge_foreground_rects() -> tuple[tuple[float, float, float, float], ...]:
+    parent_near = (CONTENT[0] - 2.5, CONTENT[1] - 2.5)
+    return tuple((parent_near[0] + x, parent_near[1] + y, w, h)
+                 for x, y, w, h in (*probe.EDGE_FOREGROUND_RECTS, probe.EDGE_FOREGROUND_SQUARE_RECT))
+
+
+def paint_edge_foreground(img: np.ndarray) -> np.ndarray:
+    out = img.copy()
+    for rect, rgba in zip(edge_foreground_rects(), ((230, 20, 20, 255), (250, 160, 0, 255), (240, 240, 240, 75))):
+        x, y, w, h = rect
+        x0 = probe.jround(CONTENT[0]) + probe.jround(x - CONTENT[0])
+        x1 = probe.jround(CONTENT[0]) + probe.jround(x + w - CONTENT[0])
+        y0 = probe.jround(CONTENT[1]) + probe.jround(y - CONTENT[1])
+        y1 = probe.jround(CONTENT[1]) + probe.jround(y + h - CONTENT[1])
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(out.shape[1], x1), min(out.shape[0], y1)
+        layer = np.zeros_like(out)
+        layer[y0:y1, x0:x1] = rgba
+        out = probe.over(layer, out)
+    return out
+
+
+def paint_fg(img: np.ndarray, rect: list[float] = FG_RECT) -> np.ndarray:
     """The redrawn foreground canvas (opaque light grey) over the movie at `FG_RECT`."""
     out = img.copy()
-    out[20:30, 60:100] = (240, 240, 240, 255)
+    x, y, w, h = (int(v) for v in rect)
+    out[y:y + h, x:x + w] = (240, 240, 240, 255)
     return out
 
 
@@ -384,29 +406,44 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         out[top:top + up.shape[0]] = up[:vh - top]
         return out
 
+    content_y = (probe.NOOFFSET_Y_DISPLACEMENT * CONTENT[3] / 267.6214599609375
+                 if "nooffsety" in spec.overrides else 10.0)
+    left = 10 + 0.4 * CONTENT[2] + 0.37 if "clipnearx" in spec.overrides else 10.0
+    top_local = content_y + 0.4 * CONTENT[3] + 0.37 if {"clipneary", "nooffsety"} & set(spec.overrides) else content_y
+    top_css = top_local + dy
     right = 310.37 if "clipx" in spec.overrides else 490.0
-    bottom = 90.37 if "clipy" in spec.overrides else 145.0
-    box = (probe.jround(10 * k), probe.jround((10 + dy) * k), probe.jround(right * k), probe.jround((bottom + dy) * k))
+    bottom = 90.37 + dy if "clipy" in spec.overrides else content_y + CONTENT[3] + dy
+    box = (probe.jround(left * k), probe.jround(top_css * k), probe.jround(right * k), probe.jround(bottom * k))
     x0, y0, x1, y1 = box
     in_box = np.zeros((vh, vw, 1), bool)
     in_box[y0:y1, x0:x1] = True
-    content = [10.0, 10.0 + dy, 480.0, 135.0]
-    region = [10.0, 10.0 + dy, right - 10, bottom - 10]
-    css_box = [10.0, 10.0 + dy, (x1 - x0) / k, (y1 - y0) / k]
+    local_content = [10.0, content_y, 480.0, 135.0]
+    content = [10.0, content_y + dy, 480.0, 135.0]
+    region = [left, top_css, right - left, bottom - top_css]
+    css_box = [left, top_css, (x1 - x0) / k, (y1 - y0) / k]
+    foreground_local = [max(FG_RECT[0], left + 10), max(FG_RECT[1], top_local + 10), FG_RECT[2], FG_RECT[3]]
+    foreground_rect = [foreground_local[0], foreground_local[1] + dy, foreground_local[2], foreground_local[3]]
     frame = strip_frame(REFERENCE, bw=bw)
-    placed = probe.place(frame, CONTENT, CONTENT, (H, W))
+    placed = probe.place(frame, local_content, local_content, (H, W))
     movie = placed.copy()
-    if mutate == "holder-shift":
+    if mutate in ("holder-shift", "holder-shift-undecodable"):
         movie[10:145, 11:490] = placed[10:145, 10:489]
+    elif mutate == "holder-y-nooffset":
+        movie[:-1] = placed[1:]
+        movie[-1] = 0
     omit = "fg-omit" in (spec.splice or "")
-    if reference:
-        live_placed, holder_placed = paint_fg(placed), movie if omit else paint_fg(movie)
+    if "edgefg" in spec.overrides:
+        live_placed, holder_placed = paint_edge_foreground(placed), movie if omit else paint_edge_foreground(movie)
+    elif reference or spec.movies == "tone":
+        live_placed, holder_placed = paint_fg(placed, foreground_local), movie if omit else paint_fg(movie, foreground_local)
     elif "fg" in spec.overrides:
         live_placed, holder_placed = paint_textures(placed), movie if omit else paint_textures(movie)
     else:
         live_placed, holder_placed = placed, movie
     A_d, B_d = dev(A), dev(B)
     holder_px = dev(holder_placed)[y0:y1, x0:x1].copy()
+    if mutate == "holder-shift-undecodable":
+        holder_px[:12, :172, :3] = 126
     if mutate == "edge-step":
         holder_px[:, 0, :3] = np.clip(holder_px[:, 0, :3].astype(int) + 8, 0, 255)
     holder_full = np.zeros_like(A_d)
@@ -468,7 +505,7 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
             if dark_at(t0, t0 + 10):
                 img = np.zeros_like(img)
         images[name] = img
-        shots.append({"name": name, "t0": float(t0), "t1": float(t0) + 10.0})
+        shots.append({"name": name, "t0": float(t0), "t1": float(t0) + 10.0, "durationMs": 10.0})
     blend, iso = ("plus-lighter", "isolate") if spec.styles == "on" else ("normal", "auto")
     chain = [[{"id": tid, "blend": "normal", "isolation": "auto"}, {"id": leaf, "blend": blend, "isolation": "auto"},
               {"id": f"{leaf}-opacity", "blend": "normal", "isolation": "auto"}, {"id": "layer2", "blend": "normal", "isolation": iso}]
@@ -517,22 +554,32 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         if mutate == "tone-small-cells":
             layout["ramp"] = [[x, y, 16 if i else w, 16 if i else h, v] for i, (x, y, w, h, v) in enumerate(TONE_LAYOUT["ramp"])]
         record["movies"] = {"x.mov": {"layout": layout}}
-    if "fg" in spec.overrides:
+    if "edgefg" in spec.overrides:
+        record["foreground"] = {"0": []}
+        ids = (*probe.FOREGROUND_TEXTURES, probe.FOREGROUND_SQUARE)
+        alphas = (1.0, 1.0, 0.2947)
+        for j, (tid, r, alpha) in enumerate(zip(ids, edge_foreground_rects(), alphas)):
+            image = np.zeros((int(r[3]), int(r[2]), 4), np.uint8)
+            image[...] = (255, 255, 255, round(alpha * 255))
+            images[f"fg-0-{j}"] = image
+            record["foreground"]["0"].append({"id": tid, "rect": list(r), "alpha": alpha,
+                                                   "order": 5 + j, "image": f"fg-0-{j}"})
+    elif "fg" in spec.overrides:
         record["foreground"] = {"0": []}
         for j, (tid, r) in enumerate(zip(probe.FOREGROUND_TEXTURES, TEXTURE_RECTS)):
             images[f"fg-0-{j}"] = np.full((int(r[3]), int(r[2]), 4), 255, np.uint8)
             record["foreground"]["0"].append({"id": tid, "rect": [r[0], r[1] + dy, r[2], r[3]], "alpha": 1.0, "order": 5 + j, "image": f"fg-0-{j}"})
-    if reference:
-        rect, size = (FG_RECT, (10, 40))
+    if (reference or spec.movies == "tone") and "edgefg" not in spec.overrides:
+        rect, size = (list(foreground_rect), (10, 40))
         if mutate == "mask-whole":
-            rect, size = [40.0, 15.0, 100.0, 30.0], (30, 100)
+            rect, size = [40.0, 15.0 + dy, 100.0, 30.0], (30, 100)
         elif mutate == "mask-shift3":
-            rect = [FG_RECT[0] + 3, *FG_RECT[1:]]
-        rect = [rect[0], rect[1] + dy, rect[2], rect[3]]
+            rect = [foreground_rect[0] + 3, *foreground_rect[1:]]
         fg = np.zeros((*size, 4), np.uint8)
         fg[...] = (240, 240, 240, 255)
         images["fg-0-0"] = fg
         record["foreground"] = {"0": [] if mutate == "mask-empty" else [{"id": "FG", "rect": rect, "alpha": 1.0, "order": 7, "image": "fg-0-0"}]}
+    if reference:
         record["reference"] = reference_block(spec, A_d, B_d, with_holder, live, mutate, images, box)
     if spec.inject:
         record["inject"] = None if mutate == "no-inject" else {**INJECTED[spec.inject], **({"open": False} if mutate == "inject-false" else {}),
@@ -862,6 +909,300 @@ def device_strip() -> int | None:
                               {"content": CONTENT, "size": [binary.WIDTH, binary.HEIGHT]}, 1.0)
 
 
+def negative_strip_problems() -> list[list[str]]:
+    problems = []
+    for arm in ("m-snap-cef-nooffset-x", "m-snap-cef-nooffset-x-twin"):
+        record, images = media_run(arm, mutate="holder-shift-undecodable")
+        problems.append(probe.media_integrity(record, images, probe.ARMS[arm], [])[2])
+    return problems
+
+
+def near_clip_geometry() -> list[tuple[tuple[float, ...], float, float]]:
+    root = probe.DECKS["p2bin"].unmodified
+    header = probe.read_doc(root / "assets/header.json")
+    source = probe.read_doc(root / probe.slide_doc_path(header["slideList"][1]))
+    result = []
+    for axis in ("x", "y"):
+        doc = probe.json.loads(probe.json.dumps(source))
+        before = [(n, p) for b in probe._effects(doc["events"]) for n, p in probe._layers(b["baseLayer"])
+                  if n.get("isVideoLayer")][0]
+        video_node0, parent_node0 = before
+        video0, parent0 = video_node0["initialState"], parent_node0["initialState"]
+        size, coord = ("width", "pointX") if axis == "x" else ("height", "pointY")
+        old_parent_near = parent0["position"][coord] - parent0["anchorPoint"][coord] * parent0[size]
+        old_child_nears = [old_parent_near + child["initialState"]["position"][coord]
+                           - child["initialState"]["anchorPoint"][coord] * child["initialState"][size]
+                           for child in parent_node0["layers"]]
+        old_content_near = old_parent_near + video0["position"][coord] - video0["anchorPoint"][coord] * video0[size]
+        old_far = old_parent_near + parent0[size]
+        intended_near = old_content_near + 0.4 * video0[size] + 0.37
+        probe._clip_near(axis)(doc, probe.transition_event(doc))
+        video_node, parent_node = [(n, p) for b in probe._effects(doc["events"])
+                                   for n, p in probe._layers(b["baseLayer"]) if n.get("isVideoLayer")][0]
+        video, parent = video_node["initialState"], parent_node["initialState"]
+        parent_near = parent["position"][coord] - parent["anchorPoint"][coord] * parent[size]
+        child_nears = [parent_near + child["initialState"]["position"][coord]
+                       - child["initialState"]["anchorPoint"][coord] * child["initialState"][size]
+                       for child in parent_node["layers"]]
+        result.append((tuple(round(after - before, 9) for before, after in zip(old_child_nears, child_nears)),
+                       round(parent_near - intended_near, 9), round(parent_near + parent[size] - old_far, 9)))
+    return result
+
+
+def near_clip_rejections() -> tuple[str, str, str]:
+    root = probe.DECKS["p2bin"].unmodified
+    header = probe.read_doc(root / "assets/header.json")
+    source = probe.read_doc(root / probe.slide_doc_path(header["slideList"][1]))
+    results = []
+    for mutation in ({"boundsOrigin": {"pointX": 1, "pointY": 0}}, {"affineTransform": [1, 0, 0, 1, 1, 0]},
+                     {"sublayerTransform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1]}):
+        doc = probe.json.loads(probe.json.dumps(source))
+        _, parent = [(n, p) for b in probe._effects(doc["events"]) for n, p in probe._layers(b["baseLayer"])
+                     if n.get("isVideoLayer")][0]
+        parent["initialState"].update(mutation)
+        with pytest.raises(ValueError) as caught:
+            probe._clip_near("x")(doc, probe.transition_event(doc))
+        results.append(str(caught.value))
+    return tuple(results)
+
+
+def nooffset_y_real_geometry() -> tuple[Any, ...]:
+    root = probe.DECKS["p2bin"].unmodified
+    header = probe.read_doc(root / "assets/header.json")
+    doc = probe.read_doc(root / probe.slide_doc_path(header["slideList"][1]))
+    probe._nooffset_y(doc, probe.transition_event(doc))
+    video_node, parent_node = [(n, p) for b in probe._effects(doc["events"])
+                               for n, p in probe._layers(b["baseLayer"]) if n.get("isVideoLayer")][0]
+    video, parent = video_node["initialState"], parent_node["initialState"]
+    parent_top = parent["position"]["pointY"] - parent["anchorPoint"]["pointY"] * parent["height"]
+    video_top = parent_top + video["position"]["pointY"] - video["anchorPoint"]["pointY"] * video["height"]
+    strip_bottom = video_top + binary.STRIP_RECT[3] * video["width"] / binary.WIDTH
+    overrides = tuple(probe.ARMS[name].overrides for name in
+                      ("m-snap-cef-nooffset-y", "m-snap-cef-nooffset-y-twin"))
+    return (round(video_top, 6), video["height"], round(parent_top - video_top, 6), strip_bottom <= parent_top,
+            parent["masksToBounds"], overrides)
+
+
+def nooffset_y_outcomes() -> tuple[str, str, str, str, str]:
+    arm = probe.ARMS["m-snap-cef-nooffset-y"]
+    twin = media_run(arm.twin)
+    correct = probe.score_arm(*media_run("m-snap-cef-nooffset-y"), arm,
+                              CAL, profile=probe.CEF_PLACEMENT, twin=twin, lut=IDENTITY_LUT)
+    defective_twin = media_run(arm.twin, mutate="holder-y-nooffset")
+    defective = probe.score_arm(*media_run("m-snap-cef-nooffset-y", mutate="holder-y-nooffset"), arm,
+                                CAL, profile=probe.CEF_PLACEMENT, twin=defective_twin, lut=IDENTITY_LUT)
+    return (correct["checks"]["holder_pixels"]["verdict"],
+            correct["checks"]["holder_pixels"]["detail"]["attribution"]["verdict"], correct["outcome"],
+            defective["checks"]["holder_pixels"]["verdict"], defective["outcome"])
+
+
+def dsk_counter_resolver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
+    copied = []
+
+    def fake_h264(_scratch: Path, source: Path) -> dict[str, Any]:
+        copied.append(source)
+        return {"path": str(source), "sha256": probe.binary.sha256_file(source), "kind": "h264"}
+
+    monkeypatch.setattr(probe, "h264_copy", fake_h264)
+    arm = probe.ARMS["m-snap-cef-dsk"]
+    resolved = probe.resolve(arm, tmp_path / "dsk")
+    counters = {path: info for path, info in resolved.movies.items() if "seekOffsetS" in info}
+    paths = {info["path"] for info in counters.values()}
+    digests = {info["sha256"] for info in counters.values()}
+    doc = probe.read_doc(resolved.resolver(resolved.root, probe.slide_doc_path(resolved.target["uuid"])))
+    assets = {Path(path).stem: info for path, info in probe.DSK_COUNTER_OFFSETS.items()}
+    urls = tuple(doc["assets"][asset]["url"]["native"] for asset in sorted(assets))
+    starts = tuple(sorted(float(build["movie"]["startTime"]) for build in probe._effects(doc["events"])))
+    aliases = tuple(sorted(Path(path).name for path in counters))
+    player = (resolved.root / "assets/player/main.js").read_bytes()
+    return (len(counters), len(paths), starts, urls, aliases, digests.pop(),
+            bool(copied) and all(resolved.target["uuid"] not in path.parts for path in copied),
+            tuple(player.count(anchor) for anchor, _ in probe.DSK_PLAYER_SRC_ANCHORS),
+            {info["fps"] for info in counters.values()}, probe.dsk_counter_fps())
+
+
+def dsk_holder_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
+    monkeypatch.setattr(probe, "h264_copy", lambda _scratch, source: {
+        "path": str(source), "sha256": probe.binary.sha256_file(source), "kind": "h264"
+    })
+    resolved = probe.resolve(probe.ARMS["m-snap-cef-dsk"], tmp_path / "dsk-identity")
+    doc = probe.read_doc(resolved.resolver(resolved.root, probe.slide_doc_path(resolved.target["uuid"])))
+    urls = [doc["assets"][Path(name).stem]["url"]["native"] for name in probe.DSK_COUNTER_OFFSETS]
+    offsets = [float(url.rsplit("#t=", 1)[1]) if "#t=" in url else 0.0 for url in urls]
+    sources = [url.rsplit("/", 1)[-1] for url in urls]
+    counter_fps = probe.dsk_counter_fps()
+    assert counter_fps is not None
+    record, images = media_run("m-snap-cef-dsk")
+    first = record["dump"]["first"]
+    first["holders"][0]["parent"] = "layer4-opacity"
+    second_rect = [150.0, 180.0, 480.0, 135.0]
+    first["holders"].append({"parent": "layer4-opacity", "rect": second_rect, "canvasRect": second_rect, "natural": [480, 135]})
+    second_frame = REFERENCE + round((offsets[1] - offsets[0]) * counter_fps)
+    images["holder-1"] = probe.place(strip_frame(second_frame), CONTENT, CONTENT, (H, W))[10:145, 10:490].copy()
+    decoder = record["dump"]["vids"][0]
+    decoder["src"] = sources[0]
+    shifted = [[t, media + offsets[1] - offsets[0], presented] for t, media, presented in decoder["rv"]]
+    second = {**decoder, "id": 1, "src": sources[1], "content": second_rect, "region": second_rect,
+              "rv": [[shifted[0][0] - 33.0, 0.0, 0], *shifted]}
+    record["dump"]["vids"].append(second)
+    record["dump"]["vids"].extend({**decoder, "id": decoder_id, "src": "prior.mov"}
+                                         for decoder_id in range(2, 13))
+    for row in record["dump"]["raf"]:
+        if "eff" not in row:
+            row["videos"].append({"id": 1, "on": True, "rect": second_rect, "eff": 1.0, "inT": False,
+                                  "inStage": True, "paused": False,
+                                  "geo": {"content": second_rect, "region": second_rect,
+                                          "size": [binary.WIDTH, binary.HEIGHT]}})
+    record["foreground"]["1"] = []
+    probe.record_dsk_counter_timing(record, probe.ARMS["m-snap-cef-dsk"])
+    recorded_ids = [row["id"] for row in record["dskCounterTiming"]["decoders"]]
+    recorded_times = [row["firstMediaTimeS"] for row in record["dskCounterTiming"]["decoders"]]
+    good = probe.media_integrity(record, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7])[2]
+    reordered = probe.json.loads(probe.json.dumps(record))
+    reordered["dskCounterTiming"]["decoders"].reverse()
+    reordered_good = probe.media_integrity(reordered, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7])[2]
+    no_timing = probe.json.loads(probe.json.dumps(record))
+    no_timing.pop("dskCounterTiming")
+    missing = probe.media_integrity(no_timing, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7])[2]
+    inert = probe.json.loads(probe.json.dumps(record))
+    for rv in inert["dump"]["vids"][1]["rv"]:
+        if rv[1]:
+            rv[1] -= offsets[1] - offsets[0]
+    probe.record_dsk_counter_timing(inert, probe.ARMS["m-snap-cef-dsk"])
+    inert_problems = probe.media_integrity(inert, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7])[2]
+    reversed_sources = probe.json.loads(probe.json.dumps(record))
+    reversed_sources["dump"]["vids"][0]["src"], reversed_sources["dump"]["vids"][1]["src"] = sources[1], sources[0]
+    probe.record_dsk_counter_timing(reversed_sources, probe.ARMS["m-snap-cef-dsk"])
+    reversed_problems = probe.media_integrity(
+        reversed_sources, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    spacing_tolerance = round(probe.DSK_COUNTER_TIME_TOLERANCE_S * counter_fps)
+    allowed_gap_record = probe.json.loads(probe.json.dumps(record))
+    allowed_gap_record["dump"]["vids"][1]["rv"][-1][1] += spacing_tolerance / counter_fps
+    allowed_gap_images = {**images, "holder-1": probe.place(
+        strip_frame(second_frame + spacing_tolerance), CONTENT, CONTENT, (H, W)
+    )[10:145, 10:490].copy()}
+    allowed_gap = probe.media_integrity(
+        allowed_gap_record, allowed_gap_images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    wrong_gap_record = probe.json.loads(probe.json.dumps(record))
+    wrong_gap_record["dump"]["vids"][1]["rv"][-1][1] += (spacing_tolerance + 1) / counter_fps
+    wrong_gap_images = {**images, "holder-1": probe.place(
+        strip_frame(second_frame + spacing_tolerance + 1), CONTENT, CONTENT, (H, W)
+    )[10:145, 10:490].copy()}
+    wrong_gap = probe.media_integrity(
+        wrong_gap_record, wrong_gap_images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    wrong_gap_problem = next((problem for problem in wrong_gap if "#t=5 holder frame" in problem), "")
+    first_rvfc_times = [probe._dsk_first_rvfc_times(decoder) for decoder in record["dump"]["vids"][:2]]
+    images["holder-0"], images["holder-1"] = images["holder-1"], images["holder-0"]
+    swapped = probe.media_integrity(record, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7])[2]
+    return (good, reordered_good, recorded_ids, round(recorded_times[1] - recorded_times[0], 6),
+            record["dskCounterTiming"]["counterFps"], any("!= decoder" in problem for problem in swapped),
+            any("media-time record" in problem for problem in missing),
+            any("#t=5 first-rVFC" in problem for problem in inert_problems),
+            any("#t=5 first-rVFC" in problem for problem in reversed_problems),
+            spacing_tolerance,
+            allowed_gap,
+            bool(wrong_gap_problem),
+            all(f"{label} {times}" in wrong_gap_problem
+                for label, times in zip(("base", "#t=5"), first_rvfc_times)))
+
+
+def near_clip_outcomes() -> list[tuple[str, str | None]]:
+    outcomes = []
+    for name in ("m-snap-cef-near-x", "m-snap-cef-near-y"):
+        arm = probe.CEF_PLACEMENT.arm(name)
+        scored_run = probe.score_arm(*media_run(name), arm, CAL, profile=probe.CEF_PLACEMENT,
+                                     twin=media_run(arm.twin), lut=IDENTITY_LUT)
+        outcomes.append((scored_run["outcome"], scored_run["checks"]["holder_pixels"]["detail"].get("strip")))
+    return outcomes
+
+
+def near_clip_fail_closed() -> tuple[str, bool, bool]:
+    record, images = media_run("m-snap-cef-near-x")
+    decoder_id = record["paused"]["id"]
+    partial = [180.0, 10.0, 310.0, 135.0]
+    holder = record["dump"]["first"]["holders"][0]
+    holder.update(rect=partial, canvasRect=partial, natural=[310, 135])
+    frame = probe.place(strip_frame(REFERENCE), CONTENT, CONTENT, (H, W))
+    images["holder-0"] = frame[10:145, 180:490].copy()
+    for row in record["dump"]["raf"]:
+        for video in row.get("videos") or []:
+            if video.get("id") == decoder_id and video.get("geo"):
+                video["geo"]["region"] = partial
+    geometry = probe.holder_strip_geometry(holder, probe.decoders_of(record)[-1])
+    partial_problems = probe.media_integrity(record, images, probe.ARMS["m-snap-cef-near-x"], [])[2]
+    record["paused"]["frame"] += 1
+    stale_problems = probe.media_integrity(record, images, probe.ARMS["m-snap-cef-near-x"], [])[2]
+    return geometry, any("strip does not decode" in problem for problem in partial_problems), any(
+        "paused reference" in problem for problem in stale_problems)
+
+
+def edge_fixture_layout() -> tuple[tuple[str, ...], int | None, dict[str, float | None], bool]:
+    names = ("m-snap-cef", "m-snap-cef-twin", "wrongrule-cef", "wrongrule-cef-twin")
+    root = probe.DECKS["p2bin"].unmodified
+    header = probe.read_doc(root / "assets/header.json")
+    doc = probe.read_doc(root / probe.slide_doc_path(header["slideList"][1]))
+    probe._edge_foreground(doc, probe.transition_event(doc))
+    video, parent = [(n, p) for b in probe._effects(doc["events"])
+                     for n, p in probe._layers(b["baseLayer"]) if n.get("isVideoLayer")][0]
+    state = parent["initialState"]
+    parent_near = (state["position"]["pointX"] - state["anchorPoint"]["pointX"] * state["width"],
+                   state["position"]["pointY"] - state["anchorPoint"]["pointY"] * state["height"])
+    video_index = parent["layers"].index(video)
+    children = parent["layers"][video_index + 1:]
+    rects = []
+    for child in children:
+        state = child["initialState"]
+        rects.append([parent_near[0] + state["position"]["pointX"] - state["anchorPoint"]["pointX"] * state["width"],
+                      parent_near[1] + state["position"]["pointY"] - state["anchorPoint"]["pointY"] * state["height"],
+                      state["width"], state["height"]])
+    video_state = video["initialState"]
+    x = parent_near[0] + video_state["position"]["pointX"] - video_state["anchorPoint"]["pointX"] * video_state["width"]
+    y = parent_near[1] + video_state["position"]["pointY"] - video_state["anchorPoint"]["pointY"] * video_state["height"]
+    box = (probe.jround(x), probe.jround(y), probe.jround(x) + round(video_state["width"]),
+           probe.jround(y) + round(video_state["height"]))
+    record, images = media_run("m-snap-cef")
+    twin = media_run("m-snap-cef-twin")
+    arm = probe.ARMS["m-snap-cef"]
+    mask, problems = probe.verified_mask(record, images, arm, probe.CEF_PLACEMENT, CAL, twin)
+    holder = record["dump"]["first"]["holders"][0]
+    decoder = probe.decoders_of(record)[0]
+    device = probe.device_box(holder["rect"], arm.dsf)
+    split = probe.region_split(np.zeros(images["live-0"].shape[:2]), device, ~mask) if mask is not None and device else {}
+    crosses = any(r[0] < x < r[0] + r[2] for r in rects)
+    assert not problems
+    assert all(child.get("texture") != probe.FOREGROUND_FRAME for child in children)
+    return (tuple(probe.ARMS[name].overrides[0] for name in names),
+            probe.holder_strip(images["holder-0"], holder, decoder, arm.dsf), split, crosses)
+
+
+def displaced_attribution() -> tuple[str, str, str, str, tuple[int, int], tuple[str, str]]:
+    rng = np.random.default_rng(17)
+    live = rng.integers(0, 256, (20, 40, 4), dtype=np.uint8)
+    live[..., 3] = 255
+    shifted = np.zeros_like(live)
+    shifted[..., 3] = 255
+    shifted[:, :30, :3] = np.rint(0.63 * live[:, 5:35, :3] + 0.37 * live[:, 6:36, :3]).astype(np.uint8)
+    mask = np.zeros(live.shape[:2], bool)
+    holder = {"canvasRect": [0.0, 0.0, 30.0, 20.0]}
+    decoder = {"rect": [5.37, 0.0, 30.0, 20.0], "content": [5.37, 0.0, 30.0, 20.0]}
+    matched = probe.score_displaced_holder(shifted, live, holder, decoder, {"x": 0.0}, mask, IDENTITY_LUT, "x", 1.0)
+    minus = probe.score_displaced_holder(shifted, live, holder, {**decoder, "rect": [3.37, 0.0, 30.0, 20.0]},
+                                           {"x": 0.0}, mask, IDENTITY_LUT, "x", 1.0)
+    plus = probe.score_displaced_holder(shifted, live, holder, {**decoder, "rect": [7.37, 0.0, 30.0, 20.0]},
+                                          {"x": 0.0}, mask, IDENTITY_LUT, "x", 1.0)
+    empty = probe.score_displaced_holder(shifted, live, {"canvasRect": [30.0, 0.0, 5.0, 20.0]},
+                                          {**decoder, "rect": [30.37, 0.0, 30.0, 20.0],
+                                           "content": [30.0, 0.0, 30.0, 20.0]},
+                                          {"x": 0.0}, mask, IDENTITY_LUT, "x", 1.0)
+    twins = tuple(probe.ARMS[name].counter_strip for name in
+                  ("m-snap-cef-nooffset-x-twin", "m-snap-cef-nooffset-y-twin"))
+    return (matched["verdict"], minus["verdict"], plus["verdict"], empty["verdict"],
+            tuple(matched["detail"]["sampleOffsetsPx"]), twins)
+
+
 def cases(prefix: str, variants: tuple[str, ...]) -> dict[str, str]:
     table = probe.scorer_cases(CAL)
     return {v: table[f"case:{prefix}-{v}"]["verdict"] for v in variants}
@@ -1118,6 +1459,14 @@ CASES = [
     ("r3-4 m-tone identity without the foreground inventory", lambda: tone_identity("tone-fg-del"), "INCONCLUSIVE"),
     ("sweep r3: transition DOM missing from one mid-fade rAF", lambda: arm_outcome("m-on", mutate="eff-hole"), "INCONCLUSIVE"),
     ("sweep r3: cast record with an empty name", lambda: bool(probe.schema_problems({"cast": [{"name": "", "t0": 1.0, "t1": 2.0}]})), True),
+    ("live3 animation timing follows unresolved start-time semantics",
+     lambda: [probe.anim_problem({"leaf": "out", "value": 0.5, "dur": 1500, **timing}) for timing in (
+         {"ct": 750, "start": None, "state": "paused"},
+         {"ct": 750, "start": None, "state": "running"},
+         {"ct": None, "start": None, "state": "paused"},
+         {"ct": None, "start": None, "state": "running"},
+         {"ct": 750, "start": None, "state": "finished"},
+     )], [None, None, "null timing while paused", "null timing while running", "null timing while finished"]),
     ("r4-1 overlay video record with opacity -1", lambda: arm_check("m-on", "overlay", mutate="ov-eff-negative"), "INCONCLUSIVE"),
     ("r4-1 overlay video record with width -480", lambda: arm_check("m-on", "overlay", mutate="ov-width-negative"), "INCONCLUSIVE"),
     ("r4-2 go-to row with two mid frames before the interruption", lambda: interrupted("goto"), "INCONCLUSIVE"),
@@ -1247,6 +1596,41 @@ CASES = [
      (set(), True)),
     ("placement raw tone control uses the current identity-tone player bytes",
      lambda: probe.ARMS["m-tone-raw-cef"].splice, None),
+    ("placement raw tone control reuses the same-frame CEF omit twin",
+     lambda: (probe.ARMS["m-tone-raw-cef"].twin,
+              scored("m-tone-raw-cef", identity=False, mutate="tone-step")["outcome"]),
+     ("m-tone-cef-twin", "MATCH")),
+    ("placement near-side clip preserves every child's absolute edge and moves only the clipping edge", near_clip_geometry,
+     [((0.0, 0.0, 0.0), 0.0, 0.0), ((0.0, 0.0, 0.0), 0.0, 0.0)]),
+    ("placement near-side clip rejects non-zero parent bounds origins and transforms", near_clip_rejections,
+     ("near clipping requires a zero bounds origin and an untransformed parent",) * 3),
+    ("placement correct near clips match with geometry-clipped strip evidence", near_clip_outcomes,
+     [("MATCH", "strip clipped by geometry"), ("MATCH", "strip clipped by geometry")]),
+    ("placement near clip geometry fails closed on partial strip and stale paused rVFC identity",
+     near_clip_fail_closed, ("partial", True, True)),
+    ("placement base and wrong-rule rows use an inset foreground layout that leaves holder edges",
+     edge_fixture_layout, (("edgefg", "edgefg", "edgefg", "edgefg"), REFERENCE, {"interior": 0.0, "edge": 0.0}, True)),
+    ("placement nooffset defect remains a valid FAIL when its holder strip is undecodable",
+     negative_strip_problems, [[], []]),
+    ("placement nooffset-y override keeps a near clip at a useful real-fixture displacement",
+     nooffset_y_real_geometry,
+     (125.0, 267.6214599609375, 107.418584, True, True, (("nooffsety",), ("nooffsety",)))),
+    ("placement nooffset-y correct holder passes pixels and therefore mismatches the negative arm",
+     nooffset_y_outcomes, ("PASS", "PASS", "MISMATCH", "FAIL", "MATCH")),
+    ("placement nooffset attribution binds the explicit displaced strip mode",
+     displaced_attribution, ("PASS", "FAIL", "FAIL", "INCONCLUSIVE", (5, 6), ("displaced-x", "displaced-y"))),
+    ("placement DSK uses one pinned counter, a real media fragment, and h264 copies for other movies", "dsk-counter",
+     (2, 1, (0.0, 0.0),
+      ("assets/clip-10-1000001.mov-0.0000-20.8000.mov", "assets/clip-10-1000002.mov-0.0000-50.2000.mov#t=5"),
+      ("clip-10-1000001.mov-0.0000-20.8000.mov", "clip-10-1000002.mov-0.0000-50.2000.mov"),
+      probe.DSK_COUNTER_SHA256, True, (1, 2), {30.0}, 30.0)),
+    ("placement DSK binds timing past prior-slide decoders and enforces directed #t=5 time/frame deltas", "dsk-identity",
+     ([], [], [0, 1], 5.0, 30.0, True, True, True, True, 8, [], True, True)),
+    ("placement burst records each screenshot duration",
+     lambda: probe._shot_record("shot", 10.0, 201.25), {"name": "shot", "t0": 10.0, "t1": 201.25, "durationMs": 191.25}),
+    ("placement CEF profile reports inherited cut and identity-tone rows",
+     lambda: ({"cut", "tone"} <= set(probe.CEF_PLACEMENT.reported),
+              {"cut", "tone"}.isdisjoint(probe.CEF_PLACEMENT.controls())), (True, True)),
     ("DX-1 m-raw-prod: the destination's movies after the hand-off do not empty the in-only class",
      lambda: arm_outcome("m-raw-prod", holder=False, mutate="dest-video"), "MATCH"),
     ("r17 m-raw-prod binding a holder", lambda: arm_check("m-raw-prod", "scope"), "PASS"),
@@ -1279,4 +1663,12 @@ CASES = [
 @pytest.mark.parametrize("build, expected", [pytest.param(b, e, id=name) for name, b, e in CASES])
 def test_dissolve_scorer(build, expected, monkeypatch, tmp_path):
     monkeypatch.setattr(probe, "VIEWPORT", (W, H))
-    assert (eager_movies(tmp_path, monkeypatch) if build == "eager" else build()) == expected
+    if build == "eager":
+        actual = eager_movies(tmp_path, monkeypatch)
+    elif build == "dsk-counter":
+        actual = dsk_counter_resolver(tmp_path, monkeypatch)
+    elif build == "dsk-identity":
+        actual = dsk_holder_identity(tmp_path, monkeypatch)
+    else:
+        actual = build()
+    assert actual == expected
