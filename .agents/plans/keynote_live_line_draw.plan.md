@@ -217,10 +217,9 @@ Minimal, pixel-based. Every check is made on captured frames, never on the patch
     head-notch arms.
   - Kept: body reveal; the `off` and head-static controls; the diamond and protrusion refusals; the held `p = 1` and
     pop checks; end equals `off`; the label rect; hide and show; destroy; busy.
-- **Held `p = 1` arm, owner 2026-10-14.** This arm gates only the held composite against stock; its body-reveal timing
-  is report-only. Reveal timing is gated by the `on` arm. Reason: the probe maps capture time onto the animation clock
-  one frame differently from run to run. That made the arm's reveal check flaky (2 of 3 live runs failed at load ~4),
-  while the drawn pixels were identical in passing and failing runs.
+- **Held `p = 1` arm, owner 2026-10-14.** The arm was first made report-only on reveal timing, because the probe mapped
+  capture time onto the animation clock one frame differently from run to run. With stamped frame timing (§4a) the
+  owner re-gated it: it gates both the held composite and body reveal.
 - **Recorded deviation: body allowance.** The tolerance is 2 median frames + 4 % (0.0817 on the box). On `g2` the box
   measured 0.0448, against the plan's one-frame bar of 0.0208.
 
@@ -234,9 +233,12 @@ Minimal, pixel-based. Every check is made on captured frames, never on the patch
 ## 4a. Open follow-ups (optional, after #270)
 
 - **Native comparison.** The owner compares slide 2 against Keynote's native playback.
-- **Deterministic probe timing.** `scripts/line_draw_probe.py` maps screencast timestamps onto the player's animation
-  clock, and the mapping can land one frame off from run to run. That is why `hold-p1` reveal timing is report-only.
-  Stamping each captured frame with the page's own animation time would make the reveal-timing checks deterministic.
+- **Deterministic probe timing: done (2026-10-14).** The probe's hook paints its rAF time into a 96×2 px stamp
+  (sync byte, 0.01 ms ticks, CRC-8) at the bottom-left; each frame's score time is its decoded stamp, and page times
+  are quantised to the same grid. The strip is masked from every pixel check. A missing or corrupt stamp, decreasing
+  stamps, or an equal stamp over different pixels (a compositor-only frame) make the arm INCONCLUSIVE. `--score`
+  refuses runs saved without stamps. `neighbour` and `keyer` keep their old timing. Gate record row in
+  `.agents/reviews/line-draw/gates-r1.md`.
 - **Keyer re-checks.** The managed-OBS screenshot driver used for the Keyer gate was scratch-only. Rebuild it from
   `managed_obs_qualify`'s `launch_engine`, `source_shots` and `unpremultiply` with the scratch `DEFAULT_HOME`, and retry
   `goTo` after attach (CEF drops key input just after load).

@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-14 · *let the frame say when* ⏱️
+
+> The Line Draw probe kept guessing when each screenshot was taken, and its guess drifted by one frame from run to
+> run. So we let every frame write down its own time in a 96×2 px strip of black and white cells. The error on the
+> box dropped from 0.045 to 0.014, and stayed there. Then round three showed that even a printed time needs
+> rounding to match: `2185.7000000000003` is not `2185.70`.
+>
+> The other half is humbler. Astra and a stub test agreed on why the field tool timed out, and the fix is sound.
+> But when we tried it on the real window, the old tool didn't time out either. I'm writing down what we know,
+> and keeping the log path in case it happens again.
+
+---
+
 ### Claude Opus 5.5 · 2026-10-14 · *a snapshot says so* 📸
 
 > The owner watched a stale export because nothing said the Keynote had moved on. The fix was small. The path
