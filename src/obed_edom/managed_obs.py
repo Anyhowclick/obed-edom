@@ -359,6 +359,7 @@ PREVIEW_OUTPUT = "decklink_preview_output"
 CALIBRATION_DEADLINE_S = 15.0
 CALIBRATION_CLEANUP_S = 5.0
 CALIBRATION_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+_CALIBRATION_OWNERSHIP_RETRY_S = 0.1
 _ABSENT: dict[str, bool] = {"$absent": True}
 _PREVIEW_OUTPUT_ABSENT = "No output was found with the name `decklink_preview_output`."
 _INPUT_ABSENT = "No source was found by the name of `AK-Probe` within the canvas `Main`."
@@ -848,10 +849,22 @@ class ManagedObs:
             raise ManagedObsError("Calibration engine generation changed.")
 
     def _calibration_verify_ownership(self, run: _CalibrationRun, deadline_s: float, *, cancelled: bool = True) -> None:
-        self._calibration_check_current(run, deadline_s, cancelled=cancelled)
         expected = run.request.engine
-        if self._identity(expected.pid, expected.launch_date) != "ours":
-            raise ManagedObsError("Calibration engine ownership could not be verified.")
+        last_identity = None
+        while True:
+            try:
+                self._calibration_check_current(run, deadline_s, cancelled=cancelled)
+            except _CalibrationTimeout:
+                if last_identity == "unknown":
+                    raise ManagedObsError("Calibration engine ownership could not be verified.") from None
+                raise
+            identity = self._identity(expected.pid, expected.launch_date)
+            last_identity = identity
+            if identity == "ours":
+                break
+            if identity != "unknown":
+                raise ManagedObsError("Calibration engine ownership could not be verified.")
+            self._sleep(min(_CALIBRATION_OWNERSHIP_RETRY_S, max(0.0, deadline_s - self._clock())))
         self._calibration_check_current(run, deadline_s, cancelled=cancelled)
 
     def _calibration_request(self, run: _CalibrationRun, ws: ObsWebsocket, request_type: str,

@@ -2243,6 +2243,8 @@ def test_persistence_contract_pins_step0_null_and_fails_closed(tmp_path):
      ("preview", False, "unowned-leftover"),
      ("preview", False, "transition-active"), ("preview", True, "preview-unreadable"),
      ("preview", False, "stale-identity"),
+     ("preview", False, "ownership-unknown-then-ours"),
+     ("preview", False, "ownership-unknown"), ("preview", False, "ownership-gone"),
      ("preview", False, "cancel"), ("preview", False, "quit"),
      ("preview", False, "restart"), ("preview", False, "setup")],
 )
@@ -2263,12 +2265,22 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                          active_after=None if outcome == "never-active" else 3 if outcome == "late-activation" else 1)
     engine = calibration_engine(tmp_path, monkeypatch, obs)
     identity_checks = 0
+    identity_observations: list[tuple[float, str]] = []
     real_identity = engine._identity
 
     def counted_identity(pid, launch_date):
         nonlocal identity_checks
         identity_checks += 1
-        return real_identity(pid, launch_date)
+        if outcome == "ownership-unknown-then-ours" and identity_checks == 1:
+            identity = "unknown"
+        elif outcome == "ownership-unknown":
+            identity = "unknown"
+        elif outcome == "ownership-gone":
+            identity = "gone"
+        else:
+            identity = real_identity(pid, launch_date)
+        identity_observations.append((engine._clock(), identity))
+        return identity
 
     monkeypatch.setattr(engine, "_identity", counted_identity)
     if outcome == "slow-target":
@@ -2364,6 +2376,20 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                 assert not any(connection == 2 and name in ("GetInputList", "GetSceneList")
                                for connection, name, _ in obs.requests)
                 assert obs.target_reads == 0
+        elif outcome in ("ownership-unknown", "ownership-gone"):
+            assert result.evidence is None and result.isolation_ok is True
+            assert result.cleanup_verified is False and result.restored is False
+            assert all(name not in ("CreateScene", "CreateInput") for _, name, _ in obs.requests)
+            if outcome == "ownership-unknown":
+                assert result.errors[0] == (
+                    "refused: ManagedObsError: Calibration engine ownership could not be verified.")
+                assert identity_checks > 2
+                assert all(identity == "unknown" for _, identity in identity_observations)
+            else:
+                assert result.errors[0] == (
+                    "refused: ManagedObsError: Calibration engine ownership could not be verified.")
+                assert identity_checks == 2
+                assert {at for at, _ in identity_observations} == {result.started_s}
         elif outcome in ("bad-screenshot", "timeout", "bad-evidence", "bad-target", "program-change", "cleanup-change",
                           "cleanup-timeout", "slow-target", "wrong-removal", "never-active"):
             assert result.cleanup_verified is (outcome not in ("cleanup-timeout", "slow-target", "wrong-removal"))
@@ -2431,6 +2457,11 @@ def test_calibration_transaction_preview_offcanvas_faults_and_fencing(tmp_path, 
                     assert obs.studio is False and obs.preview is None
             if outcome == "success":
                 assert identity_checks == 3
+            if outcome == "ownership-unknown-then-ours":
+                assert identity_checks == 4
+                assert [identity for _, identity in identity_observations[:2]] == ["unknown", "ours"]
+                assert identity_observations[1][0] - identity_observations[0][0] == pytest.approx(
+                    managed_obs._CALIBRATION_OWNERSHIP_RETRY_S)
             if outcome == "late-activation":
                 settled = {"videoActive": placement == "offcanvas", "videoShowing": True}
                 first_settled = next(index for index, result in enumerate(obs.active_results, 1)

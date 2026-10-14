@@ -445,7 +445,8 @@ for _name, _arm in _CEF_SNAP_ROWS.items():
 ARMS["m-paused-cef"] = replace(ARMS["m-paused"], placement_value="frac")
 ARMS["m-off-cef"] = replace(ARMS["m-off"], placement_value="frac")
 ARMS["m-hold-cef"] = replace(ARMS["m-hold"], placement_value="frac")
-ARMS["m-fg-cef"] = replace(ARMS["m-fg"], placement_value="frac")
+ARMS["m-fg-cef"] = replace(ARMS["m-fg"], placement_value="frac",
+                            expect={**ARMS["m-fg"].expect, "frozen_region": "PASS"})
 ARMS["m-fg-omit-cef"] = replace(ARMS["m-fg-omit"], placement_value="frac")
 ARMS["m-fg-swap-cef"] = replace(ARMS["m-fg-swap"], placement_value="frac")
 ARMS["m-tone-cef"] = replace(ARMS["m-tone"], placement_value="frac", twin="m-tone-cef-twin")
@@ -563,10 +564,11 @@ HOOK_JS = r"""
   }
   function track(v) {
     if (recs.has(v)) return;
-    var r = {id: X.vids.length, src: String(v.currentSrc || v.src || '').split('/').pop(), rv: [], rvAt: [], detach: null, tuple: null, err: null};
+    var r = {id: X.vids.length, src: String(v.currentSrc || v.src || '').split('/').pop(), rv: [], rvAt: [],
+             freezeDraws: [], detach: null, tuple: null, err: null};
     recs.set(v, r); X.vids.push(r); els.push(v);
     function cb(t, md) {
-      r.rv.push([md.presentationTime, md.mediaTime, md.presentedFrames]); r.rvAt.push(performance.now());
+      r.rv.push([md.presentationTime, md.mediaTime, md.presentedFrames, md.expectedDisplayTime]); r.rvAt.push(performance.now());
       if (r.rv.length > 900) { r.rv.splice(0, r.rv.length - 900); r.rvAt.splice(0, r.rvAt.length - 900); }
       if (!r.tuple && !r.err) {
         try { var f = new VideoFrame(v), c = f.colorSpace; r.tuple = [c.primaries, c.transfer, c.matrix, c.fullRange].join('/'); f.close(); }
@@ -582,6 +584,30 @@ HOOK_JS = r"""
     for (var j = 0; j < els.length; j++) { var r = recs.get(els[j]); if (r.detach === null && !els[j].isConnected) r.detach = performance.now(); }
   }
   new MutationObserver(scan).observe(document, {childList: true, subtree: true});
+  var nativeDrawImage = CanvasRenderingContext2D.prototype.drawImage;
+  CanvasRenderingContext2D.prototype.drawImage = function (source) {
+    if (!(source && source.tagName === 'VIDEO')) return nativeDrawImage.apply(this, arguments);
+    track(source);
+    var r = recs.get(source);
+    if (!(X.armed && this.canvas && !this.canvas.isConnected && !this.canvas.id))
+      return nativeDrawImage.apply(this, arguments);
+    var draw = {startedAt: performance.now(), argumentCount: arguments.length,
+                beforeTimestampUs: null, afterTimestampUs: null,
+                finishedAt: null, durationMs: null, beforeError: null, afterError: null};
+    function timestamp(key) {
+      var f = null;
+      try { f = new VideoFrame(source); draw[key + 'TimestampUs'] = f.timestamp; }
+      catch (e) { draw[key + 'Error'] = String(e); }
+      finally { if (f) f.close(); }
+    }
+    timestamp('before');
+    try { return nativeDrawImage.apply(this, arguments); }
+    finally {
+      timestamp('after');
+      draw.finishedAt = performance.now(); draw.durationMs = draw.finishedAt - draw.startedAt;
+      r.freezeDraws.push(draw);
+    }
+  };
   var takeValue, takes = [];
   Object.defineProperty(window, '__obedTakeMs', {configurable: true, get: function () { return takeValue; },
     set: function (v) { takeValue = v; takes.push([performance.now(), typeof v === 'number' && isFinite(v) ? v : null]); }});
@@ -2717,7 +2743,7 @@ CEF_PLACEMENT = Profile(
     headless=False, lifecycle=False, placement="frac",
     overrides=(
         ("frozen_frame", (("m-paused-cef",), ("m-off-cef",))),
-        ("frozen_region", (("m-snap-cef",), ("m-hold-cef",))),
+        ("frozen_region", (("m-fg-cef",), ("m-hold-cef",))),
         ("foreground", (("m-fg-cef",), ("m-fg-omit-cef", "m-fg-swap-cef", "case:fg-shifted", "case:fg-double", "case:fg-swapped"))),
         ("tone", (("m-tone-cef",), ("m-tone-raw-cef",))),
         ("holder_pixels", (CEF_PLACEMENT_POSITIVES,
@@ -2814,7 +2840,19 @@ def schema_problems(record: dict[str, Any]) -> list[str]:
     vids = dump.get("vids", [])
     if not isinstance(vids, list) or not all(
             isinstance(v, dict) and integer(v.get("id")) and isinstance(v.get("rv"), list)
-            and all(quad(x, 3) and x[1] >= 0 and x[2] >= 0 for x in v["rv"]) and (v.get("detach") is None or number(v.get("detach")))
+            and all(isinstance(x, list) and len(x) in (3, 4) and all(number(n) for n in x)
+                    and x[1] >= 0 and x[2] >= 0 for x in v["rv"])
+            and isinstance(v.get("rvAt"), list) and len(v["rvAt"]) == len(v["rv"])
+            and all(number(value) for value in v["rvAt"])
+            and isinstance(v.get("freezeDraws", []), list)
+            and all(isinstance(draw, dict)
+                    and all(number(draw.get(key)) for key in ("startedAt", "finishedAt", "durationMs"))
+                    and (draw.get("argumentCount") is None or integer(draw.get("argumentCount")))
+                    and all(draw.get(key) is None or number(draw.get(key))
+                            for key in ("beforeTimestampUs", "afterTimestampUs"))
+                    and all(draw.get(key) is None or isinstance(draw.get(key), str)
+                            for key in ("beforeError", "afterError")) for draw in v.get("freezeDraws", []))
+            and (v.get("detach") is None or number(v.get("detach")))
             and all(v.get(k) is None or isinstance(v.get(k), str) for k in ("tuple", "err", "src")) for v in vids) \
             or len({v.get("id") for v in vids if isinstance(v, dict)}) != len(vids):
         problems.append("decoder/rVFC records malformed")
@@ -3158,6 +3196,18 @@ def _fade_of(ev: Evidence, arm: Arm, cal: Calibration, min_frames: int = MIN_MID
                       min_frames=min_frames, min_class_px=arm.min_class_px)
 
 
+def capture_coverage(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm,
+                     min_frames: int = MIN_MID_FRAMES, cal: Calibration = Calibration()) -> dict[str, Any]:
+    try:
+        profile = replace(CEF_PLACEMENT, mid_frames=min_frames)
+        scored = score_arm(record, images, arm, cal, profile=profile)
+        fitted = scored.get("fitted", [])
+        mid = sum(number(row[0]) and MID_E[0] < row[0] < MID_E[1] for row in fitted)
+        return {"midFrames": mid, "fitted": fitted, "problems": scored.get("problems", [])}
+    except MALFORMED as exc:
+        return {"midFrames": 0, "fitted": [], "problems": [f"malformed capture: {type(exc).__name__}: {exc}"]}
+
+
 def _handoff_frames(ev: Evidence) -> tuple[np.ndarray | None, np.ndarray | None]:
     if not ev.transition:
         return None, None
@@ -3172,11 +3222,61 @@ def pre_detach(decoder: dict[str, Any]) -> list[list[float]]:
     detach, rv = decoder.get("detach"), decoder.get("rv")
     if not number(detach) or not isinstance(rv, list):
         return []
-    if not all(isinstance(r, (list, tuple)) and len(r) == 3 and all(number(v) for v in r) for r in rv):
+    if not all(isinstance(r, (list, tuple)) and len(r) in (3, 4) and all(number(v) for v in r) for r in rv):
         return []
     if any(b[0] <= a[0] or b[2] < a[2] for a, b in zip(rv, rv[1:])):
         return []
     return [r for r in rv if r[0] <= detach]
+
+
+def frame_at_freeze_draw(decoder: dict[str, Any], counter_fps: float | None,
+                         advance_at: float | None, first_effective_raf_at: float | None,
+                         ) -> tuple[int | None, dict[str, Any], list[str]]:
+    recorded = decoder.get("freezeDraws")
+    draws = ([draw for draw in recorded if isinstance(draw, dict) and number(draw.get("startedAt"))
+              and number(advance_at) and number(first_effective_raf_at)
+              and advance_at <= draw["startedAt"] <= first_effective_raf_at]
+             if isinstance(recorded, list) else [])
+    detail = {"draws": draws, "recordedDrawCount": len(recorded) if isinstance(recorded, list) else None,
+              "window": [advance_at, first_effective_raf_at], "rvfcRows": decoder.get("rv"),
+              "rvfcCallbackAt": decoder.get("rvAt")}
+    if counter_fps is None or not draws:
+        return None, detail, ["no VideoFrame timestamp around the freeze draw"]
+    problems: list[str] = []
+    full_timestamps = []
+    repair_timestamps: list[tuple[int, float]] = []
+    for index, draw in enumerate(draws):
+        argument_count = draw.get("argumentCount")
+        if argument_count not in (5, 9):
+            problems.append(f"freeze draw {index} has unsupported argument count {argument_count!r}")
+            continue
+        before, after = draw.get("beforeTimestampUs"), draw.get("afterTimestampUs")
+        if not number(before) or not number(after):
+            problems.append(f"freeze draw {index} has no before/after VideoFrame timestamp")
+        elif before != after:
+            problems.append(f"freeze draw {index} VideoFrame timestamp changed from {before} to {after}")
+        elif argument_count == 5:
+            full_timestamps.append(before)
+        else:
+            repair_timestamps.append((index, before))
+    if not full_timestamps:
+        problems.append("no full-size freeze draw with a VideoFrame timestamp")
+    elif len(set(full_timestamps)) > 1:
+        problems.append(f"full-size freeze draws used different VideoFrame timestamps: {full_timestamps}")
+    reference = round(full_timestamps[0] / 1_000_000 * counter_fps) if full_timestamps else None
+    repair_frames = [(index, round(timestamp / 1_000_000 * counter_fps))
+                     for index, timestamp in repair_timestamps]
+    diagnostics = []
+    if reference is not None:
+        for index, frame in repair_frames:
+            if frame == reference + 1:
+                diagnostics.append(f"repair draw {index} used frame {frame}, one frame after reference {reference}")
+            elif frame != reference:
+                problems.append(f"repair draw {index} used frame {frame}, expected {reference} or {reference + 1}")
+    detail["fullSizeFrames"] = [round(timestamp / 1_000_000 * counter_fps) for timestamp in full_timestamps]
+    detail["repairFrames"] = [frame for _, frame in repair_frames]
+    detail["diagnostics"] = diagnostics
+    return (reference if reference is not None and not problems else None), detail, problems
 
 
 def holder_parent(first: dict[str, Any], arm: Arm) -> str | None:
@@ -3213,7 +3313,7 @@ def dsk_counter_fps() -> float | None:
 
 def _dsk_first_rvfc_times(decoder: dict[str, Any]) -> tuple[float, float] | None:
     rv = decoder.get("rv") or []
-    rows = [row for row in rv if isinstance(row, (list, tuple)) and len(row) == 3
+    rows = [row for row in rv if isinstance(row, (list, tuple)) and len(row) in (3, 4)
             and number(row[0]) and number(row[1])]
     if rows and rows[0][1] == 0:
         rows = rows[1:]
@@ -3239,19 +3339,30 @@ def record_dsk_counter_timing(record: dict[str, Any], arm: Arm) -> None:
     outgoing = [decoder for decoder in decoders_of(record)
                 if decoder.get("region") and decoder.get("detach") is not None]
     bound, _ = bind_holders(holders, outgoing)
-    rows = [{"holderIndex": index, "id": decoder.get("id"),
-             "firstMediaTimeS": (times[1] if (times := _dsk_first_rvfc_times(decoder)) else None)}
-            for index, decoder in bound]
+    rows = []
+    counter_fps = dsk_counter_fps()
+    insert = next((row["t"] for row in (record.get("dump") or {}).get("raf") or []
+                   if isinstance(row, dict) and "eff" in row), None)
+    advance = record.get("advanceAt")
+    for index, decoder in bound:
+        selected, detail, problems = frame_at_freeze_draw(decoder, counter_fps, advance, insert)
+        rows.append({"holderIndex": index, "id": decoder.get("id"),
+                     "firstMediaTimeS": (times[1] if (times := _dsk_first_rvfc_times(decoder)) else None),
+                     "freezeFrame": selected, "freezeDraw": detail, "freezeDrawProblems": problems})
+    cost = score_cost((record.get("dump") or {}).get("takes") or [], record.get("advanceAt"), insert)
     record["dskCounterTiming"] = {"expectedDeltaS": DSK_COUNTER_DELTA_S,
                                   "toleranceS": DSK_COUNTER_TIME_TOLERANCE_S,
-                                  "counterFps": dsk_counter_fps(), "decoders": rows}
+                                  "counterFps": counter_fps, "takeMs": cost["detail"].get("takeMs"),
+                                  "decoders": rows}
 
 
 def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm,
                     es: list[float]) -> tuple[dict[str, Any] | None, int | None, list[str]]:
     """Shared media evidence (§9.1) for every outgoing movie: a patch-on arm with holders binds each to a distinct decoder
     (`arm.holders` of them) under `holder_parent`, its strip decoding at device scale (not on `fg` arms, whose layers
-    cover the counter blocks by design; their reference is the rVFC record and the requested paused frame); otherwise exactly
+    cover the counter blocks by design; their reference is the rVFC record and the requested paused frame); DSK
+    distinct-counter holders instead use the VideoFrame timestamp sampled around each native draw, with rVFC rows retained
+    as diagnostics; otherwise exactly
     `arm.decoders` detached decoders. Each decoder: colour tuple, geometry, foreground inventory, the last pre-detach rVFC
     record (= the reference; a paused arm's requested frame must equal it), detach inside [advance, transition DOM],
     playback before a patch-off advance; timed captures add >= 3 demixable frames. Returns (first decoder, its reference,
@@ -3286,7 +3397,6 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
     reference = None
     decoder_references: dict[Any, int] = {}
     holder_indices: dict[Any, int] = {}
-    first_media_times: dict[Any, float] = {}
     first_rvfc_times: dict[Any, tuple[float, float]] = {}
     counter_fps = dsk_counter_fps() if arm.counter_strip == "distinct" else None
     if arm.counter_strip == "distinct" and counter_fps is None:
@@ -3319,14 +3429,19 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
         if not (number(advance) and number(insert) and number(decoder.get("detach")) and advance <= decoder["detach"] <= insert):
             problems.append(f"detach {decoder.get('detach')} not inside [advance {advance}, transition DOM {insert}]")
         before = pre_detach(decoder)
-        if not before:
+        drawn, _, draw_problems = (frame_at_freeze_draw(decoder, counter_fps, advance, insert)
+                                    if arm.counter_strip == "distinct" else (None, {}, []))
+        problems += draw_problems
+        if not before and arm.counter_strip != "distinct":
             problems.append("no well-formed, ordered rVFC record before the detach")
-        else:
+        if before:
             first_rvfc = _dsk_first_rvfc_times(decoder)
             if first_rvfc is not None:
                 first_rvfc_times[decoder.get("id")] = first_rvfc
-                first_media_times[decoder.get("id")] = first_rvfc[1]
-            decoder_reference = round(before[-1][1] * (counter_fps or FPS))
+        decoder_reference = drawn if arm.counter_strip == "distinct" else (
+            round(before[-1][1] * FPS) if before else None
+        )
+        if decoder_reference is not None:
             if k == 0:
                 reference = decoder_reference
             if arm.counter_strip == "distinct" and index is not None:
@@ -3343,25 +3458,21 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
     if arm.counter_strip == "distinct":
         timing = record.get("dskCounterTiming")
         rows = timing.get("decoders") if isinstance(timing, dict) else None
-        recorded = ({row.get("id"): (row.get("holderIndex"), row.get("firstMediaTimeS")) for row in rows}
+        recorded = ({row.get("id"): (row.get("holderIndex"), row.get("freezeFrame")) for row in rows}
                     if isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
                     and len({row.get("id") for row in rows}) == len(rows) else {})
-        paired = {decoder.get("id"): (index, first_media_times.get(decoder.get("id"))) for index, decoder in pairs}
+        paired = {decoder.get("id"): (index, decoder_references.get(decoder.get("id")))
+                  for index, decoder in pairs}
         if (not isinstance(timing, dict) or timing.get("expectedDeltaS") != DSK_COUNTER_DELTA_S
                 or timing.get("toleranceS") != DSK_COUNTER_TIME_TOLERANCE_S
-                or timing.get("counterFps") != counter_fps or recorded != paired):
-            problems.append("DSK first-rVFC media-time record missing or inconsistent")
-        elif len(first_media_times) != 2:
-            problems.append(f"{len(first_media_times)} DSK first-rVFC media times (need 2)")
+                or timing.get("counterFps") != counter_fps or recorded != paired
+                or not isinstance(timing.get("takeMs"), list) or len(timing["takeMs"]) != 1):
+            problems.append("DSK draw-timestamp/take-cost record missing or inconsistent")
         offsets = {_dsk_decoder_offset(decoder): decoder.get("id") for _, decoder in pairs}
         if set(offsets) != set(DSK_COUNTER_OFFSETS.values()) or len(offsets) != len(pairs):
             problems.append("DSK decoder sources do not identify the base and #t=5 clips")
-        elif len(first_media_times) == 2:
+        else:
             base_id, offset_id = offsets[0.0], offsets[DSK_COUNTER_DELTA_S]
-            delta = first_media_times[offset_id] - first_media_times[base_id]
-            if abs(delta - DSK_COUNTER_DELTA_S) > DSK_COUNTER_TIME_TOLERANCE_S:
-                problems.append(f"DSK #t=5 first-rVFC media time is not {DSK_COUNTER_DELTA_S:g}s after the base clip: "
-                                f"{[first_media_times.get(base_id), first_media_times.get(offset_id)]}")
             if counter_fps is not None and set(holder_indices) == {base_id, offset_id}:
                 frame_delta = holder_indices[offset_id] - holder_indices[base_id]
                 expected_frames = DSK_COUNTER_DELTA_S * counter_fps

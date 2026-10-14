@@ -116,6 +116,104 @@ def test_dissolve_sessions_are_the_p2_crossfade_cut_and_opaque_arms_plus_cef_ski
     assert tuple(q.PLACEMENT_CONTROL_SPECS) == q.PLACEMENT_CONTROL_SESSIONS
 
 
+def test_placement_capture_retries_only_for_sole_coverage_shortage_and_scores_every_saved_attempt(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from test_dissolve_probe import H as SCORER_H, W as SCORER_W, media_run
+
+    monkeypatch.setattr(q.dissolve_probe, "VIEWPORT", (SCORER_W, SCORER_H))
+    complete, complete_images = media_run("m-snap-cef-dsk")
+    q.dissolve_probe.record_dsk_counter_timing(complete, q.dissolve_probe.ARMS["m-snap-cef-dsk"])
+    cal = q.dissolve_probe.Calibration(tau=5.0)
+    expected_coverage = q.dissolve_probe.capture_coverage(
+        complete, complete_images, q.dissolve_probe.ARMS["m-snap-cef-dsk"],
+        q.dissolve_probe.CEF_PLACEMENT.mid_frames, cal,
+    )
+    sessions, rows = q.capture_placement_sessions(
+        q.dissolve_probe.ARMS["m-snap-cef-dsk"],
+        lambda attempt: ({"runDir": str(tmp_path / f"real-{attempt}")}, complete, complete_images), cal,
+    )
+    assert len(sessions) == 1
+    assert rows[0]["problems"] == expected_coverage["problems"]
+
+    threshold = q.dissolve_probe.CEF_PLACEMENT.mid_frames
+    rows = iter((
+        {"midFrames": threshold - 1, "fitted": [], "problems": [f"{threshold - 1} mid frames < {threshold}"]},
+        {"midFrames": threshold, "fitted": [], "problems": []},
+    ))
+    seen_calibrations = []
+    monkeypatch.setattr(q.dissolve_probe, "capture_coverage",
+                        lambda *_args: (seen_calibrations.append(_args[-1]) or next(rows)))
+
+    class ForwardOnlyHost:
+        def __init__(self) -> None:
+            self.scene = 0
+
+        def drive(self) -> None:
+            for scene in (15, 17):
+                if scene <= self.scene:
+                    raise RuntimeError(f"scene {scene} not reached")
+                self.scene = scene
+
+    hosts = []
+
+    def session_attempt(name, ctx, decision, *, run_name, attempt=None):
+        host = ForwardOnlyHost()
+        hosts.append(host)
+        host.drive()
+        record = {"arm": name, "shots": [], "attemptValue": attempt}
+        images = {"pixel": np.full((1, 1, 4), attempt or 0, np.uint8)}
+        q.dissolve_probe.save_run(ctx["shots"], run_name, record, images)
+        return {"runDir": str(ctx["shots"] / "runs" / run_name), "timingS": {"script": 1}}, record, images
+
+    monkeypatch.setattr(q, "_placement_session_attempt", session_attempt)
+    run_dir = tmp_path / "runs" / "m-snap-cef-dsk"
+    captured = q.placement_session(
+        "m-snap-cef-dsk", {"shots": tmp_path, "placementScoringCalibration": cal}, None)
+    parent = json.loads((run_dir / "record.json").read_text())
+    assert len(hosts) == 2 and len({id(host) for host in hosts}) == 2
+    assert [host.scene for host in hosts] == [17, 17]
+    assert [row["midFrames"] for row in parent["captureAttempts"]] == [threshold - 1, threshold]
+    assert seen_calibrations == [cal, cal]
+    assert [row["runDir"] for row in captured["attempts"]] == [
+        str(run_dir / "attempt-1"), str(run_dir / "attempt-2")]
+    assert [json.loads((run_dir / f"attempt-{attempt}" / "record.json").read_text())["attemptValue"]
+            for attempt in (1, 2)] == [1, 2]
+    assert all((run_dir / f"attempt-{attempt}" / "pixel.png").is_file() for attempt in (1, 2))
+    outcomes = iter(("MATCH", "INCONCLUSIVE"))
+    monkeypatch.setattr(q.dissolve_probe, "score_arm", lambda *_args, **_kwargs: {
+        "outcome": next(outcomes), "problems": [], "mismatch": ["cost"]
+    })
+    scored = q.score_placement_capture_attempts(
+        run_dir, q.dissolve_probe.ARMS["m-snap-cef-dsk"], q.dissolve_probe.Calibration(), None
+    )
+    assert scored["verdict"] == "INCONCLUSIVE"
+    assert [row["outcome"] for row in scored["detail"]["attempts"]] == ["MATCH", "INCONCLUSIVE"]
+
+    problem_rows = iter((
+        {"midFrames": threshold - 1, "fitted": [],
+         "problems": [f"{threshold - 1} mid frames < {threshold}", "class out: 0 px < 1000"]},
+    ))
+    monkeypatch.setattr(q.dissolve_probe, "capture_coverage",
+                        lambda *_args: next(problem_rows))
+    hosts.clear()
+    other = tmp_path / "other"
+    captured = q.placement_session("m-snap-cef-dsk", {"shots": other}, None)
+    assert len(hosts) == 1 and len(captured["attempts"]) == 1
+
+    shortage = {"midFrames": threshold - 1, "fitted": [],
+                "problems": [f"{threshold - 1} mid frames < {threshold}"]}
+    problem_rows = iter((shortage, shortage, shortage))
+    monkeypatch.setattr(q.dissolve_probe, "capture_coverage", lambda *_args: next(problem_rows))
+    hosts.clear()
+    captured = q.placement_session("m-snap-cef-dsk", {"shots": tmp_path / "max-three"}, None)
+    assert len(hosts) == 3 and len(captured["attempts"]) == 3
+
+    monkeypatch.setattr(q.dissolve_probe, "capture_coverage",
+                        lambda *_args: pytest.fail("single-attempt arms do not need coverage scoring"))
+    single = q.placement_session("m-snap-cef", {"shots": tmp_path}, None)
+    assert single["runDir"] == str(tmp_path / "runs" / "m-snap-cef")
+
+
 @pytest.mark.parametrize("g2_mode, g2, missing", [("off", None, False), ("off", "IDLE", True), ("injected", "IDLE", False),
                                                     ("injected", None, True)])
 def test_dissolve_evidence_reads_g2_state_only_where_the_module_is_injected(g2_mode, g2, missing):
@@ -1672,6 +1770,24 @@ def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = N
     persistence_check = managed_obs.PersistenceCheck("cleanup", True, True, (), ())
     transaction = managed_obs.CalibrationResult(request, evidence, program, True, True, True,
                                                 persistence_check, (), 1.0, 2.0)
+    if omit == "ownership":
+        transaction = q.replace(transaction, evidence=None,
+                                errors=("ManagedObsError: Calibration engine ownership could not be verified.",))
+    if omit == "ownership-w3":
+        transaction = q.replace(
+            transaction, evidence=None, program=None, cleanup_verified=False, restored=False,
+            errors=("refused: ManagedObsError: Calibration engine ownership could not be verified.",),
+        )
+    if omit == "ownership-isolation-failed":
+        transaction = q.replace(
+            transaction, evidence=None, isolation_ok=False,
+            errors=("ManagedObsError: Calibration engine ownership could not be verified.",),
+        )
+    if omit == "ownership-program-failed":
+        transaction = q.replace(
+            transaction, evidence=None, program=q.replace(program, ok=False, reason="program changed"),
+            errors=("ManagedObsError: Calibration engine ownership could not be verified.",),
+        )
     raw_collection = {"name": "AK", "sources": [{"name": "Program", "uuid": "u", "id": "browser_source", "settings": {}}]}
     refs = {}
     for index, name in enumerate(("baseline", "nullBefore", "nullAfter", "cleanup", "quit"), 2):
@@ -1712,7 +1828,8 @@ def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = N
     record = q.placement_record(
         backend=backend, placement="preview" if backend == "cef" else None, obs_version="32.2.2" if backend == "cef" else None,
         engine=engine if backend == "cef" else None, request=request if backend == "cef" else None,
-        evidence=None if omit == "input" else evidence, classification=result,
+        evidence=None if omit in ("input", "ownership", "ownership-w3", "ownership-isolation-failed",
+                                  "ownership-program-failed") else evidence, classification=result,
         transaction=transaction if backend == "cef" else None,
         events=[{"at": 1.0, "event": "placement", "placement": {"state": "probing"}},
                 {"at": 2.0, "event": "placement", "placement": telemetry["drivePlacement"]}] if backend == "cef" else [],
@@ -1758,6 +1875,12 @@ def _placement_control(tmp_path: Path, name: str, *, host_reason: bool = True) -
     pytest.param("chrome-harness", True, None, "PASS", "probe-chrome-harness", id="chrome-gpu-complete"),
     pytest.param("cef", False, "telemetry", "INCONCLUSIVE", "program-wire-integrity", id="missing-telemetry"),
     pytest.param("cef", False, "input", "INCONCLUSIVE", "probe-cef", id="missing-classifier-input"),
+    pytest.param("cef", False, "ownership", "INCONCLUSIVE", "iso-obs-preview", id="ownership-abort"),
+    pytest.param("cef", False, "ownership-w3", "INCONCLUSIVE", "iso-obs-preview", id="ownership-abort-w3-shape"),
+    pytest.param("cef", False, "ownership-isolation-failed", "FAIL", "iso-obs-preview",
+                 id="ownership-error-does-not-mask-isolation-failure"),
+    pytest.param("cef", False, "ownership-program-failed", "FAIL", "iso-obs-preview",
+                 id="ownership-error-does-not-mask-program-failure"),
 ])
 def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str,
                                                        gpu: bool, omit: str | None, verdict: str, gate: str) -> None:
@@ -2108,28 +2231,53 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             for name in (*q.PLACEMENT_ARMS, "probe-chrome-gpu", "probe-chrome-software"):
                 session_dir = gate_root / name
                 session_dir.mkdir(parents=True, exist_ok=True)
-                (session_dir / "record.json").write_text(json.dumps({"placementCalibration": {}}))
+                if name == "m-snap-cef-dsk":
+                    attempts = []
+                    for attempt in (1, 2):
+                        attempt_dir = session_dir / f"attempt-{attempt}"
+                        attempt_dir.mkdir()
+                        (attempt_dir / "record.json").write_text(json.dumps({"placementCalibration": {}}))
+                        attempts.append({"attempt": attempt, "record": f"attempt-{attempt}/record.json"})
+                    (session_dir / "record.json").write_text(json.dumps({"captureAttempts": attempts}))
+                else:
+                    (session_dir / "record.json").write_text(json.dumps({"placementCalibration": {}}))
                 row = {"session": name, "runDir": str(session_dir)}
                 if name == "opaque-off":
                     calibration_row = q.dissolve_probe.Calibration()
                     row["calibration"] = {"n": 0, "model": "PASS", "calibration": q.asdict(calibration_row)}
                 gate_sessions.append(row)
             with monkeypatch.context() as gate_patch:
+                rescored_paths = []
+
+                def passing_calibration(_encoded, run_dir, **_kwargs):
+                    rescored_paths.append(Path(run_dir))
+                    return {"overall": "PASS", "gates": {"probe-chrome-harness": {"verdict": "PASS"}}}
+
                 gate_patch.setattr(q.dissolve_probe, "launch_lut",
                                    lambda *_args, **_kwargs: ({}, {"kind": "identity", "samples": 1, "problems": []}))
-                gate_patch.setattr(q, "score_placement_calibration",
-                                   lambda *_args, **_kwargs: {"overall": "PASS", "gates": {
-                                       "probe-chrome-harness": {"verdict": "PASS"}}})
+                gate_patch.setattr(q, "score_placement_calibration", passing_calibration)
+                gate_patch.setattr(q, "score_placement_capture_attempts",
+                                   lambda *_args, **_kwargs: {"verdict": "PASS", "problems": [], "detail": {}})
                 gate_patch.setattr(q.dissolve_probe, "score_runs", lambda *_args, **_kwargs: {
                     "gates": {}, "arms": {name: "MATCH" for name in q.PLACEMENT_ARMS}, "overall": "PASS"})
                 placement_gate = q.placement_gates({"sessions": gate_sessions}, None)["CEF-placement"]
+                missing_run_dir = [dict(session) for session in gate_sessions]
+                next(session for session in missing_run_dir
+                     if session["session"] == q.PLACEMENT_ARMS[0]).pop("runDir")
+                empty_cwd = tmp_path / "missing-run-dir-cwd"
+                empty_cwd.mkdir()
+                gate_patch.chdir(empty_cwd)
+                q.placement_gates({"sessions": missing_run_dir}, None)
             assert placement_gate["verdict"] == "PASS"
             assert checks_of(placement_gate)["every placement session ran"]["ok"] is True
+            assert {path.name for path in rescored_paths if path.parent.name == "m-snap-cef-dsk"} == {
+                "attempt-1", "attempt-2"}
+            assert not (empty_cwd / "record.json").exists()
             q.finalize_placement_persistence([{"session": "control-without-run-dir"}], tmp_path / "missing-collection.json")
 
             monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=10 ** 15))
             disk = q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
-            assert disk["recordings"] == len(q.PLACEMENT_ARMS) * len(q.MMO_RATES) * 2
+            assert disk["recordings"] == (len(q.PLACEMENT_ARMS) + 2) * len(q.MMO_RATES) * 2
             assert disk["retainedBytes"] == 0
             monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=1))
             with pytest.raises(RuntimeError, match="placement needs about"):

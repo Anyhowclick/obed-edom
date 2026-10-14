@@ -548,7 +548,17 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         images["holder-0"] = holder_px
     pins = live_runtime.SUPPORTED_PLAYERS[STOCK]
     expected = pins[probe.PIN_INDEX[spec.mode]] if spec.splice is None else "f" * 64
-    rv = [[INSERT_MS - 1 - (presented - i) * 33.0, (REFERENCE - presented + i) / binary.FPS, i] for i in range(1, presented + 1)]
+    rv = [[present_at, (REFERENCE - presented + i) / binary.FPS, i + int(i >= max(2, presented // 2)), present_at + 16.0]
+          for i in range(1, presented + 1)
+          for present_at in [INSERT_MS - 1 - (presented - i) * 33.0]]
+    timestamp_us = REFERENCE / binary.FPS * 1_000_000
+    freeze_draws = [
+        {"startedAt": INSERT_MS - 0.8 + index * 0.02, "finishedAt": INSERT_MS - 0.79 + index * 0.02,
+         "durationMs": 0.01, "argumentCount": 5,
+         "beforeTimestampUs": timestamp_us, "afterTimestampUs": timestamp_us,
+         "beforeError": None, "afterError": None}
+        for index in range(2 if spec.placement_value == "frac" else 1)
+    ]
     record = {
         "arm": arm, "page": spec.page, "load": 0.5, "headlessBefore": 0, "stage": probe.stage_of(spec), "dsf": k,
         "viewport": list(probe.viewport_of(spec)),
@@ -560,7 +570,9 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         "foreground": {"0": []},
         "dump": {"raf": raf, "first": {"textures": ["IN", "OUT"], "chain": chain, "holders": holders,
                                        "layerIds": ["layer2", "layer3-opacity", "layer4-opacity"]},
-                 "vids": [{"id": 0, "rv": rv, "detach": INSERT_MS - 0.5, "tuple": "bt709/bt709/bt709/false"}],
+                 "vids": [{"id": 0, "rv": rv, "rvAt": [row[0] + 0.1 for row in rv],
+                            "freezeDraws": freeze_draws, "detach": INSERT_MS - 0.5,
+                            "tuple": "bt709/bt709/bt709/false"}],
                  "takes": [[INSERT_MS - 1.0, 22.0]]},
     }
     if spec.capture in ("paused", "reference"):
@@ -708,7 +720,9 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     elif mutate == "layer-ids-dup":
         record["dump"]["first"]["layerIds"] = ["layer1", "layer1"]
     elif mutate and mutate.startswith("ov-"):
-        record["dump"]["vids"].append({"id": 1, "rv": [], "detach": None, "tuple": None})
+        record["dump"]["vids"].append(
+            {"id": 1, "rv": [], "rvAt": [], "freezeDraws": [], "detach": None, "tuple": None}
+        )
         video = {"id": 1, "on": True, "rect": list(CONTENT), "eff": 1.0, "inT": False, "inStage": False, "paused": False, "geo": None}
         if mutate == "ov-on-del":
             del video["on"]
@@ -722,7 +736,9 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
             video["rect"][2] = -480.0
         record["dump"]["raf"][20]["videos"].append(video)
     elif mutate == "dest-video":
-        record["dump"]["vids"].append({"id": 9, "rv": [], "detach": None, "tuple": None})
+        record["dump"]["vids"].append(
+            {"id": 9, "rv": [], "rvAt": [], "freezeDraws": [], "detach": None, "tuple": None}
+        )
         for r in record["dump"]["raf"]:
             if r["t"] >= INSERT_MS + DURATION_MS:
                 r["videos"].append({"id": 9, "on": True, "rect": [500.0, 0.0, 140.0, 360.0], "eff": 1.0, "inT": False, "inStage": True,
@@ -1121,9 +1137,15 @@ def dsk_holder_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
     images["holder-1"] = probe.place(strip_frame(second_frame), CONTENT, CONTENT, (H, W))[10:145, 10:490].copy()
     decoder = record["dump"]["vids"][0]
     decoder["src"] = sources[0]
-    shifted = [[t, media + offsets[1] - offsets[0], presented] for t, media, presented in decoder["rv"]]
+    shifted = [[presentation, media + offsets[1] - offsets[0], presented, expected]
+               for presentation, media, presented, expected in decoder["rv"]]
     second = {**decoder, "id": 1, "src": sources[1], "content": second_rect, "region": second_rect,
-              "rv": [[shifted[0][0] - 33.0, 0.0, 0], *shifted]}
+              "rv": [[shifted[0][0] - 33.0, 0.0, 0, shifted[0][3] - 33.0], *shifted],
+              "rvAt": [decoder["rvAt"][0] - 33.0, *decoder["rvAt"]],
+              "freezeDraws": [{**draw,
+                               "beforeTimestampUs": draw["beforeTimestampUs"] + (offsets[1] - offsets[0]) * 1_000_000,
+                               "afterTimestampUs": draw["afterTimestampUs"] + (offsets[1] - offsets[0]) * 1_000_000}
+                              for draw in decoder["freezeDraws"]]}
     record["dump"]["vids"].append(second)
     record["dump"]["vids"].extend({**decoder, "id": decoder_id, "src": "prior.mov"}
                                          for decoder_id in range(2, 13))
@@ -1158,7 +1180,10 @@ def dsk_holder_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
     )[2]
     spacing_tolerance = round(probe.DSK_COUNTER_TIME_TOLERANCE_S * counter_fps)
     allowed_gap_record = probe.json.loads(probe.json.dumps(record))
-    allowed_gap_record["dump"]["vids"][1]["rv"][-1][1] += spacing_tolerance / counter_fps
+    for draw in allowed_gap_record["dump"]["vids"][1]["freezeDraws"]:
+        draw["beforeTimestampUs"] += spacing_tolerance / counter_fps * 1_000_000
+        draw["afterTimestampUs"] += spacing_tolerance / counter_fps * 1_000_000
+    probe.record_dsk_counter_timing(allowed_gap_record, probe.ARMS["m-snap-cef-dsk"])
     allowed_gap_images = {**images, "holder-1": probe.place(
         strip_frame(second_frame + spacing_tolerance), CONTENT, CONTENT, (H, W)
     )[10:145, 10:490].copy()}
@@ -1166,7 +1191,10 @@ def dsk_holder_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
         allowed_gap_record, allowed_gap_images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
     )[2]
     wrong_gap_record = probe.json.loads(probe.json.dumps(record))
-    wrong_gap_record["dump"]["vids"][1]["rv"][-1][1] += (spacing_tolerance + 1) / counter_fps
+    for draw in wrong_gap_record["dump"]["vids"][1]["freezeDraws"]:
+        draw["beforeTimestampUs"] += (spacing_tolerance + 1) / counter_fps * 1_000_000
+        draw["afterTimestampUs"] += (spacing_tolerance + 1) / counter_fps * 1_000_000
+    probe.record_dsk_counter_timing(wrong_gap_record, probe.ARMS["m-snap-cef-dsk"])
     wrong_gap_images = {**images, "holder-1": probe.place(
         strip_frame(second_frame + spacing_tolerance + 1), CONTENT, CONTENT, (H, W)
     )[10:145, 10:490].copy()}
@@ -1175,18 +1203,99 @@ def dsk_holder_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
     )[2]
     wrong_gap_problem = next((problem for problem in wrong_gap if "#t=5 holder frame" in problem), "")
     first_rvfc_times = [probe._dsk_first_rvfc_times(decoder) for decoder in record["dump"]["vids"][:2]]
+    diagnostic = probe.json.loads(probe.json.dumps(record))
+    diagnostic["dump"]["vids"][0]["rv"][-1][3] += 1000
+    diagnostic["dump"]["vids"][0]["rvAt"][-1] += 2000
+    probe.record_dsk_counter_timing(diagnostic, probe.ARMS["m-snap-cef-dsk"])
+    diagnostic_problems = probe.media_integrity(
+        diagnostic, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    changed = probe.json.loads(probe.json.dumps(record))
+    changed["dump"]["vids"][0]["freezeDraws"][0]["afterTimestampUs"] += 1
+    probe.record_dsk_counter_timing(changed, probe.ARMS["m-snap-cef-dsk"])
+    changed_problems = probe.media_integrity(changed, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7])[2]
+    frame_us = 1_000_000 / counter_fps
+    disagree = probe.json.loads(probe.json.dumps(record))
+    disagree["dump"]["vids"][0]["freezeDraws"][1]["beforeTimestampUs"] += frame_us
+    disagree["dump"]["vids"][0]["freezeDraws"][1]["afterTimestampUs"] += frame_us
+    probe.record_dsk_counter_timing(disagree, probe.ARMS["m-snap-cef-dsk"])
+    disagree_problems = probe.media_integrity(
+        disagree, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    repaired = probe.json.loads(probe.json.dumps(record))
+    for repaired_decoder in repaired["dump"]["vids"][:2]:
+        repair = dict(repaired_decoder["freezeDraws"][-1])
+        repair.update(argumentCount=9, startedAt=INSERT_MS - 0.7, finishedAt=INSERT_MS - 0.69,
+                      beforeTimestampUs=repair["beforeTimestampUs"] + frame_us,
+                      afterTimestampUs=repair["afterTimestampUs"] + frame_us)
+        repaired_decoder["freezeDraws"].append(repair)
+    probe.record_dsk_counter_timing(repaired, probe.ARMS["m-snap-cef-dsk"])
+    repaired_problems = probe.media_integrity(
+        repaired, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    repair_diagnostics = [row["freezeDraw"]["diagnostics"] for row in repaired["dskCounterTiming"]["decoders"]]
+    bad_repair = probe.json.loads(probe.json.dumps(repaired))
+    for repaired_decoder in bad_repair["dump"]["vids"][:2]:
+        repaired_decoder["freezeDraws"][-1]["beforeTimestampUs"] += frame_us
+        repaired_decoder["freezeDraws"][-1]["afterTimestampUs"] += frame_us
+    probe.record_dsk_counter_timing(bad_repair, probe.ARMS["m-snap-cef-dsk"])
+    bad_repair_problems = probe.media_integrity(
+        bad_repair, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    outside_window = probe.json.loads(probe.json.dumps(record))
+    for outside_decoder in outside_window["dump"]["vids"][:2]:
+        outside_decoder["freezeDraws"].append({
+            **outside_decoder["freezeDraws"][0], "startedAt": record["advanceAt"] - 0.1,
+            "finishedAt": record["advanceAt"] - 0.09, "beforeTimestampUs": 0, "afterTimestampUs": frame_us * 99,
+        })
+    probe.record_dsk_counter_timing(outside_window, probe.ARMS["m-snap-cef-dsk"])
+    outside_problems = probe.media_integrity(
+        outside_window, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    missing_expected = probe.json.loads(probe.json.dumps(record))
+    missing_expected["dump"]["vids"][0]["rv"] = []
+    missing_expected["dump"]["vids"][0]["rvAt"] = []
+    probe.record_dsk_counter_timing(missing_expected, probe.ARMS["m-snap-cef-dsk"])
+    missing_expected_problems = probe.media_integrity(
+        missing_expected, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
+    missing_draw = probe.json.loads(probe.json.dumps(record))
+    missing_draw["dump"]["vids"][0]["freezeDraws"] = []
+    probe.record_dsk_counter_timing(missing_draw, probe.ARMS["m-snap-cef-dsk"])
+    missing_draw_problems = probe.media_integrity(
+        missing_draw, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7]
+    )[2]
     images["holder-0"], images["holder-1"] = images["holder-1"], images["holder-0"]
     swapped = probe.media_integrity(record, images, probe.ARMS["m-snap-cef-dsk"], [0.1, 0.4, 0.7])[2]
     return (good, reordered_good, recorded_ids, round(recorded_times[1] - recorded_times[0], 6),
             record["dskCounterTiming"]["counterFps"], any("!= decoder" in problem for problem in swapped),
-            any("media-time record" in problem for problem in missing),
-            any("#t=5 first-rVFC" in problem for problem in inert_problems),
-            any("#t=5 first-rVFC" in problem for problem in reversed_problems),
+            any("draw-timestamp" in problem for problem in missing),
+            inert_problems,
+            any("#t=5 holder frame" in problem for problem in reversed_problems),
             spacing_tolerance,
             allowed_gap,
             bool(wrong_gap_problem),
             all(f"{label} {times}" in wrong_gap_problem
-                for label, times in zip(("base", "#t=5"), first_rvfc_times)))
+                for label, times in zip(("base", "#t=5"), first_rvfc_times)),
+            diagnostic_problems, any("timestamp changed" in problem for problem in changed_problems),
+            any("full-size freeze draws used different" in problem for problem in disagree_problems),
+            missing_expected_problems,
+            any("no VideoFrame timestamp" in problem for problem in missing_draw_problems),
+            record["dskCounterTiming"]["takeMs"],
+            all(row[3] >= row[0] for decoder in record["dump"]["vids"][:2] for row in decoder["rv"] if len(row) == 4),
+            any(b[2] > a[2] + 1 for decoder in record["dump"]["vids"][:2]
+                for a, b in zip(decoder["rv"], decoder["rv"][1:])),
+            "callbackLatenessMs" not in probe.json.dumps(record["dskCounterTiming"]),
+            repaired_problems, all(len(rows) == 1 for rows in repair_diagnostics),
+            any("expected" in problem for problem in bad_repair_problems), outside_problems,
+            "argumentCount: arguments.length" in probe.HOOK_JS)
+
+
+def legacy_non_dsk_without_freeze_draws() -> tuple[bool, str]:
+    record, images = media_run("m-on")
+    record["dump"]["vids"][0].pop("freezeDraws")
+    malformed = "decoder/rVFC records malformed" in probe.schema_problems(record)
+    return not malformed, probe.score_arm(record, images, probe.ARMS["m-on"], CAL)["outcome"]
 
 
 def near_clip_outcomes() -> list[tuple[str, str | None]]:
@@ -1451,6 +1560,8 @@ CASES = [
     ("m-on run: frozen frame", lambda: arm_check("m-on", "frozen_frame"), "PASS"),
     ("m-on run: every contract check", lambda: arm_outcome("m-on"), "MATCH"),
     ("m-hold run: frozen region", lambda: arm_check("m-hold", "frozen_region"), "FAIL"),
+    ("placement m-fg-cef is the frozen-region PASS control",
+     lambda: arm_check("m-fg-cef", "frozen_region"), "PASS"),
     ("r1-2 full-strength black/white movie that never fades", bw_hold, "FAIL"),
     ("r1-1 m-hold without its rVFC reference", lambda: arm_outcome("m-hold", mutate="no-reference"), "INCONCLUSIVE"),
     ("r1-1 m-hold without holder pixels", lambda: arm_outcome("m-hold", mutate="no-holder-png"), "INCONCLUSIVE"),
@@ -1725,12 +1836,17 @@ CASES = [
       ("clip-10-1000001.mov-0.0000-20.8000.mov", "clip-10-1000002.mov-0.0000-50.2000.mov"),
       probe.DSK_COUNTER_SHA256, True, (1, 2), {30.0}, 30.0)),
     ("placement DSK binds timing past prior-slide decoders and enforces directed #t=5 time/frame deltas", "dsk-identity",
-     ([], [], [0, 1], 5.0, 30.0, True, True, True, True, 8, [], True, True)),
+     ([], [], [0, 1], 5.0, 30.0, True, True, [], True, 8, [], True, True, [], True, True, [], True,
+      [22.0], True, True, True, [], True, True, [], True)),
+    ("legacy non-DSK evidence may omit freeze draws", legacy_non_dsk_without_freeze_draws, (True, "MATCH")),
     ("placement burst records each screenshot duration",
      lambda: probe._shot_record("shot", 10.0, 201.25), {"name": "shot", "t0": 10.0, "t1": 201.25, "durationMs": 191.25}),
     ("placement CEF profile reports inherited cut and identity-tone rows",
      lambda: ({"cut", "tone"} <= set(probe.CEF_PLACEMENT.reported),
-              {"cut", "tone"}.isdisjoint(probe.CEF_PLACEMENT.controls())), (True, True)),
+              {"cut", "tone"}.isdisjoint(probe.CEF_PLACEMENT.controls()),
+              probe.ARMS["m-fg-cef"].expect.get("frozen_region"),
+              probe.CEF_PLACEMENT.controls()["frozen_region"]),
+     (True, True, "PASS", (("m-fg-cef",), ("m-hold-cef",)))),
     ("DX-1 m-raw-prod: the destination's movies after the hand-off do not empty the in-only class",
      lambda: arm_outcome("m-raw-prod", holder=False, mutate="dest-video"), "MATCH"),
     ("r17 m-raw-prod binding a holder", lambda: arm_check("m-raw-prod", "scope"), "PASS"),

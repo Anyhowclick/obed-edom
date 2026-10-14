@@ -491,6 +491,10 @@ def score_placement_calibration(calibration: Any, run_dir: Path, *,
         tx_problems += list(transaction.errors)
     program_ok, program_problems, program_detail = _program_check(transaction.program if transaction else None)
     tx_problems += program_problems
+    ownership_message = "Calibration engine ownership could not be verified."
+    ownership_aborted = (transaction is not None and transaction.isolation_ok and program_ok is not False
+                         and decoded.get("input") is None and bool(transaction.errors)
+                         and all(error.endswith(ownership_message) for error in transaction.errors))
     placement = calibration.get("placement")
     live_controls = telemetry.get("liveControls") if isinstance(telemetry, dict) else None
     isolation_controls = live_controls.get("isolation") if isinstance(live_controls, dict) else None
@@ -506,7 +510,8 @@ def score_placement_calibration(calibration: Any, run_dir: Path, *,
         if placement != name:
             gates[f"iso-obs-{name}"] = calibration_gate("REPORTED", [], placement=placement)
             continue
-        verdict = ("INCONCLUSIVE" if tx_unknown or program_ok is None or isolation_control_problems else
+        verdict = ("INCONCLUSIVE" if tx_unknown or ownership_aborted
+                   or program_ok is None or isolation_control_problems else
                    "FAIL" if tx_problems else "PASS")
         gates[f"iso-obs-{name}"] = calibration_gate(
             verdict, tx_problems + isolation_control_problems, transaction=calibration.get("transaction"),
@@ -2058,16 +2063,83 @@ def placement_control_rows(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {"isolation": isolation, "probe": probe}
 
 
-def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
+def capture_placement_sessions(
+        arm: dissolve_probe.Arm,
+        capture_session: Callable[[int], tuple[dict[str, Any], dict[str, Any], dict[str, np.ndarray]]],
+        cal: dissolve_probe.Calibration,
+        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    sessions = []
+    attempts = []
+    limit = 3 if arm.counter_strip == "distinct" else 1
+    min_frames = dissolve_probe.CEF_PLACEMENT.mid_frames
+    for attempt in range(1, limit + 1):
+        session, record, images = capture_session(attempt)
+        sessions.append(session)
+        coverage = dissolve_probe.capture_coverage(record, images, arm, min_frames, cal)
+        row = {"attempt": attempt, **coverage, "shots": record.get("shots", []),
+               "record": f"attempt-{attempt}/record.json", "runDir": session.get("runDir")}
+        attempts.append(row)
+        shortage = f"{coverage['midFrames']} mid frames < {min_frames}"
+        if coverage["problems"] != [shortage]:
+            break
+    return sessions, attempts
+
+
+def placement_attempt_paths(run_dir: Path, arm: dissolve_probe.Arm) -> list[Path]:
+    if arm.counter_strip != "distinct":
+        return [run_dir / "record.json"]
+    try:
+        parent = json.loads((run_dir / "record.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    attempts = parent.get("captureAttempts")
+    if not isinstance(attempts, list):
+        return []
+    paths = []
+    for index, attempt in enumerate(attempts, 1):
+        relative = attempt.get("record") if isinstance(attempt, dict) else None
+        paths.append(run_dir / relative if isinstance(relative, str) else run_dir / f"attempt-{index}" / "record.json")
+    return paths
+
+
+def score_placement_capture_attempts(run_dir: Path, arm: dissolve_probe.Arm,
+                                     cal: dissolve_probe.Calibration, lut: np.ndarray | None) -> dict[str, Any]:
+    rows = []
+    if arm.counter_strip != "distinct":
+        return calibration_gate("PASS", [])
+    paths = placement_attempt_paths(run_dir, arm)
+    if not paths:
+        return calibration_gate("INCONCLUSIVE", ["capture attempt records missing"])
+    profile = replace(dissolve_probe.CEF_PLACEMENT, mid_frames=0)
+    for index, path in enumerate(paths, 1):
+        try:
+            record = json.loads(path.read_text())
+            images = dissolve_probe.RunImages(path.parent)
+            scored = dissolve_probe.score_arm(record, images, arm, cal, profile=profile, lut=lut)
+            rows.append({"attempt": index, "outcome": scored["outcome"], "problems": scored["problems"],
+                         "mismatch": scored["mismatch"]})
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+            rows.append({"attempt": index, "outcome": "INCONCLUSIVE",
+                         "problems": [f"attempt unreadable: {type(exc).__name__}: {exc}"], "mismatch": []})
+    problems = [f"attempt {row['attempt']}: {problem}" for row in rows if row["outcome"] != "MATCH"
+                for problem in (row["problems"] or [f"outcome {row['outcome']}; mismatch {row['mismatch']}"])]
+    return calibration_gate("PASS" if not problems else "INCONCLUSIVE", problems, attempts=rows)
+
+
+def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None, *,
+                               run_name: str, attempt: int | None = None,
+                               ) -> tuple[dict[str, Any], dict[str, Any], dict[str, np.ndarray]]:
     arm = dissolve_probe.ARMS[name]
     record: dict[str, Any] = {"arm": name, "load": os.getloadavg()[0], "headlessBefore": mm_opacity_probe.headless_chromes()}
+    if attempt is not None:
+        record["captureAttempt"] = attempt
     images: dict[str, np.ndarray] = {}
     samples: list[tuple[str, np.ndarray]] = []
     sample_lock = threading.Lock()
     host: LiveOutputHost | None = None
     preflight: dict[str, Any] = {}
     started = time.monotonic()
-    run_dir = ctx["shots"] / "runs" / name
+    run_dir = ctx["shots"] / "runs" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     def sample(phase: str) -> None:
@@ -2142,10 +2214,12 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
                 host._require_transport().evaluate, host._placement_token, arm.placement_value, 15_000)
         host._require_transport().evaluate("(function(){var n=document.getElementById('obed-placement-alpha');if(n)n.remove()})()")
         record["g2"] = ((host._require_transport().evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
-        raw: dict[int, np.ndarray] = {}
         with source_shots(*ctx["creds"]) as shot:
-            driven, images = dissolve_probe.drive(host, arm, resolved.target, lambda: raw.setdefault(id(img := shot()), img))
-        images = {key: unpremultiply(value) if raw.get(id(value)) is value else value for key, value in images.items()}
+            raw: dict[int, np.ndarray] = {}
+            driven, captured = dissolve_probe.drive(
+                host, arm, resolved.target, lambda: raw.setdefault(id(image := shot()), image))
+            images = {key: unpremultiply(value) if raw.get(id(value)) is value else value
+                      for key, value in captured.items()}
         record.update(driven)
 
         rgba_paths = []
@@ -2220,7 +2294,7 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
                 host.stop()
             except Exception as exc:
                 record["stopError"] = str(exc)
-    dissolve_probe.save_run(ctx["shots"], name, record, images)
+    dissolve_probe.save_run(ctx["shots"], run_name, record, images)
     saved_path = run_dir / "record.json"
     if saved_path.is_file():
         saved = json.loads(saved_path.read_text())
@@ -2234,7 +2308,39 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
         out["fatal"] = str(record["error"])[-3000:]
     if name == "opaque-off":
         out["calibration"] = opaque_off_calibration(record, images)
-    return out
+    return out, record, images
+
+
+def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
+    arm = dissolve_probe.ARMS[name]
+    if arm.counter_strip != "distinct":
+        return _placement_session_attempt(name, ctx, decision, run_name=name)[0]
+    run_dir = ctx["shots"] / "runs" / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cal = ctx.get("placementScoringCalibration")
+    if not isinstance(cal, dissolve_probe.Calibration):
+        cal = dissolve_probe.Calibration()
+
+    def capture(attempt: int) -> tuple[dict[str, Any], dict[str, Any], dict[str, np.ndarray]]:
+        return _placement_session_attempt(
+            name, ctx, decision, run_name=f"{name}/attempt-{attempt}", attempt=attempt)
+
+    sessions, attempts = capture_placement_sessions(arm, capture, cal)
+    summary = {"arm": name, "captureAttempts": [
+        {key: value for key, value in row.items() if key != "runDir"} for row in attempts
+    ]}
+    (run_dir / "record.json").write_text(json.dumps(summary))
+    last = sessions[-1]
+    fatal = [session.get("fatal") for session in sessions if session.get("fatal")]
+    return {
+        "session": name,
+        "runDir": str(run_dir),
+        "page": last.get("page"),
+        "output": last.get("output"),
+        "timingS": {"attempts": [session.get("timingS") for session in sessions]},
+        "attempts": [{"attempt": index, "runDir": session.get("runDir")} for index, session in enumerate(sessions, 1)],
+        **({"fatal": fatal[-1]} if fatal else {}),
+    }
 
 
 def chrome_placement_session(name: str, ctx: dict[str, Any], *, gpu: bool) -> dict[str, Any]:
@@ -3120,10 +3226,18 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
     cal = derived if derived is not None and calibration.get("calibration") == asdict(derived) else None
     check(checks, "calibration (opaque-off n)", calibration, cal is not None,
           f"n <= 4: tau <= {DX2_TAU_MAX}, complement <= {DX2_COMPLEMENT_MAX}, no dip >= {DX2_NO_DIP_MIN}")
-    runs = {name: (json.loads((Path(session["runDir"]) / "record.json").read_text()),
-                   dissolve_probe.RunImages(Path(session["runDir"])))
-            for name, session in sessions.items()
-            if session.get("runDir") and (Path(session["runDir"]) / "record.json").is_file()}
+    run_paths = {}
+    for name, session in sessions.items():
+        run_dir_value = session.get("runDir")
+        if not run_dir_value or name not in dissolve_probe.ARMS:
+            continue
+        run_dir = Path(run_dir_value)
+        paths = placement_attempt_paths(run_dir, dissolve_probe.ARMS[name]) or [run_dir / "record.json"]
+        existing = [path for path in paths if path.is_file()]
+        if existing:
+            run_paths[name] = existing
+    runs = {name: (json.loads(paths[-1].read_text()), dissolve_probe.RunImages(paths[-1].parent))
+            for name, paths in run_paths.items()}
     lut, lut_detail = dissolve_probe.launch_lut(runs, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF_PLACEMENT)
     check(checks, "CEF placement tone observation", lut_detail, lut is not None, "measured identity/analytic/table map")
     tone_summary = {"complete": False, "applied": "identity", "observed": lut_detail.get("kind"),
@@ -3131,20 +3245,36 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
                     "missingRows": ["second fresh CEF launch acceleration-on", "second fresh CEF launch acceleration-off",
                                     "hevc10", "Keynote-HEVC", "skin tones", "reset/invalidation controls"]}
     for name in PLACEMENT_ARMS:
-        record, images = runs.get(name) or ({}, None)
-        encoded = record.get("placementCalibration") or {}
-        run_dir = Path(sessions.get(name, {}).get("runDir", "."))
-        integrity = encoded.get("integrity") if isinstance(encoded, dict) else None
-        telemetry_ref = integrity.get("telemetry") if isinstance(integrity, dict) else None
-        if isinstance(telemetry_ref, dict):
-            telemetry = _read_ref_json(telemetry_ref, run_dir)
-            telemetry["toneRows"] = {**(telemetry.get("toneRows") or {}), **tone_summary}
-            integrity["telemetry"] = write_placement_json(run_dir, "telemetry", telemetry)
-        rescored = score_placement_calibration(encoded, run_dir, live_probe_controls=control_rows["probe"])
-        if isinstance(encoded, dict):
-            encoded["gates"] = rescored["gates"]
-            (run_dir / "record.json").write_text(json.dumps(record))
-        check(checks, f"{name}: placement evidence", rescored.get("overall"), rescored.get("overall") == "PASS", "PASS")
+        run_dir_value = sessions.get(name, {}).get("runDir")
+        run_dir = Path(run_dir_value) if run_dir_value else None
+        paths = run_paths.get(name, [])
+        if not paths:
+            check(checks, f"{name}: placement evidence", None, False, "PASS")
+        for attempt, path in enumerate(paths, 1):
+            record = json.loads(path.read_text())
+            encoded = record.get("placementCalibration") or {}
+            integrity = encoded.get("integrity") if isinstance(encoded, dict) else None
+            telemetry_ref = integrity.get("telemetry") if isinstance(integrity, dict) else None
+            if isinstance(telemetry_ref, dict):
+                telemetry = _read_ref_json(telemetry_ref, path.parent)
+                telemetry["toneRows"] = {**(telemetry.get("toneRows") or {}), **tone_summary}
+                integrity["telemetry"] = write_placement_json(path.parent, "telemetry", telemetry)
+            rescored = score_placement_calibration(
+                encoded, path.parent, live_probe_controls=control_rows["probe"])
+            if isinstance(encoded, dict):
+                encoded["gates"] = rescored["gates"]
+            path.write_text(json.dumps(record))
+            label = f"{name} attempt {attempt}: placement evidence" if len(paths) > 1 else f"{name}: placement evidence"
+            check(checks, label, rescored.get("overall"), rescored.get("overall") == "PASS", "PASS")
+        attempts = (score_placement_capture_attempts(run_dir, dissolve_probe.ARMS[name],
+                                                     cal or dissolve_probe.Calibration(), lut)
+                    if run_dir is not None else calibration_gate("INCONCLUSIVE", ["run directory missing"]))
+        parent_path = run_dir / "record.json" if run_dir is not None else None
+        if parent_path is not None and parent_path.is_file():
+            parent = json.loads(parent_path.read_text())
+            parent["captureAttemptScore"] = attempts
+            parent_path.write_text(json.dumps(parent))
+        check(checks, f"{name}: every capture attempt", attempts, attempts["verdict"] == "PASS", "PASS")
     for name in ("probe-chrome-gpu", "probe-chrome-software"):
         encoded = (runs.get(name) or ({}, None))[0].get("placementCalibration") or {}
         rescored = score_placement_calibration(encoded, Path(sessions.get(name, {}).get("runDir", ".")))
@@ -3501,9 +3631,19 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
             studio_enabled=PLACEMENT_CONTROL_SPECS[name][1], measure_control=PLACEMENT_CONTROL_SPECS[name][2],
         ) for name in PLACEMENT_CONTROL_SESSIONS]
         ctx["placementControls"] = placement_control_rows(controls)
-        return [*controls, chrome_placement_session("probe-chrome-gpu", ctx, gpu=True),
-                chrome_placement_session("probe-chrome-software", ctx, gpu=False),
-                *(placement_session(name, ctx, args.decision) for name in PLACEMENT_ARMS)]
+        sessions = [*controls, chrome_placement_session("probe-chrome-gpu", ctx, gpu=True),
+                    chrome_placement_session("probe-chrome-software", ctx, gpu=False)]
+        for name in PLACEMENT_ARMS:
+            session = placement_session(name, ctx, args.decision)
+            sessions.append(session)
+            if name == "opaque-off":
+                encoded = (session.get("calibration") or {}).get("calibration")
+                if isinstance(encoded, dict):
+                    try:
+                        ctx["placementScoringCalibration"] = dissolve_probe.Calibration(**encoded)
+                    except TypeError:
+                        pass
+        return sessions
     return [run_session("soak", soak_script(args.soak_minutes, armed, fixture_loops(ctx["fixture"])), ctx),
             run_session("soak-off", soak_off_script, ctx, gl_replay="off")]
 
@@ -3827,8 +3967,23 @@ def score_mmo(root: Path) -> int:
 
 
 def score_placement_runs(root: Path) -> int | None:
-    paths = sorted(set(root.glob("**/runs/*/record.json")))
-    paths += [p for p in sorted((root / "runs").glob("*.json")) if p not in paths]
+    parent_paths = sorted(set(root.glob("**/runs/*/record.json")))
+    parent_paths += [p for p in sorted((root / "runs").glob("*.json")) if p not in parent_paths]
+    paths = []
+    for path in parent_paths:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            paths.append(path)
+            continue
+        attempts = record.get("captureAttempts")
+        if not isinstance(attempts, list):
+            paths.append(path)
+            continue
+        for index, attempt in enumerate(attempts, 1):
+            relative = attempt.get("record") if isinstance(attempt, dict) else None
+            paths.append(path.parent / relative if isinstance(relative, str)
+                         else path.parent / f"attempt-{index}" / "record.json")
     control_records = []
     for path in paths:
         try:
@@ -3951,40 +4106,50 @@ def _retire_passing_recordings(calibration: dict[str, Any], run_dir: Path) -> No
     integrity["telemetry"] = write_placement_json(run_dir, "telemetry", telemetry)
 
 
+def placement_session_run_dirs(session: dict[str, Any]) -> list[Path]:
+    attempts = session.get("attempts")
+    if isinstance(attempts, list):
+        return [Path(row["runDir"]) for row in attempts
+                if isinstance(row, dict) and isinstance(row.get("runDir"), str)]
+    return [Path(session["runDir"])] if isinstance(session.get("runDir"), str) else []
+
+
 def finalize_placement_persistence(sessions: list[dict[str, Any]], collection_path: Path) -> None:
     for session in sessions:
-        if not session.get("runDir"):
+        for run_dir in placement_session_run_dirs(session):
+            _finalize_placement_persistence(run_dir, collection_path)
+
+
+def _finalize_placement_persistence(run_dir: Path, collection_path: Path) -> None:
+    record_path = run_dir / "record.json"
+    if not record_path.is_file() or not collection_path.is_file():
+        return
+    record = json.loads(record_path.read_text())
+    calibration = record.get("placementCalibration")
+    persistence = calibration.get("persistence") if isinstance(calibration, dict) else None
+    if not isinstance(persistence, dict):
+        return
+    _quit, persistence["quit"] = capture_collection(collection_path, run_dir, "quit", saved_by_obs=True)
+    backups = []
+    for index, source in enumerate(sorted(collection_path.parent.glob("AK.json.bak*"))):
+        if not source.is_file():
             continue
-        run_dir = Path(session["runDir"])
-        record_path = run_dir / "record.json"
-        if not record_path.is_file() or not collection_path.is_file():
-            continue
-        record = json.loads(record_path.read_text())
-        calibration = record.get("placementCalibration")
-        persistence = calibration.get("persistence") if isinstance(calibration, dict) else None
-        if not isinstance(persistence, dict):
-            continue
-        _quit, persistence["quit"] = capture_collection(collection_path, run_dir, "quit", saved_by_obs=True)
-        backups = []
-        for index, source in enumerate(sorted(collection_path.parent.glob("AK.json.bak*"))):
-            if not source.is_file():
-                continue
-            dest = run_dir / "placement" / "collections" / f"backup-{index}{source.suffix}"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, dest)
-            backups.append(dissolve_probe.placement_file_ref(dest, run_dir))
-        persistence["backup"] = backups
+        dest = run_dir / "placement" / "collections" / f"backup-{index}{source.suffix}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        backups.append(dissolve_probe.placement_file_ref(dest, run_dir))
+    persistence["backup"] = backups
+    rescored = score_placement_calibration(calibration, run_dir)
+    if rescored["overall"] == "PASS":
+        _retire_passing_recordings(calibration, run_dir)
         rescored = score_placement_calibration(calibration, run_dir)
-        if rescored["overall"] == "PASS":
-            _retire_passing_recordings(calibration, run_dir)
-            rescored = score_placement_calibration(calibration, run_dir)
-        persistence["checks"] = rescored.get("persistenceChecks", [])
-        calibration["gates"] = rescored["gates"]
-        record_path.write_text(json.dumps(record))
+    persistence["checks"] = rescored.get("persistenceChecks", [])
+    calibration["gates"] = rescored["gates"]
+    record_path.write_text(json.dumps(record))
 
 
 def placement_disk_preflight(out_dir: Path, home: Path, takes: int) -> dict[str, int]:
-    recordings = len(PLACEMENT_ARMS) * len(MMO_RATES) * takes * 2
+    recordings = (len(PLACEMENT_ARMS) + 2) * len(MMO_RATES) * takes * 2
     retained = 0
     working = 2 * PLACEMENT_RECORDING_ESTIMATE_BYTES
     out_free = shutil.disk_usage(out_dir).free
