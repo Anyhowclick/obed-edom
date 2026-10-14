@@ -43,7 +43,8 @@ dashboard suites are not rerun yet (do before the PR). Raw runs: session scratch
   ordering kept (overlap→under_artwork, `_crossing_carries`, glReplay, feed). `51ead0a8` makes the R12 oracle a
   coherent, visible, non-crossing pair (`_add_wa0125_beside_the_carry_to_slide4`). Sol merge review r1 (1 medium,
   folded) → r2 no findings. D7/D7s/Alpha plan pins unchanged. Suites on the merge: 3.12 and 3.10 11011 passed each +
-  the load-only deadline test. Headless D7 recheck on the merge not yet run (machine held by CEF/OBS live pass).
+  the load-only deadline test. Headless D7 recheck on the merge: plan `0e257092` unchanged, 6 claims, 0 stand-downs,
+  88–89 frames per leaf at normal load, artworkAbove 15/15 (frames drop to ~40 per leaf under load ≥ 19).
 - `feedLive` unreadable: `counterFromGl` decodes null at both orientations on the real player (instrument coordinate bug).
 - Chrome **155.0.8059.79** still unqualified (`QUALIFIED_SNAP_MAJORS = (154,)`): headless runs used a scratch-only wrapper;
   qualifying 155 stays the owner's call.
