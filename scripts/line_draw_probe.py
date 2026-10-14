@@ -39,6 +39,15 @@ from obed_edom.fixture_paths import fixture  # noqa: E402
 
 DEFAULT_ARMS = ("on", "off", "head-static", "head-diamond-tail", "head-protrusions",
                 "hold-p1", "hide-show", "destroy", "busy", "neighbour")
+STAMP_CELL = 2
+STAMP_SYNC = 0xD3
+STAMP_TIME_BYTES = 4
+STAMP_CRC_BYTES = 1
+STAMP_BYTES = 1 + STAMP_TIME_BYTES + STAMP_CRC_BYTES
+STAMP_BITS = STAMP_BYTES * 8
+STAMP_WIDTH = STAMP_BITS * STAMP_CELL
+STAMP_HEIGHT = STAMP_CELL
+STAMP_TICKS_PER_MS = 100
 SPLICES = {
     "busy": (
         (
@@ -93,10 +102,10 @@ SPLICES = {
     ),
 }
 HOOK = r"""
-(()=>{if(window.__obedLineProbe)return;var P=window.__obedLineProbe={frames:[],leafVisibility:[]},known=new Map,leaves=new Map;function f(){var a=[],n=[],v=[],s=window.__obedLive&&window.__obedLive.snapshot();
+(()=>{if(window.__obedLineProbe)return;var P=window.__obedLineProbe={frames:[],leafVisibility:[]},known=new Map,leaves=new Map,S=document.createElement('canvas'),g=S.getContext('2d');S.width=96,S.height=2,S.style.cssText='position:fixed;left:0;bottom:0;width:96px;height:2px;z-index:2147483647;pointer-events:none;opacity:1;mix-blend-mode:normal;transform:none;',S.dataset.obedLineStamp='1',document.documentElement.appendChild(S);function crc(b){var c=0;for(var i=0;i<b.length;i++){c^=b[i];for(var j=0;j<8;j++)c=c&128?(c<<1^7)&255:c<<1&255}return c}function stamp(t){var q=Math.round(t*100);if(q<0||q>4294967295)throw Error('Line Draw frame stamp out of range');var b=[211,Math.floor(q/16777216)%256,Math.floor(q/65536)%256,Math.floor(q/256)%256,q%256];b.push(crc(b));for(var i=0;i<48;i++){var bit=b[Math.floor(i/8)]>>(7-i%8)&1;g.fillStyle=bit?'#fff':'#000',g.fillRect(i*2,0,2,2)}}function f(t){stamp(t);var a=[],n=[],v=[],s=window.__obedLive&&window.__obedLive.snapshot();
 document.querySelectorAll('canvas[data-obed-line-draw]').forEach(function(c){var id=c.dataset.obedLineDraw,p=c.parentElement,l=p&&p.querySelector('canvas:not([data-obed-line-draw])');known.set(id,c),l&&leaves.set(id,l)});known.forEach(function(c,id){var r=c.getBoundingClientRect(),z=document.getAnimations().find(function(x){var t=x.effect&&x.effect.target;return /^layer.*-opacity$/.test(x.animationName||'')&&t&&(t===c.parentElement||t.contains(c))});a.push({id:id,box:[r.left,r.top,r.width,r.height],draws:c.__obedLineDraws||0,headDiff:c.__obedLineHeadDiff,connected:c.isConnected,animationName:z&&z.animationName})});leaves.forEach(function(c,id){v.push({id:id,visibility:c.style.visibility,connected:c.isConnected})}),P.leafVisibility=v;
 document.getAnimations().forEach(function(x){if(/^layer.*-opacity$/.test(x.animationName||''))n.push({name:x.animationName,startTime:x.startTime,currentTime:x.currentTime,playState:x.playState})});
-P.frames.push({t:performance.now(),scene:s&&s.sceneId,state:s&&s.playerState,overlays:a,animations:n});if(P.frames.length>1000)P.frames.shift();requestAnimationFrame(f)}requestAnimationFrame(f)})()
+P.frames.push({t:t,scene:s&&s.sceneId,state:s&&s.playerState,overlays:a,animations:n});if(P.frames.length>1000)P.frames.shift();requestAnimationFrame(f)}requestAnimationFrame(f)})()
 """
 
 
@@ -106,6 +115,86 @@ def decode_png(data: str) -> np.ndarray:
 
 def encode_png(image: np.ndarray, path: Path) -> None:
     Image.fromarray(image.astype(np.uint8), "RGBA").save(path)
+
+
+def stamp_crc8(values: bytes) -> int:
+    crc = 0
+    for value in values:
+        crc ^= value
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def encode_stamp_ticks(ticks: int) -> bytes:
+    if not 0 <= ticks <= 0xFFFFFFFF:
+        raise ValueError(f"stamp ticks out of range: {ticks}")
+    payload = bytes([STAMP_SYNC]) + ticks.to_bytes(STAMP_TIME_BYTES, "big")
+    return payload + bytes([stamp_crc8(payload)])
+
+
+def stamp_mask_rect(shape: tuple[int, ...]) -> tuple[int, int, int, int]:
+    if len(shape) < 2 or shape[0] < STAMP_HEIGHT or shape[1] < STAMP_WIDTH:
+        raise ValueError(f"frame {shape} is smaller than the {STAMP_WIDTH}x{STAMP_HEIGHT} stamp")
+    return 0, shape[0] - STAMP_HEIGHT, STAMP_WIDTH, STAMP_HEIGHT
+
+
+def decode_frame_stamp(image: np.ndarray) -> float:
+    x0, y0, width, height = stamp_mask_rect(image.shape)
+    values = []
+    for index in range(STAMP_BITS):
+        cell = image[y0:y0 + height, x0 + index * STAMP_CELL:x0 + (index + 1) * STAMP_CELL, :3]
+        if np.all(cell <= 24):
+            values.append(0)
+        elif np.all(cell >= 231):
+            values.append(1)
+        else:
+            raise ValueError(f"stamp bit {index} is not a solid black/white cell")
+    payload = bytes(sum(values[offset + bit] << (7 - bit) for bit in range(8))
+                    for offset in range(0, STAMP_BITS, 8))
+    if payload[0] != STAMP_SYNC:
+        raise ValueError(f"stamp sync is 0x{payload[0]:02x}, expected 0x{STAMP_SYNC:02x}")
+    if stamp_crc8(payload[:-1]) != payload[-1]:
+        raise ValueError("stamp CRC-8 mismatch")
+    return int.from_bytes(payload[1:1 + STAMP_TIME_BYTES], "big") / STAMP_TICKS_PER_MS
+
+
+def quantize_stamp_time(value: float) -> float:
+    return math.floor(value * STAMP_TICKS_PER_MS + 0.5) / STAMP_TICKS_PER_MS
+
+
+def mask_frame_stamp(image: np.ndarray) -> np.ndarray:
+    masked = image.copy()
+    x0, y0, width, height = stamp_mask_rect(masked.shape)
+    masked[y0:y0 + height, x0:x0 + width] = 0
+    return masked
+
+
+def assert_rect_clear_of_stamp(rect: list[float], shape: tuple[int, ...], label: str) -> None:
+    sx, sy, sw, sh = stamp_mask_rect(shape)
+    left, top, width, height = (float(value) for value in rect)
+    if left < sx + sw and left + width > sx and top < sy + sh and top + height > sy:
+        raise ValueError(f"{label} rect {rect} intersects frame stamp rect {[sx, sy, sw, sh]}")
+
+
+def assert_samples_clear_of_stamp(samples: list[tuple[int, int]], shape: tuple[int, ...], label: str) -> None:
+    sx, sy, sw, sh = stamp_mask_rect(shape)
+    for x, y in samples:
+        if x + 1 >= sx and x - 1 < sx + sw and y + 1 >= sy and y - 1 < sy + sh:
+            raise ValueError(f"{label} sample {(x, y)} intersects frame stamp rect {[sx, sy, sw, sh]}")
+
+
+def mean_frame_delta(left: np.ndarray, right: np.ndarray) -> float:
+    sx, sy, sw, sh = stamp_mask_rect(left.shape)
+    delta = np.abs(left.astype(int) - right.astype(int))
+    keep = np.ones(left.shape[:2], dtype=bool)
+    keep[sy:sy + sh, sx:sx + sw] = False
+    return float(delta[keep].mean())
+
+
+def frame_step_seconds(frames: list[tuple[float, np.ndarray]]) -> float:
+    steps = [right[0] - left[0] for left, right in zip(frames, frames[1:]) if right[0] > left[0]]
+    return float(np.median(steps)) / 1000 if steps else 1 / 30
 
 
 def metric_timestamp(transport: Any) -> float:
@@ -571,22 +660,27 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
                  frames: list[tuple[float, np.ndarray]], origins: dict[str, np.ndarray] | None = None,
                  head_models: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     checks: dict[str, Any] = {"body": [], "handback": {}, "lifecycle": record.get("lifecycle", {})}
-    begin = float(record["advanceFrameTime"])
-    offset = 0.0
+    advance_raw = float(record["advancePerformanceMs"])
+    advance_ms = quantize_stamp_time(advance_raw)
     post_show_errors = []
-    lifecycle = record.get("lifecycle", {})
+    lifecycle = dict(record.get("lifecycle", {}))
+    for anchor in ("hideAt", "showAt"):
+        if anchor in lifecycle:
+            lifecycle[anchor] = (quantize_stamp_time(advance_raw + float(lifecycle[anchor]) * 1000)
+                                 - advance_ms) / 1000
     show_ready = None
     if record["arm"] == "hide-show" and "hideAt" in lifecycle and "showAt" in lifecycle:
-        hidden = [item for item in frames if lifecycle["hideAt"] <= item[0] - begin <= lifecycle["showAt"]]
+        hidden = [item for item in frames
+                  if lifecycle["hideAt"] <= (item[0] - advance_ms) / 1000 <= lifecycle["showAt"]]
         if hidden:
             hidden_frame = hidden[-1][1].astype(int)
-            visible = [item for item in frames if item[0] - begin > lifecycle["showAt"]
-                       and float(np.abs(item[1].astype(int) - hidden_frame).mean()) > 1]
+            visible = [item for item in frames if (item[0] - advance_ms) / 1000 > lifecycle["showAt"]
+                       and mean_frame_delta(item[1], hidden_frame) > 1]
             if visible:
                 show_ready = visible[0][0]
     for geometry in geometries:
-        effect_offset = float(record.get("effectStarts", {}).get(str(geometry["objectID"]), offset))
-        effect_begin = begin + effect_offset
+        assert_rect_clear_of_stamp(geometry["rect"], final.shape, geometry["name"])
+        effect_begin = float(record["effectStarts"][str(geometry["objectID"])])
         origin = before
         prior = [item for item in frames if item[0] < effect_begin]
         if prior:
@@ -597,6 +691,7 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
         head_model = (head_models or {}).get(str(geometry["objectID"])) if arrow_body else None
         samples = sample_points(geometry, end_length=geometry["length"] - head_model["d"]
                                 if head_model else None)
+        assert_samples_clear_of_stamp(samples, final.shape, geometry["name"])
         sample_support = 0
         for x, y in samples:
             y0, y1 = max(0, y - 1), min(final.shape[0], y + 2)
@@ -616,10 +711,10 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
         errors = []
         eligible_counts = []
         for timestamp, frame in frames:
-            local = timestamp - effect_begin
+            local = (timestamp - effect_begin) / 1000
             if local < -0.04 or local > geometry["duration"] + 0.08:
                 continue
-            absolute = timestamp - begin
+            absolute = (timestamp - advance_ms) / 1000
             if "hideAt" in lifecycle and lifecycle["hideAt"] <= absolute \
                     and (show_ready is None or timestamp < show_ready):
                 continue
@@ -650,8 +745,7 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
             if arrow_body:
                 row["headExcludedSamples"] = len(excluded)
             rows.append(row)
-        frame_step = float(np.median([right[0] - left[0] for left, right in zip(frames, frames[1:])])) \
-            if len(frames) > 1 else 1
+        frame_step = frame_step_seconds(frames)
         allowance = 2 * frame_step / geometry["duration"] + 0.04
         maximum = round(max(errors), 4) if errors else None
         passed = maximum is not None and maximum <= allowance
@@ -673,7 +767,6 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
         if status:
             check.update({"status": status, "reason": "too few eligible body samples"})
         checks["body"].append(check)
-        offset += geometry["duration"]
     handback: dict[str, Any] = {"endEqualsOff": None, "settledSha256": record.get("settledSha256"),
                                 "popProgress": None, "heldP1EqualsStock": None, "effects": []}
     overlay_rows = record.get("overlayFrames", [])
@@ -692,7 +785,7 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
             painted_any = True
             last_ms = painted[-1][0]["t"]
             effect_handback["lastPaintedMs"] = last_ms
-            last_absolute = (last_ms - record["advancePerformanceMs"]) / 1000
+            last_absolute = (quantize_stamp_time(float(last_ms)) - advance_ms) / 1000
             if (record["arm"] == "hide-show" and "hideAt" in lifecycle and "showAt" in lifecycle
                     and lifecycle["hideAt"] <= last_absolute <= lifecycle["showAt"]):
                 effect_handback["popApplicable"] = False
@@ -700,20 +793,18 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
                 effect_handback["lastPaintedFromAdvance"] = round(last_absolute, 4)
                 handback["effects"].append(effect_handback)
                 continue
-            last_time = begin + (last_ms - record["advancePerformanceMs"]) / 1000
-            before_cast = min(frames, key=lambda item: abs(item[0] - last_time))
+            before_cast = min(frames, key=lambda item: abs(item[0] - last_ms))
             after_cast = next((item for item in frames if item[0] > before_cast[0]), before_cast)
             samples = sample_points(geometry)
-            effect_offset = float(record.get("effectStarts", {}).get(object_id, 0))
-            prior = [item for item in frames if item[0] < begin + effect_offset]
+            assert_samples_clear_of_stamp(samples, final.shape, geometry["name"])
+            prior = [item for item in frames if item[0] < float(record["effectStarts"][object_id])]
             origin = prior[-1][1] if prior else before
             if origins and object_id in origins:
                 origin = origins[object_id]
             last_front = revealed_front(before_cast[1], origin, final, samples)
             stock_front = revealed_front(after_cast[1], origin, final, samples)
             effect_handback["popProgress"] = round(abs(stock_front - last_front), 4)
-            frame_step = float(np.median([right[0] - left[0] for left, right in zip(frames, frames[1:])])) \
-                if len(frames) > 1 else 1 / 30
+            frame_step = frame_step_seconds(frames)
             effect_handback["popMaximum"] = round(frame_step / geometry["duration"], 4)
             later = record.get("laterBuildRects", {}).get(object_id, [])
             swept = []
@@ -729,6 +820,7 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
                     swept.append({"effect": item.get("effect"), "name": item.get("name"),
                                   "rect": [left, top, right - left, bottom - top]})
             pop_rect = painted[-1][1].get("box") or geometry["rect"]
+            assert_rect_clear_of_stamp(pop_rect, final.shape, f"{geometry['name']} pop")
             px0, py0 = max(0, math.floor(pop_rect[0])), max(0, math.floor(pop_rect[1]))
             px1 = min(final.shape[1], math.ceil(pop_rect[0] + pop_rect[2]))
             py1 = min(final.shape[0], math.ceil(pop_rect[1] + pop_rect[3]))
@@ -759,9 +851,9 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
                     handback["effects"].append(effect_handback)
                     continue
                 held_row, _, held_animation = complete[-1]
-                held_time = begin + (float(held_row["t"]) - record["advancePerformanceMs"]) / 1000
-                held_cast = min(frames, key=lambda item: abs(item[0] - held_time))
+                held_cast = min(frames, key=lambda item: abs(item[0] - float(held_row["t"])))
                 rect = geometry["rect"]
+                assert_rect_clear_of_stamp(rect, final.shape, f"{geometry['name']} held p=1")
                 x0, y0 = max(0, math.floor(rect[0])), max(0, math.floor(rect[1]))
                 x1, y1 = min(final.shape[1], math.ceil(rect[0] + rect[2])), min(final.shape[0], math.ceil(rect[1] + rect[3]))
                 delta = np.abs(held_cast[1][y0:y1, x0:x1].astype(int) - final[y0:y1, x0:x1].astype(int))
@@ -800,9 +892,7 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
         handback["heldP1EqualsStock"] = not held_missing and len(roi_diffs) == len(geometries) and all(
             item["comparedPixels"] > 0 and item["overTolerancePixels"] == 0 for item in roi_diffs)
         handback["heldP1MissingTelemetry"] = held_missing
-    failures = [] if record["arm"] == "hold-p1" else [failure for item in checks["body"] for failure in item["failedChecks"]]
-    if record["arm"] == "hold-p1":
-        checks["bodyReportOnly"] = "owner 2026-10-14: hold-p1 gates the held composite only; reveal timing is gated by on"
+    failures = [failure for item in checks["body"] for failure in item["failedChecks"]]
     if not painted_any:
         failures.append({"check": "overlay.frames", "measured": 0, "minimum": 1})
     for item in handback["effects"]:
@@ -818,8 +908,9 @@ def score_frames(record: dict[str, Any], geometries: list[dict[str, Any]], befor
         maximum = round(max(post_show_errors), 4) if post_show_errors else None
         resumed = show_ready is not None and maximum is not None and maximum <= allowance
         checks["lifecycle"] = {**record.get("lifecycle", {}), "postShowFrames": len(post_show_errors),
-                               "presentationReadyAt": round(show_ready - begin, 4) if show_ready else None,
-                               "presentationLatencyMs": round((show_ready - begin - lifecycle["showAt"]) * 1000, 1)
+                               "presentationReadyAt": round((show_ready - advance_ms) / 1000, 4) if show_ready else None,
+                               "presentationLatencyMs": round(show_ready - advance_ms
+                                                              - lifecycle["showAt"] * 1000, 1)
                                if show_ready else None,
                                "resumeMaxError": maximum, "allowance": allowance, "resumed": resumed}
         if not resumed:
@@ -846,8 +937,6 @@ def wait_settled(host: LiveOutputHost, timeout: float = 12) -> None:
 
 
 def animation_effect_starts(record: dict[str, Any], geometries: list[dict[str, Any]]) -> dict[str, float]:
-    if record.get("advancePerformanceMs") is None:
-        raise ValueError("advance performance timestamp is missing")
     starts = {}
     clocks = {}
     for geometry in geometries:
@@ -860,11 +949,12 @@ def animation_effect_starts(record: dict[str, Any], geometries: list[dict[str, A
                    if animation.get("currentTime") is not None and math.isfinite(float(animation["currentTime"]))]
         if not direct and not derived:
             raise ValueError(f"no stock Animation clock for {name}")
-        start = float(np.median(direct or derived))
+        start = quantize_stamp_time(float(np.median(direct or derived)))
         object_id = str(geometry["objectID"])
-        starts[object_id] = (start - float(record["advancePerformanceMs"])) / 1000
+        starts[object_id] = start
         clocks[object_id] = {"animationName": name, "startTime": start,
-                             "samples": len(direct or derived), "source": "startTime" if direct else "t-currentTime"}
+                             "samples": len(direct or derived), "source": "startTime" if direct else "t-currentTime",
+                             "domain": "document-timeline-ms"}
     record["effectClocks"] = clocks
     return starts
 
@@ -872,7 +962,6 @@ def animation_effect_starts(record: dict[str, Any], geometries: list[dict[str, A
 def run_arm(root: Path, slides: list[Any], manifest: dict[str, Any], ordinal: int, arm: str, out: Path) -> dict[str, Any]:
     host = LiveOutputHost(root, slides, headless=True, resolver=resolver, continuity="off", mm_opacity="off" if arm == "off" else "auto")
     record: dict[str, Any] = {"arm": arm}
-    frames: list[tuple[float, np.ndarray]] = []
     captured_rows: list[tuple[float, float, np.ndarray]] = []
     try:
         with serving(arm):
@@ -893,7 +982,9 @@ def run_arm(root: Path, slides: list[Any], manifest: dict[str, Any], ordinal: in
         record["laterBuildRects"] = later_build_rects(slide, geometries)
         with screencast_frames(transport.port) as captured:
             record["advanceTimestamp"] = metric_timestamp(transport)
-            record["advancePerformanceMs"] = transport.evaluate("performance.now()")
+            record["advancePerformanceMs"] = quantize_stamp_time(float(transport.evaluate(
+                "window.__obedLineProbe.frames.at(-1).t"
+            )))
             record["advanceFrameTime"] = time.monotonic()
             host.execute("advance")
             if arm == "busy":
@@ -908,33 +999,39 @@ def run_arm(root: Path, slides: list[Any], manifest: dict[str, Any], ordinal: in
                 record["jumpAfter"] = transport.evaluate("window.__obedLive.snapshot().sceneId")
             elif arm == "hide-show":
                 time.sleep(0.3)
-                hide_at = time.monotonic() - record["advanceFrameTime"]
+                hide_at = (quantize_stamp_time(float(transport.evaluate("window.__obedLineProbe.frames.at(-1).t")))
+                           - record["advancePerformanceMs"]) / 1000
                 host.execute("hide")
                 time.sleep(0.75)
+                show_at = (quantize_stamp_time(float(transport.evaluate("window.__obedLineProbe.frames.at(-1).t")))
+                           - record["advancePerformanceMs"]) / 1000
                 host.execute("show")
                 record["lifecycle"] = {"hideAt": hide_at,
-                                       "showAt": time.monotonic() - record["advanceFrameTime"]}
+                                       "showAt": show_at,
+                                       "clockDomain": "document-timeline"}
             elif arm == "destroy":
                 time.sleep(0.95)
                 arrow_id = str(next(geometry["objectID"] for geometry in geometries
                                     if geometry["name"].endswith("LineDrawForLine")))
                 record["destroyAt"] = metric_timestamp(transport)
-                record["destroyAtMs"] = transport.evaluate("performance.now()")
                 record["destroyResult"] = False
                 try:
                     atomic = transport.evaluate(
                         f"(()=>{{var c=document.querySelector('canvas[data-obed-line-draw={json.dumps(arrow_id)}]'),"
                         "p=c?{id:c.dataset.obedLineDraw,draws:c.__obedLineDraws||0,connected:c.isConnected}:null,"
-                        "r=window.__obedLive.probeDestroy();return {pre:p,result:r,at:performance.now()}})()"
+                        "r=window.__obedLive.probeDestroy();return {pre:p,result:r,at:window.__obedLineProbe.frames.at(-1).t}})()"
                     )
                     record["preDestroyOverlay"] = atomic["pre"]
                     record["destroyResult"] = atomic["result"]
-                    record["destroyAtMs"] = atomic["at"]
+                    record["destroyAtMs"] = quantize_stamp_time(float(atomic["at"]))
                 except Exception:
                     record["destroyActionError"] = traceback.format_exc()
             time.sleep(2.9)
             captured_rows = list(captured)
-        frames, record["frameClock"] = bind_frame_clock(captured_rows)
+        try:
+            _, record["frameClock"] = bind_frame_clock(captured_rows)
+        except RuntimeError:
+            record["frameClock"] = None
         final = screenshot(transport)
         probe = transport.evaluate("window.__obedLineProbe") or {}
         record["overlayFrames"] = probe.get("frames", [])
@@ -951,20 +1048,48 @@ def run_arm(root: Path, slides: list[Any], manifest: dict[str, Any], ordinal: in
             geometry["animationName"] = animation_names.get(str(geometry["objectID"]))
         record["overlayResidue"] = transport.evaluate("document.querySelectorAll('canvas[data-obed-line-draw]').length")
         record["mmOpacity"] = host.output.get("mmOpacity")
-        record["settledSha256"] = __import__("hashlib").sha256(final.tobytes()).hexdigest()
-        record["frameCount"] = len(frames)
+        record["settledSha256"] = __import__("hashlib").sha256(mask_frame_stamp(final).tobytes()).hexdigest()
+        record["frameCount"] = len(captured_rows)
+        record["frameTimeDomain"] = "document-timeline-ms"
         arm_out = out / arm
         arm_out.mkdir(parents=True, exist_ok=True)
         encode_png(before, arm_out / "before.png")
         encode_png(final, arm_out / "settled.png")
         frame_times = []
-        for index, ((presented, received, _), (timestamp, frame)) in enumerate(zip(captured_rows, frames)):
+        timestamps = []
+        stamp_errors = []
+        for index, (presented, received, frame) in enumerate(captured_rows):
             encode_png(frame, arm_out / f"frame-{index:04d}.png")
-            frame_times.append({"screencast": presented, "receivedMonotonic": received, "scoreTime": timestamp})
-        (arm_out / "timestamps.json").write_text(json.dumps([timestamp for timestamp, _ in frames], indent=1))
+            try:
+                timestamp = decode_frame_stamp(frame)
+            except ValueError as exc:
+                timestamp = None
+                stamp_errors.append({"frame": index, "reason": str(exc)})
+            timestamps.append(timestamp)
+            frame_times.append({"screencast": presented, "receivedMonotonic": received,
+                                "stampedPageTimeMs": timestamp, "scoreTime": timestamp})
+        for index, (left, right) in enumerate(zip(timestamps, timestamps[1:]), 1):
+            if left is None or right is None:
+                continue
+            if right < left:
+                stamp_errors.append({"frame": index, "reason": f"stamp decreased from {left} to {right}"})
+            elif right == left and not np.array_equal(mask_frame_stamp(captured_rows[index - 1][2]),
+                                                       mask_frame_stamp(captured_rows[index][2])):
+                stamp_errors.append({"frame": index, "reason": "equal stamp has different pixels"})
+        record["frameStamp"] = {"domain": "document-timeline-ms", "resolutionMs": 1 / STAMP_TICKS_PER_MS,
+                                "rect": list(stamp_mask_rect(final.shape)), "decodeErrors": stamp_errors}
+        if stamp_errors:
+            first = stamp_errors[0]
+            record.update({"status": "INCONCLUSIVE",
+                           "reason": f"frame stamp integrity at frame {first['frame']}: {first['reason']}",
+                           "pass": None})
+        timestamp_record = {"schema": 1, "domain": "document-timeline-ms",
+                            "resolutionMs": 1 / STAMP_TICKS_PER_MS, "values": timestamps}
+        (arm_out / "timestamps.json").write_text(json.dumps(timestamp_record, indent=1))
         (arm_out / "frame-times.json").write_text(json.dumps(frame_times, indent=1))
         if arm == "destroy":
-            after = [item for item in record["overlayFrames"] if item["t"] >= record["destroyAtMs"]]
+            after = [item for item in record["overlayFrames"]
+                     if quantize_stamp_time(float(item["t"])) > record["destroyAtMs"]]
             elapsed = record["destroyAt"] - record["advanceTimestamp"]
             deadline = sum(geometry["duration"] for geometry in geometries)
             pre = record.get("preDestroyOverlay") or {}
@@ -1065,9 +1190,26 @@ def keyer_arm(port: int, password: str | None, source: str, out: Path, seconds: 
             "endMaxLsb": max(end_deltas, default=None), "failedChecks": failures, "pass": not failures}
 
 
+def saved_stamp_values(path: Path, expected: int) -> list[float]:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or value.get("schema") != 1 \
+            or value.get("domain") != "document-timeline-ms" or not isinstance(value.get("values"), list):
+        raise ValueError("stamped document-timeline timestamps are missing; legacy runs cannot be rescored")
+    timestamps = value["values"]
+    if len(timestamps) != expected:
+        raise ValueError(f"{len(timestamps)} stamped timestamps for {expected} frames")
+    invalid = next((index for index, timestamp in enumerate(timestamps)
+                    if not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp)), None)
+    if invalid is not None:
+        raise ValueError(f"frame stamp {invalid} did not decode")
+    return [float(timestamp) for timestamp in timestamps]
+
+
 def compare_label_dissolve(out: Path, on: dict[str, Any], off: dict[str, Any]) -> dict[str, Any]:
-    on_times = json.loads((out / "on" / "timestamps.json").read_text())
-    off_times = json.loads((out / "off" / "timestamps.json").read_text())
+    on_paths = sorted((out / "on").glob("frame-*.png"))
+    off_paths = sorted((out / "off").glob("frame-*.png"))
+    on_times = saved_stamp_values(out / "on" / "timestamps.json", len(on_paths))
+    off_times = saved_stamp_values(out / "off" / "timestamps.json", len(off_paths))
     later = [item for items in on.get("laterBuildRects", {}).values() for item in items
              if item.get("name") == "apple:dissolve"]
     if not later:
@@ -1078,24 +1220,26 @@ def compare_label_dissolve(out: Path, on: dict[str, Any], off: dict[str, Any]) -
     for arm, run in (("on", on), ("off", off)):
         line_names = {geometry.get("animationName") for geometry in run.get("geometries", [])}
         line_starts = [clock["startTime"] for clock in run.get("effectClocks", {}).values()]
-        candidates = [float(animation["startTime"]) for row in run.get("overlayFrames", [])
+        candidates = [quantize_stamp_time(float(animation["startTime"]))
+                      for row in run.get("overlayFrames", [])
                       for animation in row.get("animations", []) if animation.get("name") not in line_names
-                      and animation.get("startTime") is not None
-                      and (not line_starts or float(animation["startTime"]) > max(line_starts))]
+                      and animation.get("startTime") is not None]
+        candidates = [start for start in candidates if not line_starts or start > max(line_starts)]
         if not candidates:
             failure = {"check": "labelDissolve.clock", "arm": arm, "measured": 0, "minimum": 1}
             return {"frames": 0, "rect": rect, "maxMeanDelta": None,
                     "failedChecks": [failure], "pass": False}
         start = min(candidates)
-        starts[arm] = run["advanceFrameTime"] + (start - run["advancePerformanceMs"]) / 1000
+        starts[arm] = start
     deltas = []
     for index, timestamp in enumerate(on_times):
-        elapsed = timestamp - starts["on"]
+        elapsed = (timestamp - starts["on"]) / 1000
         if not -0.03 <= elapsed <= 0.9:
             continue
-        match = min(range(len(off_times)), key=lambda item: abs((off_times[item] - starts["off"]) - elapsed))
-        left = np.asarray(Image.open(out / "on" / f"frame-{index:04d}.png").convert("RGBA"), dtype=float)
-        right = np.asarray(Image.open(out / "off" / f"frame-{match:04d}.png").convert("RGBA"), dtype=float)
+        match = min(range(len(off_times)), key=lambda item: abs((off_times[item] - starts["off"]) / 1000 - elapsed))
+        left = mask_frame_stamp(np.asarray(Image.open(on_paths[index]).convert("RGBA"))).astype(float)
+        right = mask_frame_stamp(np.asarray(Image.open(off_paths[match]).convert("RGBA"))).astype(float)
+        assert_rect_clear_of_stamp(rect, left.shape, "label dissolve")
         x0, y0 = max(0, math.floor(rect[0])), max(0, math.floor(rect[1]))
         x1, y1 = min(left.shape[1], math.ceil(rect[0] + rect[2])), min(left.shape[0], math.ceil(rect[1] + rect[3]))
         deltas.append(float(np.abs(left[y0:y1, x0:x1] - right[y0:y1, x0:x1]).mean()))
@@ -1210,24 +1354,35 @@ def saved_frames(out: Path, arm: str) -> tuple[np.ndarray, np.ndarray, list[tupl
     timestamps_path = arm_out / "timestamps.json"
     missing = [path.name for path in (before_path, settled_path, timestamps_path) if not path.is_file()]
     if missing:
-        raise ValueError(f"missing {', '.join(missing)}")
-    timestamps = json.loads(timestamps_path.read_text())
+        suffix = "; stamped timestamps are required and legacy runs cannot be rescored" \
+            if "timestamps.json" in missing else ""
+        raise ValueError(f"missing {', '.join(missing)}{suffix}")
     frame_paths = sorted(arm_out.glob("frame-*.png"))
-    if len(timestamps) != len(frame_paths):
-        raise ValueError(f"{len(timestamps)} timestamps for {len(frame_paths)} frames")
-    before = np.asarray(Image.open(before_path).convert("RGBA"))
-    final = np.asarray(Image.open(settled_path).convert("RGBA"))
-    frames = [(float(timestamp), np.asarray(Image.open(path).convert("RGBA")))
-              for timestamp, path in zip(timestamps, frame_paths)]
-    shapes = {before.shape, final.shape, *(frame.shape for _, frame in frames)}
+    timestamps = saved_stamp_values(timestamps_path, len(frame_paths))
+    before_raw = np.asarray(Image.open(before_path).convert("RGBA"))
+    final_raw = np.asarray(Image.open(settled_path).convert("RGBA"))
+    raw_frames = [np.asarray(Image.open(path).convert("RGBA")) for path in frame_paths]
+    shapes = {before_raw.shape, final_raw.shape, *(frame.shape for frame in raw_frames)}
     if len(shapes) != 1:
         raise ValueError(f"inconsistent frame shapes: {sorted(shapes)}")
-    if not frames:
+    if not raw_frames:
         raise ValueError("no saved frames")
-    if any(not math.isfinite(timestamp) for timestamp, _ in frames):
-        raise ValueError("non-finite frame timestamp")
-    if any(right[0] <= left[0] for left, right in zip(frames, frames[1:])):
-        raise ValueError("frame timestamps are not strictly increasing")
+    frames = []
+    for index, (timestamp, raw) in enumerate(zip(timestamps, raw_frames)):
+        try:
+            decoded = decode_frame_stamp(raw)
+        except ValueError as exc:
+            raise ValueError(f"frame stamp {index} did not decode: {exc}") from exc
+        if abs(decoded - timestamp) > 1e-9:
+            raise ValueError(f"frame stamp {index} is {decoded}, persisted timestamp is {timestamp}")
+        frames.append((decoded, mask_frame_stamp(raw)))
+    for index, (left, right) in enumerate(zip(frames, frames[1:]), 1):
+        if right[0] < left[0]:
+            raise ValueError(f"frame stamps decrease at frame {index}: {left[0]} -> {right[0]}")
+        if right[0] == left[0] and not np.array_equal(left[1], right[1]):
+            raise ValueError(f"equal frame stamps at frame {index} have different pixels")
+    before = mask_frame_stamp(before_raw)
+    final = mask_frame_stamp(final_raw)
     return before, final, frames
 
 
@@ -1384,7 +1539,7 @@ def score_saved_run(out: Path) -> dict[str, Any]:
     report["removedArms"] = retired
     evidence: dict[str, tuple[np.ndarray, np.ndarray, list[tuple[float, np.ndarray]]]] = {}
     for run in report["runs"]:
-        if run["arm"] in ("neighbour", "keyer") and run.get("status") == "INCONCLUSIVE":
+        if run["arm"] in ("neighbour", "keyer"):
             continue
         try:
             evidence[run["arm"]] = saved_frames(out, run["arm"])
@@ -1411,11 +1566,12 @@ def score_saved_run(out: Path) -> dict[str, Any]:
                 hold.update({"status": "INCONCLUSIVE",
                              "reason": f"offline evidence integrity: later-build rectangles unavailable: {exc}",
                              "pass": None})
-    report["offlineClock"] = {"source": "stock-layer-opacity-animation", "perArm": {}}
+    report["offlineClock"] = {"source": "frame-stamp-and-stock-layer-opacity-animation",
+                              "domain": "document-timeline-ms", "perArm": {}}
     for run in report["runs"]:
         if run["arm"] not in evidence or run.get("status") == "INCONCLUSIVE" or geometries is None:
             continue
-        missing = [name for name in ("advanceFrameTime", "advancePerformanceMs", "frameClock", "overlayFrames")
+        missing = [name for name in ("advancePerformanceMs", "frameTimeDomain", "overlayFrames")
                    if name not in run]
         if missing:
             run.update({"status": "INCONCLUSIVE",
@@ -1439,7 +1595,7 @@ def score_saved_run(out: Path) -> dict[str, Any]:
     if on and "on" in evidence and geometries is not None:
         reference_before, _, on_frames = evidence["on"]
         for geometry in geometries:
-            effect_begin = float(on["advanceFrameTime"]) + float(on["effectStarts"].get(str(geometry["objectID"]), 0))
+            effect_begin = float(on["effectStarts"][str(geometry["objectID"])])
             prior = [item for item in on_frames if item[0] < effect_begin]
             origins[str(geometry["objectID"])] = prior[-1][1] if prior else reference_before
     head_models: dict[str, dict[str, Any]] = {}
@@ -1452,16 +1608,16 @@ def score_saved_run(out: Path) -> dict[str, Any]:
             source_run = sources[0]
             source_before, _, source_frames = evidence[source_run["arm"]]
             object_id = str(geometry["objectID"])
-            effect_begin = (float(source_run["advanceFrameTime"])
-                            + float(source_run["effectStarts"].get(object_id, 0)))
+            effect_begin = float(source_run["effectStarts"][object_id])
             prior = [item for item in source_frames if item[0] < effect_begin]
             origin = prior[-1][1] if prior else source_before
-            texture_time = effect_begin + geometry["duration"]
+            texture_time = effect_begin + geometry["duration"] * 1000
             texture_frame = min(source_frames, key=lambda item: abs(item[0] - texture_time))
+            assert_rect_clear_of_stamp(geometry["rect"], texture_frame[1].shape, geometry["name"])
             try:
                 head_models[object_id] = arrow_head_model(geometry, origin, texture_frame[1])
                 report["arrowHeadModel"] = {"sourceArm": source_run["arm"],
-                                            "frameOffset": texture_frame[0] - texture_time,
+                                            "frameOffset": (texture_frame[0] - texture_time) / 1000,
                                             **{key: head_models[object_id][key]
                                                for key in ("d", "band", "texturePixels", "wingPixels")}}
             except Exception as exc:
@@ -1470,6 +1626,7 @@ def score_saved_run(out: Path) -> dict[str, Any]:
         if run["arm"] not in evidence or run.get("status") == "INCONCLUSIVE" or geometries is None:
             continue
         before, final, frames = evidence[run["arm"]]
+        run["settledSha256"] = __import__("hashlib").sha256(final.tobytes()).hexdigest()
         run["score"] = (destroy_score(run) if run["arm"] == "destroy"
                         else score_frames(run, geometries, before, final, frames, origins, head_models))
         if (run["score"].get("status") == "INCONCLUSIVE"
