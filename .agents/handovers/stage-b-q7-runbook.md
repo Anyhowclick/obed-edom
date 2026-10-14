@@ -2,7 +2,7 @@
 
 Owner decisions 2026-10-14: Q7 first, then the rest; managed OBS uses the Q6 qualification constructor flags
 (`mm_feed="on"`, and `mm_feed="off"` + `mm_feed_qualify_once=True`), product defaults unchanged until Q6 passes.
-Code under test: detached worktree `.claude/worktrees/stage-b-q7` at `c104d5a3`. One heavy job machine-wide.
+Code under test: detached worktree `.claude/worktrees/stage-b-q7` at `17186488` (Q7 fix round; attempt 1 ran `c104d5a3`). One heavy job machine-wide.
 
 ## 0. Prepare the edited Alpha (owner)
 The export must land in the Q7 worktree, never main `output/` (main's real-export censuses scan it).

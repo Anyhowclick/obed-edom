@@ -46,8 +46,8 @@ dashboard suites are not rerun yet (do before the PR). Raw runs: session scratch
 - `feedLive` unreadable: `counterFromGl` decodes null at both orientations on the real player (instrument coordinate bug).
 - Chrome **155.0.8059.79** still unqualified (`QUALIFIED_SNAP_MAJORS = (154,)`): headless runs used a scratch-only wrapper;
   qualifying 155 stays the owner's call.
-**Q7 setup that stays valid:** worktree `.claude/worktrees/stage-b-q7` (detached `c104d5a3`; rebuild it at the fix
-commit), edited Alpha prepared there (`bf1c093f…-p3-r1`, plan `c9e54655…`, ordinals 10→p8, 11→p9), fixtures in
+**Q7 setup that stays valid:** worktree `.claude/worktrees/stage-b-q7` (detached at the fix commit `17186488`
+since 2026-10-14 19:3x), edited Alpha prepared there (`bf1c093f…-p3-r1`, plan `c9e54655…`, ordinals 10→p8, 11→p9), fixtures in
 `~/Desktop/Convert wall to 16x9 CGs/Continuity/q7-fixtures/{D7,D7s,Alpha}`, runbook `stage-b-q7-runbook.md`. Owner
 decisions: Q7 first then Q2–Q6; managed OBS uses the Q6 qualification flags; measure holdFrame exactness before choosing a
 tolerance. Attempt-1 evidence: main `output/evidence/stage-b-2026-10-13/q7-attempt1/`. Machine: coordinate with the
