@@ -12,9 +12,13 @@ the code is the source of truth.** One sub-doc kept: [`../research/kpf_renderer_
 2. **P2 — alpha-capture / Magic-Move feasibility probe.** A gate, not an assumption: an offline
    adversarial probe with real output + an honest RED stop-line. **DONE — all findings green, merged
    #158** (`946a7648`, 2026-09-20) (`feat/keynote-alpha-p2-html-mm`). Details below.
-3. **P3 — transparent animation export** in DSK→Exporter. **NOT STARTED — restart from scratch** (owner,
-   2026-09-23: earlier P3 work was never committed or pushed; start again from scratch). Gated behind P2 + an
-   owner asset-timing contract before it is wired. Focus is still P2.
+3. **P3 — transparent animation export** in DSK→Exporter. **PARKED as a fallback** (owner, 2026-10-14).
+   Its original goal — Keynote doing the transitions with real alpha — is now met live by Alpha Keynote's
+   fill/key output (managed OBS → UltraStudio). P3's remaining value is a pre-rendered PP7 asset set for when
+   ProPresenter stays the show player or the live engine fails mid-show. Revisit after the DeckLink field test
+   (`.agents/handovers/decklink-field-test-runbook.md`). If restarted: from scratch (owner, 2026-09-23: no earlier
+   P3 work was committed), rendering offline through the patched HTML player (frame-stepped, transparent stage)
+   rather than native Keynote, and still gated on an owner asset-timing contract.
 
 ## P2 status — the probe & its findings
 Offline, no Keynote: `scripts/p2_recovery_html_adversarial.py` (`--reuse-export --disposable
@@ -107,7 +111,7 @@ The findings, grouped:
   `tests/test_html_alpha_probe.py`. **PR #158** (`feat/keynote-alpha-p2-html-mm`).
 - **Contracts / rule-IDs:** `.agents/skills/obed-edom/SKILL.md`. **Lessons:** `.agents/HALL_OF_WITNESSES.md`.
 - **Renderer probe (kept):** `.agents/research/kpf_renderer_probe_2026-09-12.md` — settled native stage
-  PNGs are the working alpha path; there is NO scriptable intermediate animation frame (P3 animated
-  transparent movies stay blocked on that renderer).
-- **Next:** P2 stays the focus (PR #158 merged); P3 restarts from scratch (gated, separate); then the MM z-order-flip validation follow-up
+  PNGs are the working alpha path; there is NO scriptable intermediate animation frame (native Keynote
+  cannot render P3's animated transparent movies; the patched HTML player is the candidate renderer).
+- **Next:** P2 stays the focus (PR #158 merged); P3 parked as a fallback (see Scope); then the MM z-order-flip validation follow-up
   (scoped to build after P2 lands).

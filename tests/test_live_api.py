@@ -756,6 +756,7 @@ def test_deck_qualification_reports_continuity_and_conversions_without_starting_
     assert response.status_code == 200
     assert response.json() == {
         'previewJobId': 'prepared', 'name': 'deck.key', 'sourceDigest': 'source', 'slides': 2, 'qualified': True,
+        'sourceState': 'missing', 'sourcePath': '/example/deck.key',
         'continuity': {'mode': 'qualified', 'reason': None, 'notCarried': [{
             'fromSlide': 1, 'toSlide': 2, 'asset': 'vid-20250608-wa0125.mp4', 'objectId': 'instance-without-runtime-entry',
             'code': 'R11', 'reason': 'R11: unmeasured export shape'}]},
@@ -769,6 +770,49 @@ def test_deck_qualification_reports_continuity_and_conversions_without_starting_
     assert not claims
     assert not adapters
     assert client.get('/api/live').json() is None
+
+
+@pytest.mark.parametrize(
+    ('case', 'expected_state'),
+    [('current', 'current'), ('changed', 'changed'), ('missing', 'missing'),
+     ('permission', 'missing'), ('symlink-loop', 'missing'), ('no-path', 'missing')],
+)
+def test_prepared_deck_source_state(tmp_path, monkeypatch, case, expected_state):
+    source = tmp_path / f'{case}.key'
+    if case in ('current', 'changed', 'permission'):
+        source.write_bytes(b'original')
+        source_digest = live.deck_digest(source)
+    else:
+        source_digest = 'source'
+    if case == 'changed':
+        source.write_bytes(b'edited source')
+    elif case == 'permission':
+        def denied(_path):
+            raise PermissionError
+
+        monkeypatch.setattr(live, 'deck_digest', denied)
+    elif case == 'symlink-loop':
+        source.symlink_to(source)
+
+    client, _, _, job, _, _ = client_for(tmp_path, monkeypatch)
+    job.result['sourceDigest'] = source_digest
+    if case == 'no-path':
+        job.result.pop('path')
+        source_path = None
+    else:
+        job.result['path'] = str(source)
+        source_path = str(source)
+
+    deck = client.get('/api/live/decks').json()[0]
+    qualification = client.get('/api/live/decks/prepared/qualification')
+    assert qualification.status_code == 200
+    report = qualification.json()
+    assert report['qualified'] is True
+    for payload in (deck, report):
+        assert payload['sourceState'] == expected_state
+        assert payload['sourcePath'] == source_path
+    if case == 'changed':
+        assert client.post('/api/live', json={'previewJobId': 'prepared'}).status_code == 200
 
 
 @pytest.mark.parametrize('continuity', ['auto', 'off'])

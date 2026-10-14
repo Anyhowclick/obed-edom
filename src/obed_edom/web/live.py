@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from obed_edom.baseline import deck_digest
 from obed_edom.html_preview import (
     PreviewError,
     file_sha256,
@@ -83,6 +84,17 @@ def _converted_movies(manifest: dict) -> list[dict]:
     for entry in (manifest.get("movieConversion") or {}).get("converted", []):
         movies.setdefault(entry["asset"], {"asset": entry["asset"], "sourceCodec": entry["sourceCodec"]})
     return list(movies.values())
+
+
+def _source_state(result: dict[str, Any]) -> Literal["current", "changed", "missing"]:
+    source_path = result.get("path")
+    if not source_path:
+        return "missing"
+    try:
+        current_digest = deck_digest(Path(source_path))
+    except (OSError, RuntimeError):
+        return "missing"
+    return "current" if current_digest == result.get("sourceDigest") else "changed"
 
 
 def live_router(runner, *, service=None, host_factory=None, displays=None, engine_factory=None) -> APIRouter:
@@ -184,11 +196,14 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
                 registered_export_root(result, job.id)
             except PreviewError:
                 continue
+            source_path = result.get("path") or None
             rows.append({
                 "previewJobId": job.id,
-                "name": Path(result.get("path", "")).stem,
+                "name": Path(source_path or "").stem,
                 "slides": len(result.get("slides", [])),
                 "sourceDigest": result.get("sourceDigest"),
+                "sourceState": _source_state(result),
+                "sourcePath": source_path,
             })
         return rows
 
@@ -196,10 +211,13 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
     def qualification(job_id: str):
         try:
             result, root, _digest, _header, slides = prepared_deck(job_id)
+            source_path = result.get("path") or None
             return {
                 "previewJobId": job_id,
-                "name": Path(result.get("path", "")).name,
+                "name": Path(source_path or "").name,
                 "sourceDigest": result["sourceDigest"],
+                "sourceState": _source_state(result),
+                "sourcePath": source_path,
                 "slides": len(slides),
                 "qualified": True,
                 "continuity": _deck_qualification(root, slides, load_settings()),

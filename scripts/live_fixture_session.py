@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import select
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from obed_edom.live_host import LiveOutputHost
 from obed_edom.live_session import PlayerCommandRejected
 
 SESSION_DIGEST = "5e" * 32
+IDLE_OBSERVE_INTERVAL_S = 5
 HELP = "a/space=advance  g N=go to slide N  s=show  h=hide  o=observe  q=stop and quit"
 
 
@@ -54,12 +57,15 @@ def main() -> None:
         print(HELP)
         while True:
             try:
-                line = input("> ").strip()
-            except EOFError:
-                break
-            if line in ("q", "quit"):
-                break
-            try:
+                print("> ", end="", flush=True)
+                while not select.select([sys.stdin], [], [], IDLE_OBSERVE_INTERVAL_S)[0]:
+                    player.observe()
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if line in ("q", "quit"):
+                    break
                 if line in ("", "a"):
                     observed = player.execute("advance")
                 elif line == "s":
