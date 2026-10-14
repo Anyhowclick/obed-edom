@@ -1,0 +1,11 @@
+## Standards
+
+No findings.
+
+## Spec
+
+- **Medium — edge case** — [tests/test_live_continuity.py:281](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/s2-followups-dsk-deck-902af1/tests/test_live_continuity.py:281), [tests/test_live_continuity.py:464](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/s2-followups-dsk-deck-902af1/tests/test_live_continuity.py:464), [tests/test_live_continuity_corpus.py:136](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/s2-followups-dsk-deck-902af1/tests/test_live_continuity_corpus.py:136): the R12 oracle is no longer a coherent visible two-bridge example. The helper moves only the movie node to `(2300,900)`, yielding a destination rect entirely beyond the 1920-wide canvas, while its destination draw object remains around `(1415,931)`. The focused test also stubs `_bridge_timing_refusal`, contrary to the requirement in [the refusal-scoping plan](/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/s2-followups-dsk-deck-902af1/.agents/plans/keynote_live_continuity_refusal_scoping.plan.md:287) to exercise R12 with coherent transition evidence and real R10 derivation. Consequently, the corpus proves R12 only for an internally contradictory, invisible structural bridge; a regression in the real visible-overlay capacity case could escape. **Exact fix:** “Rewrite `_add_wa0125_clear_of_the_carry_to_slide4` so the second destination remains at least partly on-canvas and update its movie node, first-event draw chain, and slide-3 transition endpoint coherently; remove the `_bridge_timing_refusal` monkeypatch, assert both destination rectangles intersect the canvas, and use that corrected helper for the R12 corpus entry.”
+
+No other findings. Excluding `under_artwork` from R12 is correct. Dropping `gl_replay is not None` is safe: glReplay can arm only an overlap-refused `pin`, never a bridge, and `Σmin(out,in) == 1` prevents an armed pin from coexisting with another structural carry. `_bridge_slot`’s tuple return and the README/SKILL prose match the owner decision.
+
+Summary: **Standards 0; Spec 1, worst severity medium.**
