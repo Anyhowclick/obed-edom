@@ -1086,7 +1086,12 @@ def apply_preview(
             )
             try:
                 manifest["textureRepair"] = preview_textures.repair_textures(
-                    html, manifest["slides"], player_digest=manifest["playerDigest"], log=log
+                    html,
+                    manifest["slides"],
+                    player_digest=manifest["playerDigest"],
+                    log=log,
+                    source_path=path,
+                    source_digest=digest,
                 )
                 break
             except preview_textures.TextureRepairRefused:
