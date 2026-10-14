@@ -13,6 +13,11 @@ Prepare `~/Desktop/Convert wall to 16x9 CGs/Alpha_DSK.key` (the 18:19 slide-11 e
 Coordinator then derives its plan (expect fed bridges @10/@12/@14, two `retire ends` at player 8→9, 9→None terminal)
 and builds `Continuity/q7-fixtures/Alpha/{html-player,html-unmodified}`.
 
+**Done 2026-10-14:** prepared `bf1c093f…-p3-r1` in the Q7 worktree (one re-export; Stage T repaired slide 8
+WA0125 D3). Plan sha `c9e54655…` = `ALPHA_DSK_PLAN_SHA256`: @6 overlay bridge, @8 restart, @10/@12 fed bridges, @14 two
+fed bridges, @16 two `retire ends`. Ordinals: 7 skipped; 10 → player 8, 11 → player 9 (plan §2.3 confirmed). Fixture
+`Continuity/q7-fixtures/Alpha/`.
+
 ## 1. Managed OBS, Keyer, projector (owner watches the program projector)
 Per deck (D7, D7s, Alpha), two sessions each: `feed` (continuous) and `feed-off` (exact-frame one-shot):
 ```
