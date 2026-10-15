@@ -85,6 +85,11 @@ The b3to4 verdict and the owner's jitter are two different effects. Neither one 
 - Also seen, separate: Sol's product finding on b6to7/b7to8 (artworkAbove false; transient `#body` placement on hand-back
   frame 2). No link to this stall was found.
 
+## Owner decisions (2026-10-15)
+- "1 video to 3" meant slides 7→8→9, i.e. the F1 instrument observer effect, not the slide-4 entry poster.
+- F3 `entryColdStart` is report-only, never a fail.
+- F1–F4 fold into an Alpha Keynote architecture review (`improve-codebase-architecture`), started after the OBS run
+  restructuring and the alpha-movie path land on main.
+
 ## Open / next
 - After F1 lands, re-run Alpha in managed OBS. The owner then re-checks the slides 6→9 jitter by eye.
-- Ask the owner whether "1 video to 3" meant slides 7→8→9 (matches the jitter) or the slide-4 entry poster (matches the b3to4 fail).
