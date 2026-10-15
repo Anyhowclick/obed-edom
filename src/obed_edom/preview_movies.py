@@ -135,7 +135,7 @@ def _accepted(path: Path) -> bool:
     return info.alpha if info is not None else codec_family(movie_codec(path)) == "h264"
 
 
-def _decoded_pix_fmt(exe: str, path: Path) -> tuple[str | None, bool]:
+def _stream_info(exe: str, path: Path) -> tuple[str | None, bool]:
     proc = subprocess.run(
         [exe, "-nostdin", "-hide_banner", "-i", str(path)], capture_output=True, text=True
     )
@@ -166,7 +166,7 @@ def _conversion_target(exe: str, movie: _Movie) -> tuple[str | None, str | None]
         return None, f"its size {movie.geometry.width}×{movie.geometry.height} is odd; conversion needs even sizes"
     if codec_family(movie.codec) == "hevc" and movie.geometry.depth == 32:
         return None, f"its transparency cannot be checked; {OPAQUE_FIX}"
-    pix_fmt, has_audio = _decoded_pix_fmt(exe, movie.path)
+    pix_fmt, has_audio = _stream_info(exe, movie.path)
     if pix_fmt is None:
         return None, "ffmpeg cannot read its video"
     if _ALPHA_PIX_FMT_RE.match(pix_fmt):
@@ -358,7 +358,7 @@ def convert_movies(
         if reason:
             for movie in members:
                 refused.setdefault(movie.asset, reason)
-        elif target is not None:
+        else:
             group_targets[key] = target
     if refused:
         raise PreviewError(
