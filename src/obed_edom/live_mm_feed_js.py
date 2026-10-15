@@ -26,6 +26,7 @@ MM_FEED_JS = r"""
   var records = {};
   var contexts = new WeakMap();
   var warmContext = null;
+  var tokenStates = new WeakMap();
 
   function finiteInt(value){
     return typeof value === 'number' && isFinite(value) && value === Math.floor(value);
@@ -75,7 +76,9 @@ MM_FEED_JS = r"""
       wasIdle: false,
       departed: false,
       stoodDownThisIdle: false,
-      wrapped: false
+      wrapped: false,
+      visit: 0,
+      decoder: null
     };
   }
 
@@ -130,6 +133,48 @@ MM_FEED_JS = r"""
     var seam = feedSeam();
     try { return seam && typeof seam.decoderFor === 'function' ? seam.decoderFor(objectId) : null; }
     catch (e) { return null; }
+  }
+
+  function frameToken(){
+    var seam = feedSeam();
+    try { return seam && typeof seam.frameToken === 'function' ? seam.frameToken() : null; }
+    catch (e) { return null; }
+  }
+
+  function cancelLinger(reason){
+    var seam = feedSeam();
+    try { if (seam && typeof seam.cancelLinger === 'function') seam.cancelLinger(reason); }
+    catch (e) {}
+  }
+
+  // Side-effect-free: why the context last cleared under `token` may not be redrawn now (null = admitted).
+  function lingerRefusal(token){
+    if (!CONTINUOUS) return 'not-continuous';
+    if (!token || !tokenStates.has(token)) return 'no-state';
+    var state = tokenStates.get(token);
+    if (!state) return 'ambiguous-token';
+    if (state.token !== token) return 'superseded';
+    var gl = state.gl, canvas = state.canvas;
+    if (!canvas || !canvas.isConnected) return 'detached';
+    if (gl.canvas !== canvas || contexts.get(gl) !== state) return 'context';
+    if (typeof gl.isContextLost === 'function' && gl.isContextLost()) return 'context-lost';
+    if (state.frameOpen) return 'frame-open';
+    var scene = currentScene(), continuous = 0;
+    for (var i = 0; i < state.active.length; i++){
+      var record = state.active[i];
+      if (!state.visits || record.visit !== state.visits[i]) return 'visit';
+      if (scene !== record.boundary.atScene - 1 && scene !== record.boundary.atScene) return 'scene';
+      if (record.onceRequested && !record.onceDone) return 'once-pending';
+      if (record.public.mode !== 'continuous') continue;
+      if (!record.claimed || !record.armed || record.public.state !== 'fed' || !record.textures || !record.decoder){
+        return 'not-fed';
+      }
+      var decoder = decoderFor(record.boundary.src.objectId);
+      if (decoder !== record.decoder) return 'decoder';
+      if (decoder.readyState < 2 || decoder.ended) return 'decoder-state';
+      continuous += 1;
+    }
+    return continuous ? null : 'no-continuous';
   }
 
   function percentile95(values){
@@ -196,6 +241,8 @@ MM_FEED_JS = r"""
     record.gaps = [];
     record.stoodDownThisIdle = false;
     record.wrapped = false;
+    record.visit += 1;
+    record.decoder = null;
   }
 
   function arm(record){
@@ -406,6 +453,7 @@ MM_FEED_JS = r"""
     if (!record.textures) record.textures = targets.map(function(target){ return target.texture; });
     targets.forEach(function(target){ state.textureOwners.set(target.texture, record); });
     state.fed.add(record);
+    record.decoder = decoder;
     noteFeed(record);
     if (record.public.mode === 'once'){
       record.onceDone = true;
@@ -459,7 +507,9 @@ MM_FEED_JS = r"""
       reached: new Set(),
       fed: new Set(),
       frameOpen: false,
-      internal: 0
+      internal: 0,
+      token: null,
+      visits: null
     };
     contexts.set(gl, state);
     active.forEach(function(record){ record.wrapped = true; });
@@ -513,6 +563,10 @@ MM_FEED_JS = r"""
       state.reached = new Set();
       state.fed = new Set();
       state.frameOpen = true;
+      var token = frameToken();
+      state.token = token;
+      state.visits = state.active.map(function(record){ return record.visit; });
+      if (token) tokenStates.set(token, tokenStates.has(token) && tokenStates.get(token) !== state ? null : state);
       return original.clear.apply(gl, arguments);
     };
     function draw(name, args){
@@ -565,6 +619,14 @@ MM_FEED_JS = r"""
     take: function(controller, scene){
       api.take.lastAt = now();
       api.take.lastScene = scene == null ? null : scene;
+      cancelLinger('take');
+    },
+    linger: function(token){ return lingerRefusal(token) === null; },
+    lingerWhy: function(token){ return lingerRefusal(token); },
+    lingerInfo: function(token){
+      var state = token && tokenStates.get(token);
+      return state ? {canvasId: state.canvas && state.canvas.id || null,
+        objectIds: state.active.map(function(record){ return record.boundary.src.objectId; })} : null;
     },
     entries: entries
   };
@@ -592,7 +654,7 @@ def js_sha256() -> str:
     return hashlib.sha256(MM_FEED_JS.encode()).hexdigest()
 
 
-PINNED_MM_FEED_SHA256 = "554053b70a070bef6245b79050cf0cb0308a63b69750aa34e03132ddde1bbba6"
+PINNED_MM_FEED_SHA256 = "94e6b068e0ef7c2acebdca1c942627ef5e5108c13a37dbdc5fc07c70a94de42f"
 
 
 def mm_feed_script(*, continuous: bool, once: bool) -> str:

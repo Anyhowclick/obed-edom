@@ -1112,7 +1112,8 @@ def test_feed_arm_registers_continuous_and_qualification_only_once_sessions(monk
 def test_feed_gate_requires_continuous_green_and_feed_off_exact_hold_green_with_continuous_red() -> None:
     spec_id = "b5to6:a->a:carry"
     facts = {"verdicts": [{"id": spec_id, "underArtwork": True}]}
-    common = {"noRiderAboveCanvas": {"verdict": True}, "artworkAbove": {"verdict": True}}
+    common = {"noRiderAboveCanvas": {"verdict": True}, "artworkAbove": {"verdict": True},
+              "handbackContinuity": {"verdict": True}}
     run = {"sessions": [
         {"session": "feed", "feedVerdicts": {spec_id: {"underArtwork": {
             **common, "feedLive": {"verdict": True}, "labelsOverFeed": {"verdict": True},
@@ -1225,6 +1226,7 @@ def test_run_session_installs_feed_instrument_before_managed_host_start(monkeypa
 
     monkeypatch.setattr(q, "LiveOutputHost", FeedHost)
     monkeypatch.setattr(q, "make_export", lambda tag, fixture: (tmp_path / "x" / "html", []))
+    monkeypatch.setattr(q, "require_feed_fixture", lambda root, slides: {"headerSha256": "a" * 64, "slideJson": []})
     monkeypatch.setattr(q, "start_log", lambda host: None)
     monkeypatch.setattr(q, "feed_instrument_pre_navigation_scripts",
                         lambda facts: events.append("build") or ("instrument",))

@@ -382,6 +382,27 @@ def test_mm_feed_frame_and_poster_feed_note_producers_meet_the_contract() -> Non
     assert contract.first_errors(contract.notes(notes, "notes", contract.MM_FEED_NOTE_KINDS, module=True), limit=20) == []
 
 
+def test_v2_mm_feed_report_rejects_missing_handback_endpoints() -> None:
+    report = _mm_feed_report()
+    report.update(version=2, browserFrames=[{"index": 0, "timestamp": 2.0}], handbacks=[])
+    report["contexts"][0]["closedFrameIndex"] = 0
+    report["frames"][0].update(frameIndex=0, frameTimestamp=2.0)
+    errors = contract.first_errors(contract.mm_feed_report(report), limit=20)
+    assert "mmFeed.handbacks:closed-context coverage at mmFeedEvidence" in errors
+
+    dom = {"connected": True, "inStage": True, "onBody": False, "shown": True, "opacityProduct": 1.0,
+           "canvasCount": 1, "afterCanvas": True, "sameStackingContext": True, "rectError": 0.0}
+    report["departures"][0].update(generation=1, visit=1)
+    report["handbacks"] = [{
+        "entryId": "carry-a", "serial": 1, "atScene": 2, "closedAt": 2.0, "closedFrameIndex": 0,
+        "complete": True, "timedOut": False, "closedDom": dom, "lastUpload": None,
+        "frames": [{"now": 2.0, "t": 2.0, "frameTimestamp": 2.0,
+                    "mediaTime": 1.0, "presentedFrames": 1, "dom": dom}] * 3,
+    }]
+    errors = contract.first_errors(contract.mm_feed_report(report), limit=20)
+    assert any("mmFeed.handback.frame.frameIndex:missing" in error for error in errors)
+
+
 @pytest.mark.parametrize(("mutate", "clause"), [
     (lambda r: r["contexts"][0].pop("lost"), "mmFeed.context.lost:missing"),
     (lambda r: r["contexts"][0].pop("closedAt"), "mmFeed.context.closedAt:missing"),

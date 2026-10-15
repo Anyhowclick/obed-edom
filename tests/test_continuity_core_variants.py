@@ -34,6 +34,7 @@ def test_the_variant_names_are_the_shared_contract() -> None:
         "overlay-ride",
         "settle-on-stage",
         "no-pause",
+        "interim-delay",
     )
 
 
@@ -144,6 +145,14 @@ def test_stage_b_variants_each_restore_only_the_registered_failure() -> None:
     no_pause = variants.variant_core("no-pause")
     start = no_pause.index("function posterHold(v, boundary, reason, requestOnce)")
     assert "try { v.pause(); }" not in no_pause[start : start + 400]
+
+
+def test_interim_delay_defers_only_the_interim_scan_by_one_animation_frame() -> None:
+    core = variants.variant_core("interim-delay")
+    replacement = variants._TRANSFORMS["interim-delay"][0][1]
+    assert replacement in core
+    assert variants._INTERIM_SCAN not in core
+    assert core.replace(replacement, variants._INTERIM_SCAN) == PRESERVE_CORE_JS
 
 
 @pytest.mark.parametrize(("name", "anchor"), ANCHORS)

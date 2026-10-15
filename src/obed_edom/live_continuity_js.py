@@ -832,9 +832,91 @@ PRESERVE_CORE_JS = r"""
     }
     departure.gl = {date: Date.now(), perf: performance.now()};
   }
+  const glCalls = new WeakMap();
+  const lingers = new Set();
+  let glToken = null, glTokenSeq = 0;
+  function runGlCall(token, ts) {
+    const call = glCalls.get(token);
+    const prev = glToken;
+    inGlFrame = true;
+    glToken = token;
+    call.next = false;
+    call.threw = true;
+    try {
+      const out = call.cb(ts);
+      call.threw = false;
+      return out;
+    } finally {
+      inGlFrame = false;
+      glToken = prev;
+    }
+  }
+  function lingerFeed() {
+    const m = window.__OBED_MM_FEED__;
+    return m && typeof m.linger === 'function' ? m : null;
+  }
+  function lingerAdmit(token) {
+    const call = glCalls.get(token);
+    const m = lingerFeed();
+    if (disabled || !call || call.generation !== preserveGeneration || !m) return false;
+    try { return m.linger(token) === true; } catch (e) { return false; }
+  }
+  function lingerWhy(token) {
+    const m = lingerFeed();
+    try { return m && typeof m.lingerWhy === 'function' ? m.lingerWhy(token) : null; } catch (e) { return 'why-error'; }
+  }
+  function endLinger(token, reason) {
+    if (!lingers.has(token)) return;
+    lingers.delete(token);
+    const call = glCalls.get(token);
+    if (call.raf != null) {
+      try { cancelAnimationFrame(call.raf); } catch (e) {}
+      call.raf = null;
+    }
+    note('feed-linger-end', {token: call.id, reason: reason, why: reason === 'admission' ? lingerWhy(token) : null,
+      ticks: call.ticks});
+  }
+  function cancelLingers(reason) {
+    Array.from(lingers).forEach(function(token) { endLinger(token, reason); });
+  }
+  function startLinger(token) {
+    const call = glCalls.get(token);
+    if (call.threw || lingers.has(token)) return;
+    if (!lingerAdmit(token)) {
+      const why = lingerWhy(token);
+      if (why && why !== 'no-state') note('feed-linger-refused', {token: call.id, why: why});
+      return;
+    }
+    call.ticks = 0;
+    lingers.add(token);
+    let info = null;
+    try { info = lingerFeed().lingerInfo(token); } catch (e) {}
+    note('feed-linger-start', {token: call.id, info: info});
+    function tick(ts) {
+      call.raf = null;
+      if (!lingers.has(token)) return;
+      if (!lingerAdmit(token)) {
+        endLinger(token, 'admission');
+        return;
+      }
+      call.ticks += 1;
+      try {
+        runGlCall(token, ts);
+      } catch (e) {
+        endLinger(token, 'error');
+        return;
+      }
+      if (call.next) {
+        endLinger(token, 'rescheduled');
+        return;
+      }
+      call.raf = requestAnimationFrame(tick);
+    }
+    call.raf = requestAnimationFrame(tick);
+  }
   try {
     const prior = Object.getOwnPropertyDescriptor(window, 'requestAnimFrame');
-    if (ENTRIES.some(function(b) { return b.action === 'bridge'; })
+    if (ENTRIES.some(function(b) { return b.action === 'bridge' || !!b.feed; })
         && (!prior || (prior.configurable && 'value' in prior))) {
       let raw = prior ? prior.value : undefined;
       Object.defineProperty(window, 'requestAnimFrame', {
@@ -845,9 +927,19 @@ PRESERVE_CORE_JS = r"""
           return function(cb) {
             if (typeof cb !== 'function') return f.call(window, cb);
             try { stampGlStart(); } catch (e) {}
+            if (glToken) glCalls.get(glToken).next = true;
+            const token = Object.freeze({});
+            glCalls.set(token, {id: ++glTokenSeq, cb: cb, generation: preserveGeneration, next: false, threw: false,
+              ticks: 0, raf: null});
             return f.call(window, function(ts) {
-              inGlFrame = true;
-              try { return cb(ts); } finally { inGlFrame = false; }
+              try {
+                return runGlCall(token, ts);
+              } finally {
+                const call = glCalls.get(token);
+                if (!call.next && !call.threw) {
+                  try { startLinger(token); } catch (e) {}
+                }
+              }
             });
           };
         },
@@ -1649,6 +1741,17 @@ PRESERVE_CORE_JS = r"""
   function tryRemount(v, epoch) {
     if (disabled) return;
     if (!v || suppressRemount) return;
+    if (v.__obedInterim) {
+      const interim = v.__obedInterim;
+      if (v.parentNode === interim.root && interim.root.isConnected) {
+        if (!v.__obedInterimHoldNoted) {
+          v.__obedInterimHoldNoted = true;
+          note('interim-hold', {elId: v.__obedElId});
+        }
+        return;
+      }
+      delete v.__obedInterim;
+    }
     const remountSrc = v.currentSrc || v.src || '';
     const mode = zoneMode(v);
     if (mode === 'armed') {
@@ -1946,6 +2049,109 @@ PRESERVE_CORE_JS = r"""
     mo.observe(document.documentElement, {childList: true, subtree: true});
   }
 
+  function interimCandidates(scene) {
+    if (scene == null) return [];
+    return carryCandidates().filter(function(v) {
+      const n = nextEntry(instanceOf(v));
+      return !!n && n.underArtwork === true && n.atScene === scene && (n.action === 'pin' || n.action === 'bridge')
+        && !!dstRect(n) && isLive(v) && !v.ended && !refusedHere(n) && !v.__obedInterim && !v.__obedFacadeFor;
+    });
+  }
+  function interimAnchor(root, box, map) {
+    const posTol = 10 * map.s, sizeTol = 16 * map.s;
+    const canvases = [], anchors = [];
+    root.querySelectorAll('canvas').forEach(function(c) {
+      if (/^\d+-canvas$/.test(String(c.id || ''))) return;
+      const r = c.getBoundingClientRect();
+      if (!(r.width > 1 && r.height > 1)) return;
+      if (Math.abs(r.left - box.x) <= posTol && Math.abs(r.top - box.y) <= posTol
+          && Math.abs(r.width - box.w) <= sizeTol && Math.abs(r.height - box.h) <= sizeTol) canvases.push(c);
+    });
+    canvases.forEach(function(c) {
+      let a = c;
+      while (a && a.parentElement !== root) a = a.parentElement;
+      if (a && anchors.indexOf(a) < 0) anchors.push(a);
+    });
+    return {anchor: anchors.length === 1 ? anchors[0] : null, canvases: canvases.length, anchors: anchors.length};
+  }
+  function interimPlace(v, entry, root) {
+    const map = stageMap();
+    if (!map) {
+      noteStageMapUnavailable('interim');
+      return false;
+    }
+    const box = toScreen(entry.dst.rect, map);
+    const found = interimAnchor(root, box, map);
+    if (!found.anchor) {
+      note('interim-refused', {elId: v.__obedElId, objectId: entry.src.objectId, canvases: found.canvases,
+        anchors: found.anchors});
+      return false;
+    }
+    if (v.__obedMotionPinning) v.__obedMotionPinning = false;
+    if (v.__obedPinning) {
+      v.__obedPinning = false;
+      v.__obedPinToken = (v.__obedPinToken || 0) + 1;
+    }
+    beginMove(v);
+    root.insertBefore(v, found.anchor.nextSibling);
+    v.style.position = 'absolute';
+    v.style.width = (box.w / map.s) + 'px';
+    v.style.height = (box.h / map.s) + 'px';
+    v.style.left = '0px';
+    v.style.top = '0px';
+    const cur = v.getBoundingClientRect();
+    v.style.left = ((box.x - cur.left) / map.s) + 'px';
+    v.style.top = ((box.y - cur.top) / map.s) + 'px';
+    v.style.visibility = 'visible';
+    v.style.display = 'block';
+    v.style.opacity = '1';
+    v.style.pointerEvents = 'none';
+    v.style.removeProperty('z-index');
+    v.dataset.obedRemounted = '1';
+    v.__obedInterim = {entry: entry, root: root, anchor: found.anchor};
+    note('interim-placed', {elId: v.__obedElId, objectId: entry.src.objectId, atScene: entry.atScene,
+      anchor: found.anchor.id || null, root: root.id || null, canvases: found.canvases, paused: v.paused,
+      t: v.currentTime});
+    return true;
+  }
+  function interimScan(roots, observedAt) {
+    const scene = currentHashNum();
+    const take = window.__OBED_MM_FEED__ && window.__OBED_MM_FEED__.take;
+    const takeScene = take && typeof take.lastScene === 'number' ? take.lastScene : null;
+    let keyed = scene, cands = interimCandidates(scene);
+    if (!cands.length && takeScene != null && takeScene !== scene && performance.now() - take.lastAt < 50) {
+      keyed = takeScene;
+      cands = interimCandidates(takeScene);
+    }
+    note('interim-scan', {scene: scene, takeScene: takeScene, takeAgoMs: take && take.lastAt != null
+      ? performance.now() - take.lastAt : null, keyed: keyed, observedAt: observedAt,
+      roots: roots.map(function(r) { return r.id || null; }), candidates: cands.map(function(v) { return v.__obedElId; }),
+      glCanvases: Array.prototype.filter.call(document.querySelectorAll('canvas'), function(c) {
+        return /^\d+-canvas$/.test(String(c.id || ''));
+      }).length});
+    if (!cands.length) return;
+    if (roots.length !== 1) {
+      note('interim-refused', {reason: 'roots', roots: roots.length});
+      return;
+    }
+    cands.forEach(function(v) { interimPlace(v, nextEntry(instanceOf(v)), roots[0]); });
+  }
+  new MutationObserver(function(muts) {
+    if (disabled) return;
+    const stage = document.getElementById('stage');
+    if (!stage) return;
+    const roots = [];
+    muts.forEach(function(m) {
+      m.addedNodes.forEach(function(n) {
+        if (n.nodeType === 1 && n.parentNode === stage && /^layer/.test(String(n.id || '')) && roots.indexOf(n) < 0) {
+          roots.push(n);
+        }
+      });
+    });
+    if (!roots.length) return;
+    interimScan(roots, performance.now());
+  }).observe(document.documentElement, {childList: true, subtree: true});
+
   // Keep page chrome transparent even if the player assigns an opaque body colour.
   function forceTransparentChrome() {
     try {
@@ -2188,6 +2394,11 @@ PRESERVE_CORE_JS = r"""
       note('poster-resume', {elId: preserved.__obedElId, t: preserved.currentTime});
     }
     if (entry.underArtwork) delete preserved.__obedPosterBoundary;
+    if (preserved.__obedInterim) {
+      note('interim-release', {elId: preserved.__obedElId, objectId: entry.src.objectId});
+      delete preserved.__obedInterim;
+      delete preserved.__obedInterimHoldNoted;
+    }
     if (bridge && !entry.underArtwork) {
       bridgeTo34(preserved, entry);
       el.__obedSuppressed34 = true;
@@ -2318,6 +2529,8 @@ PRESERVE_CORE_JS = r"""
         posterHold(claimed.decoder, claimed.boundary, reason || 'stand-down', false);
         return true;
       },
+      frameToken: function() { return glToken; },
+      cancelLinger: function(reason) { cancelLingers(String(reason || 'feed')); },
       note: function(kind, detail) { note(kind, detail); }
     };
   }

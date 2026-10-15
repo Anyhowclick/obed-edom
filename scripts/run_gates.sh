@@ -102,6 +102,8 @@ MM_FEED_ARMS=(
   "D7 feed-on-1600 --mm-feed on --viewport 1600x1000 --skip-arms B,C,V,Voff,attach"
   "D7 feed-on-1920 --mm-feed on --viewport 1920x1080 --skip-arms B,C,V,Voff,attach"
   "D7 from-only --mm-feed on --feed-variant from-only --skip-arms B,C,V,Voff,attach"
+  "D7 no-linger --mm-feed on --feed-tamper no-linger --skip-arms B,C,V,Voff,attach"
+  "D7 interim-delay --mm-feed on --core-variant interim-delay"
   "D7 attach-once --mm-feed off --feed-dwell 5 --skip-arms A,B,C,V,Voff"
   "D7s feed-on-2560 --mm-feed on --viewport 2560x1440 --skip-arms B,C,V,Voff,attach"
   "D7s feed-on-1600 --mm-feed on --viewport 1600x1000 --skip-arms B,C,V,Voff,attach"
@@ -336,12 +338,14 @@ if (( ${#MM_FEED_ARMS} )); then
   [[ -d $QUAL_B_SOURCE/D7-html && -d $QUAL_B_SOURCE/D7s-html ]] || {
     echo "D7/D7s qualification exports are missing under QUAL_B_SOURCE=$QUAL_B_SOURCE; no run launched" >&2; exit 2; }
   $PY - "$QUAL_B_SOURCE" "$O" "$G/scripts/live_continuity_probe.py" <<'PYEOF' || { echo "D7/D7s qualification export staging FAILED; no run launched"; exit 2; }
-import ast,json,shutil,sys
+import ast,hashlib,json,shutil,sys
 from pathlib import Path
+from obed_edom import preview_textures
 from obed_edom.live_continuity import Unsupported,derive_plan,plan_signature
 source,out,probe_source=map(Path,sys.argv[1:])
 names={"D7_PLAN_SHA256","D7S_PLAN_SHA256"}
 pins={}
+identities={}
 for node in ast.parse(probe_source.read_text()).body:
     if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id in names:
         pins[node.targets[0].id]=ast.literal_eval(node.value)
@@ -351,6 +355,14 @@ for deck,pin_name in (("D7","D7_PLAN_SHA256"),("D7s","D7S_PLAN_SHA256")):
     header=json.loads((dest/"assets/header.json").read_text())
     slides=[{"originalOrdinal":i+1,"playerIndex":i,"exportedUuid":uuid,"skipped":False}
             for i,uuid in enumerate(header["slideList"])]
+    hits=preview_textures.json_hits(dest,slides)
+    if hits:
+        raise SystemExit(f"{deck} feed fixture refused: {'; '.join(hits)}")
+    identities[deck]={"exportRoot":str(dest.resolve()),
+        "headerSha256":hashlib.sha256((dest/"assets/header.json").read_bytes()).hexdigest(),
+        "slideJson":[{"originalOrdinal":slide["originalOrdinal"],"exportedUuid":slide["exportedUuid"],
+          "sha256":hashlib.sha256((dest/"assets"/slide["exportedUuid"]/(slide["exportedUuid"]+".json")).read_bytes()).hexdigest()}
+         for slide in slides]}
     plan=derive_plan(dest,slides,resolver=lambda base,relative:base/relative)
     if isinstance(plan,Unsupported):
         raise SystemExit(f"{deck} runtime plan is unavailable ({plan.reason}); no run launched")
@@ -361,6 +373,22 @@ for deck,pin_name in (("D7","D7_PLAN_SHA256"),("D7s","D7S_PLAN_SHA256")):
     if actual!=wanted:
         raise SystemExit(f"{deck} runtime plan sha256 {actual} does not match pinned {wanted}; no run launched")
     print("Qualification B fixture",dest,"plan sha256",actual)
+control=source/"q7-fixtures/D7-unrepaired"
+control_root=control/"html-player"
+if not control_root.is_dir():
+    raise SystemExit(f"D7 unrepaired refusal control is missing at {control_root}")
+control_header=json.loads((control_root/"assets/header.json").read_text())
+control_slides=[{"originalOrdinal":i+1,"playerIndex":i,"exportedUuid":uuid,"skipped":False}
+                for i,uuid in enumerate(control_header["slideList"])]
+control_hits=preview_textures.json_hits(control_root,control_slides)
+if not control_hits:
+    raise SystemExit("D7 unrepaired refusal control unexpectedly passes preview_textures.json_hits")
+identities["D7-unrepaired-refusal"]={"exportRoot":str(control_root.resolve()),"hits":control_hits,
+    "headerSha256":hashlib.sha256((control_root/"assets/header.json").read_bytes()).hexdigest(),
+    "slideJson":[{"originalOrdinal":slide["originalOrdinal"],"exportedUuid":slide["exportedUuid"],
+      "sha256":hashlib.sha256((control_root/"assets"/slide["exportedUuid"]/(slide["exportedUuid"]+".json")).read_bytes()).hexdigest()}
+     for slide in control_slides]}
+(out/"feed-fixture-identities.json").write_text(json.dumps(identities,indent=2)+"\n")
 PYEOF
   $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
 import json,shutil,sys

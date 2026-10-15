@@ -338,6 +338,15 @@ def gates(tmp_path: Path):
         export = qual_b_source / f"{deck}-html"
         shutil.copytree(REPO / "tests" / "fixtures" / "live_continuity" / "qual_decks" / deck, export)
         (export / "index.html").write_text(f"{deck}-html")
+    unrepaired = qual_b_source / "q7-fixtures" / "D7-unrepaired" / "html-player"
+    shutil.copytree(qual_b_source / "D7-html", unrepaired)
+    slide_uuid = "EC1B1743-BCCE-459F-9080-E0385E656256"
+    slide_path = qual_b_source / "D7-html" / "assets" / slide_uuid / f"{slide_uuid}.json"
+    payload = json.loads(slide_path.read_text())
+    payload["events"][0]["baseLayer"]["layers"][4]["layers"][0]["layers"][0]["texture"] = (
+        "3C2EF32B4C92363A28DBD2EF9AD3EA3B"
+    )
+    slide_path.write_text(json.dumps(payload, separators=(",", ":")))
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir()
     (stub_bin / "sysctl").write_text(SYSCTL_STUB)
@@ -447,6 +456,10 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
         fixture, index, _ = args[f"mm-feed-{deck}-feed-on-2560"]
         assert Path(fixture) == expected and index == f"{expected}/index.html"
         assert (expected / "index.html").read_text() == f"{deck}-html"
+    identities = json.loads((gates["out"] / "feed-fixture-identities.json").read_text())
+    assert set(identities) == {"D7", "D7s", "D7-unrepaired-refusal"}
+    assert all(len(row["headerSha256"]) == 64 and row["slideJson"] for row in identities.values())
+    assert identities["D7-unrepaired-refusal"]["hits"][0].startswith("slide 3 0/baseLayer/layers/4/layers/0/layers/0:")
 
     slide_path = (
         gates["qual_b_source"]
@@ -539,7 +552,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 25 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 27 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -1050,12 +1063,18 @@ def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_o
     assert [s for s in starts if s.startswith("carry-cover")] == CC_STEMS
     feed_starts = [s for s in starts if s.startswith("mm-feed-")]
     first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
-    assert len(feed_starts) == 25
+    assert len(feed_starts) == 27
+    assert "mm-feed-D7-no-linger" in feed_starts
+    assert "mm-feed-D7-interim-delay" in feed_starts
     assert starts.index(CC_STEMS[0]) == starts.index(PC_STEMS[-1]) + 1
     assert starts.index(CC_STEMS[-1]) + 1 == starts.index(feed_starts[0])
     assert starts.index(feed_starts[-1]) + 1 == first_p2
     out = str(gates["out"].resolve())
     args = _probe_args(events)
+    assert "--feed-tamper" in args["mm-feed-D7-no-linger"][2]
+    assert args["mm-feed-D7-no-linger"][2][args["mm-feed-D7-no-linger"][2].index("--feed-tamper") + 1] == "no-linger"
+    assert "--core-variant" in args["mm-feed-D7-interim-delay"][2]
+    assert args["mm-feed-D7-interim-delay"][2][args["mm-feed-D7-interim-delay"][2].index("--core-variant") + 1] == "interim-delay"
     assert _cc_argvs(events) == [
         ["--fixture", args[f"passG-{deck}"][0], "--original-index", args[f"passG-{deck}"][1],
          "--viewport", "1920x1080", "--carry-cover", "--artifact", f"{out}/{stem}.json", *extra]

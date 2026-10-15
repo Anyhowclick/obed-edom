@@ -22,7 +22,7 @@ import mm_feed_variants  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 
 NODE = shutil.which("node")
-PINNED_MM_FEED_SHA256 = "554053b70a070bef6245b79050cf0cb0308a63b69750aa34e03132ddde1bbba6"
+PINNED_MM_FEED_SHA256 = "94e6b068e0ef7c2acebdca1c942627ef5e5108c13a37dbdc5fc07c70a94de42f"
 
 
 def _entry(
@@ -121,6 +121,7 @@ function makeGl(name){
     storeUniform(loc,v){ const vals=this.uniformValues.get(loc.program)||{}; vals[loc.uniform]=v; this.uniformValues.set(loc.program,vals); },
     uniform1f(loc,v){ this.storeUniform(loc,v); }, uniform1fv(loc,v){ this.storeUniform(loc,v[0]); }, uniformMatrix4fv(){},
     getUniform(program,loc){ const v=(this.uniformValues.get(program)||{})[loc.uniform]; return v===undefined?0:v; },
+    isContextLost(){ return !!this.lost; },
     clear(){ this.calls.push(['clear']); },
     drawArrays(){ this.calls.push(['drawArrays']); },
     drawElements(){ this.calls.push(['drawElements']); },
@@ -160,8 +161,9 @@ global.document = {
 };
 
 const decoders = {A:new Video('A'), B:new Video('B')};
-const calls = {decoder:[],claim:[],stand:[]};
+const calls = {decoder:[],claim:[],stand:[],cancel:[]};
 let claimResult = true;
+let activeToken = null;
 // The real `__obedLive` install (live_runtime._INSTALL) over a controller in the shape measured on D7 in OBS
 // (Q7 attempt 1): idle at the source, the hash already reads the transition scene while the player sits at the
 // FINAL state of the scene before it, so `sceneId` is one behind and `nextSceneId` names the transition.
@@ -180,8 +182,11 @@ eval(liveInstall);
 global.__OBED_P2_PRESERVE__ = {feed:{
   version:1,
   decoderFor(id){ calls.decoder.push(id); return decoders[id]||null; },
-  claim(id){ calls.claim.push({id,scene:location.hash,snapshot:global.__obedLive.snapshot()}); return claimResult; },
+  claim(id){ calls.claim.push({id,scene:location.hash,snapshot:global.__obedLive.snapshot()});
+    return typeof claimResult==='function'?claimResult(id):claimResult; },
   onStandDown(id,reason){ calls.stand.push({id,reason,late:false}); return true; },
+  frameToken(){ return activeToken; },
+  cancelLinger(reason){ calls.cancel.push(reason); },
   note(){}
 }};
 global.__OBED_CONTINUITY__ = PLAN;
@@ -216,6 +221,7 @@ def _run_node(
     script: str | None = None,
     before_module: str = "",
     constants: dict[str, str] | None = None,
+    evaluate_module: bool = True,
 ) -> None:
     if NODE is None:
         pytest.skip("node is not installed")
@@ -237,7 +243,7 @@ def _run_node(
         + _HARNESS
         + "\n"
         + before_module
-        + "\neval(MODULE);\nassert(global.__OBED_MM_FEED__);\n"
+        + ("\neval(MODULE);\nassert(global.__OBED_MM_FEED__);\n" if evaluate_module else "\n")
         + scenario
     )
     completed = subprocess.run([NODE, "-e", code], capture_output=True, text=True, timeout=15)
@@ -310,7 +316,7 @@ assert.deepStrictEqual(gl.videoUploads.slice(0,3).map(x=>x.texture.name),['a0','
 assert.deepStrictEqual(gl.videoUploads.slice(0,3).map(x=>[x.flip,x.premultiply]),[[true,false],[false,true],[true,true]]);
 const api=global.__OBED_MM_FEED__;
 assert.strictEqual(Object.isFrozen(api),false);
-assert.deepStrictEqual(Object.keys(api).sort(),['entries','once','take','version']);
+assert.deepStrictEqual(Object.keys(api).sort(),['entries','linger','lingerInfo','lingerWhy','once','take','version']);
 const fields=['framesFed','hold','maxInterFeedGapMs','mode','p95Ms','reason','state'];
 assert.deepStrictEqual(Object.keys(api.entries.A).sort(),fields.slice().sort());
 assert.deepStrictEqual(Object.keys(api.entries),['A','B']);
@@ -322,6 +328,7 @@ assert.strictEqual(api.once('A'),false);
 api.take({},2);
 assert.strictEqual(api.take.lastScene,2);
 assert.strictEqual(typeof api.take.lastAt,'number');
+assert.deepStrictEqual(calls.cancel,['take']);
 api.extra='writable';
 assert.strictEqual(api.extra,'writable');
 assert(calls.decoder.filter(x=>x==='A').length>=3);
@@ -677,6 +684,89 @@ assert.deepStrictEqual(calls.claim,[]);
     )
 
 
+@pytest.mark.parametrize(
+    ("stop", "why", "initial_uploads", "final_uploads", "final_draws"),
+    [
+        pytest.param("admitted", None, 2, 3, 4, id="admitted"),
+        pytest.param("detach", "detached", 2, 2, 2, id="detach"),
+        pytest.param("take", None, 2, 2, 2, id="take"),
+        pytest.param("duplicate-decoder", "decoder", 2, 2, 2, id="duplicate-decoder"),
+        pytest.param("absent-decoder", "decoder", 2, 2, 2, id="absent-decoder"),
+        pytest.param("context-loss", "context-lost", 2, 2, 2, id="context-loss"),
+        pytest.param("pending-once", "once-pending", 1, 1, 2, id="pending-once"),
+        pytest.param("absent-module", None, 0, 0, 2, id="absent-module"),
+    ],
+)
+def test_linger_admission_and_stop_causes_are_side_effect_free(
+    stop: str,
+    why: str | None,
+    initial_uploads: int,
+    final_uploads: int,
+    final_draws: int,
+) -> None:
+    plan = _plan(
+        _entry("A", draw=1, draw_count=2, upload=1),
+        _entry("B", draw=2, draw_count=2, upload=2),
+    )
+    if stop == "absent-module":
+        _run_node(
+            plan,
+            r"""
+const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl); canvas.getContext('webgl');
+const a0=texture('a0'),b0=texture('b0');
+upload(gl,a0,[320,180],0,true,false); upload(gl,b0,[320,180],0,true,false);
+const token=Object.freeze({}); activeToken=token; gl.clear(); activeToken=null;
+bind(gl,a0,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+bind(gl,b0,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawElements(4,6,gl.UNSIGNED_BYTE,0);
+assert.strictEqual(global.__OBED_MM_FEED__,undefined);
+assert.strictEqual(gl.videoUploads.length,0);
+assert.strictEqual(gl.calls.filter(x=>x[0]==='drawArrays'||x[0]==='drawElements').length,2);
+assert.deepStrictEqual(calls.stand,[]);
+""",
+            evaluate_module=False,
+        )
+        return
+
+    before_module = "claimResult=(id)=>id==='A';"
+    if stop == "pending-once":
+        before_module += " decoders.B.readyState=1;"
+    _run_node(
+        plan,
+        f"""
+const api=global.__OBED_MM_FEED__;
+assert.strictEqual(api.once('B'),true);
+const gl=makeGl('player'),canvas=new Canvas('0-canvas',gl); canvas.getContext('webgl');
+const a0=texture('a0'),b0=texture('b0');
+upload(gl,a0,[320,180],0,true,false); upload(gl,b0,[320,180],0,true,false);
+function playerFrame(token){{
+  activeToken=token; gl.clear(); activeToken=null;
+  bind(gl,a0,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+  bind(gl,b0,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawElements(4,6,gl.UNSIGNED_BYTE,0);
+}}
+const token=Object.freeze({{}});
+playerFrame(token);
+assert.strictEqual(gl.videoUploads.length,{initial_uploads});
+assert.deepStrictEqual(api.lingerInfo(token),{{canvasId:'0-canvas',objectIds:['A','B']}});
+if ({json.dumps(stop)}==='detach') canvas.isConnected=false;
+if ({json.dumps(stop)}==='take') api.take({{}},2);
+if ({json.dumps(stop)}==='duplicate-decoder') decoders.A=new Video('duplicate-A');
+if ({json.dumps(stop)}==='absent-decoder') decoders.A=null;
+if ({json.dumps(stop)}==='context-loss') gl.lost=true;
+assert.strictEqual(api.lingerWhy(token),{json.dumps(why)});
+assert.strictEqual(api.lingerWhy(token),{json.dumps(why)});
+const admitted=!calls.cancel.length && api.linger(token);
+assert.strictEqual(admitted,{json.dumps(stop == "admitted")});
+if (admitted) playerFrame(token);
+assert.strictEqual(gl.videoUploads.length,{final_uploads});
+assert.strictEqual(gl.calls.filter(x=>x[0]==='drawArrays'||x[0]==='drawElements').length,{final_draws});
+assert.strictEqual(api.entries.B.framesFed,{0 if stop == "pending-once" else 1});
+assert.deepStrictEqual(calls.stand,[]);
+assert.deepStrictEqual(calls.cancel,{json.dumps(["take"] if stop == "take" else [])});
+""",
+        before_module=before_module,
+    )
+
+
 def test_from_only_variant_skips_to_upload_and_refuses_bad_requests() -> None:
     original = live_mm_feed_js.mm_feed_script(continuous=True, once=True)
     changed = mm_feed_variants.variant_script("from-only", original)
@@ -696,7 +786,28 @@ assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,'fed');
 """,
         script=changed,
     )
+    no_linger = mm_feed_variants.variant_script("no-linger", original)
+    assert no_linger != original
+    assert "linger: function(token){ return false; }" in no_linger
+    assert "linger: function(token){ return lingerRefusal(token) === null; }" not in no_linger
+    _run_node(
+        _plan(_entry("A")),
+        r"""
+const api=global.__OBED_MM_FEED__,gl=makeGl('player'),canvas=new Canvas('0-canvas',gl);
+canvas.getContext('webgl');
+const a0=texture('a0'); upload(gl,a0,[320,180],0,true,false);
+const token=Object.freeze({}); activeToken=token; gl.clear(); activeToken=null;
+bind(gl,a0,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
+assert.strictEqual(api.entries.A.state,'fed');
+assert.strictEqual(api.lingerWhy(token),null);
+assert.strictEqual(api.linger(token),false);
+assert.deepStrictEqual(calls.stand,[]);
+""",
+        script=no_linger,
+    )
     with pytest.raises(ValueError, match="unknown feed variant"):
         mm_feed_variants.variant_script("to-only", original)
     with pytest.raises(ValueError, match="anchor occurs 0 times"):
         mm_feed_variants.variant_script("from-only", "<script></script>")
+    with pytest.raises(ValueError, match="anchor occurs 0 times"):
+        mm_feed_variants.variant_script("no-linger", "<script></script>")

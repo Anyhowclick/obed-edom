@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "00b9a823bd84d8b5d0073b80111e4fc33444bb3db65daa3f94bc2ee34a66a32e"
+PINNED_CORE_SHA256 = "d45156048ab3dfc4ac9ca30d9d0049b5a7cc70f7c70686ce5a3f1963d34ad77e"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -142,6 +142,16 @@ _BRIDGE_ONLY_PLAN = {
                     "src": {"objectId": "A3", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}},
                     "dst": {"objectId": "A4", "rect": {"x": 5, "y": 6, "w": 7, "h": 8}}}],
 }
+_FEED_ONLY_PLAN = {
+    "schema": 2,
+    "movies": {"movie1": {"assetKeys": ["untitled.mov"], "footprint": {"x": 1, "y": 2, "w": 3, "h": 4}}},
+    "boundaries": [{
+        "atScene": 8, "action": "pin", "movieKey": "movie1", "loop": False, "underArtwork": True,
+        "feed": {"draw": 1, "drawCount": 1, "from": {"upload": 1, "size": [1, 1]}, "to": None},
+        "src": {"objectId": "A3", "rect": {"x": 1, "y": 2, "w": 3, "h": 4}},
+        "dst": {"objectId": "A4", "rect": {"x": 5, "y": 6, "w": 7, "h": 8}},
+    }],
+}
 # main.js's `requestAnimFrame` already on `window` when the core runs: a plain (configurable) data property, or a
 # non-configurable one the core must leave alone. Either way the page's own call must reach the raw function.
 _RAW_ANIM_FRAME = """
@@ -209,6 +219,86 @@ function animFrame() {
 )
 def test_install_outcome(plan, kwargs, expected):
     assert _run_core_in_node(plan=plan, **kwargs) == expected
+
+
+@pytest.mark.parametrize(
+    ("stop", "expected_runs", "expected_reason"),
+    [
+        pytest.param("refusal", 3, "admission", id="refusal"),
+        pytest.param("cancel", 3, "take", id="cancel-linger"),
+        pytest.param("reschedule", 3, "rescheduled", id="callback-re-request"),
+        pytest.param("generation", 2, "admission", id="generation-bump"),
+        pytest.param("throw", 3, "error", id="callback-throw"),
+    ],
+)
+def test_feed_only_plan_extends_the_same_callback_until_each_stop(stop, expected_runs, expected_reason):
+    plan_js = json.dumps(_FEED_ONLY_PLAN)
+    harness = f"""
+const window = {{__OBED_CONTINUITY__: {plan_js}, addEventListener(){{}}, removeEventListener(){{}}}};
+function empty() {{ return {{style: {{setProperty(){{}}}}, dataset: {{}}, addEventListener(){{}},
+  removeEventListener(){{}}, querySelectorAll(){{return []}}, getAttribute(){{return null}}}}; }}
+const document = {{documentElement: empty(), body: empty(), getElementById(){{return null}},
+  querySelectorAll(){{return []}}, addEventListener(){{}}, createElement: empty}};
+function HTMLMediaElement() {{}} function HTMLVideoElement() {{}}
+HTMLMediaElement.prototype = {{}}; HTMLVideoElement.prototype = Object.create(HTMLMediaElement.prototype);
+const Element = {{prototype: {{removeAttribute(){{}}}}}};
+const Document = {{prototype: {{createElement: empty}}}};
+const location = {{hash: '#7'}}; const performance = {{now(){{return 0}}}};
+function MutationObserver() {{ this.observe = function(){{}}; }}
+const native = [], raw = [];
+function requestAnimationFrame(cb) {{ native.push(cb); return native.length; }}
+function cancelAnimationFrame() {{}}
+window.requestAnimFrame = function(cb) {{ raw.push(cb); return raw.length; }};
+function setInterval() {{}} function setTimeout() {{}}
+{live_continuity_js.PRESERVE_CORE_JS}
+const P = window.__OBED_P2_PRESERVE__;
+const feed = P.feed;
+native.splice(0).forEach((cb) => cb(0));
+const tokens = [], callbackTokens = [];
+let checks = 0, allow = true, runs = 0;
+window.__OBED_MM_FEED__ = {{
+  linger(token) {{ tokens.push(token); checks += 1; return allow && ('{stop}' !== 'refusal' || checks <= 2); }},
+  lingerWhy() {{ return 'stopped'; }}, lingerInfo() {{ return {{ok: true}}; }},
+}};
+function callback() {{
+  runs += 1;
+  callbackTokens.push(feed ? feed.frameToken() : null);
+  if (runs === 1) window.requestAnimFrame(callback);
+  if ('{stop}' === 'reschedule' && runs === 3) window.requestAnimFrame(function nested() {{}});
+  if ('{stop}' === 'throw' && runs === 3) throw new Error('boom');
+}}
+window.requestAnimFrame(callback);
+raw.splice(0).forEach((cb) => cb(1));
+raw.splice(0).forEach((cb) => cb(1.5));
+if ('{stop}' === 'generation') P.clear();
+native.splice(0).forEach((cb) => cb(2));
+if ('{stop}' === 'cancel' && feed) feed.cancelLinger('take');
+if ('{stop}' === 'refusal') native.splice(0).forEach((cb) => cb(3));
+allow = false;
+native.splice(0).forEach((cb) => cb(4));
+const starts = P.events.filter((e) => e.kind === 'feed-linger-start');
+const ends = P.events.filter((e) => e.kind === 'feed-linger-end');
+console.log(JSON.stringify({{
+  runs, hooked: window.requestAnimFrame !== undefined, hadFeed: !!feed, starts: starts.length,
+  endReason: ends.length ? ends[ends.length - 1].detail.reason : null,
+  tokenFrozen: tokens.concat(callbackTokens).filter(Boolean).every(Object.isFrozen),
+  distinctNormalTokens: callbackTokens[0] !== callbackTokens[1],
+  extensionSameToken: callbackTokens.length > 2 && callbackTokens[2] === callbackTokens[1],
+  outsideToken: feed ? feed.frameToken() : null,
+}}));
+"""
+    result = json.loads(_node_stdout(harness).strip().splitlines()[-1])
+    assert result == {
+        "runs": expected_runs,
+        "hooked": True,
+        "hadFeed": True,
+        "starts": 1,
+        "endReason": expected_reason,
+        "tokenFrozen": True,
+        "distinctNormalTokens": True,
+        "extensionSameToken": expected_runs > 2,
+        "outsideToken": None,
+    }
 
 
 def test_transparent_chrome_gated_by_plan_flag():
@@ -827,7 +917,7 @@ function goToScene(n) {
 /** Drive the core's detach MutationObserver as the player's teardown would. */
 function detach(v) {
   v.parentNode = null;
-  moCallbacks.slice().forEach((cb) => cb([{removedNodes: [v]}]));
+  moCallbacks.slice().forEach((cb) => cb([{addedNodes: [], removedNodes: [v]}]));
 }
 /** A player movie element for export instance `inst`: the id is set before any src (F1). */
 function video(inst) {
@@ -1158,9 +1248,9 @@ _REMOVAL_INSIDE_THE_WINDOW = {
     "subtree": r"""
 const layer = {querySelectorAll: (sel) => (sel === 'video' && v.parentNode === layer ? [v] : [])};
 v.parentNode = layer;
-moCallbacks.slice().forEach((cb) => cb([{removedNodes: [layer]}]));
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [], removedNodes: [layer]}]));
 """,
-    "self-move": "moCallbacks.slice().forEach((cb) => cb([{removedNodes: [v]}]));",
+    "self-move": "moCallbacks.slice().forEach((cb) => cb([{addedNodes: [], removedNodes: [v]}]));",
 }
 _AFTER_REMOVAL = r"""
 console.log(JSON.stringify({
@@ -2204,7 +2294,7 @@ function playerDetachSubtree(v) {
   v.__inStage = false;
   v._rect = {left: 0, top: 0, width: 0, height: 0};
   layer.parentNode = null;
-  moCallbacks.slice().forEach((cb) => cb([{removedNodes: [layer]}]));
+  moCallbacks.slice().forEach((cb) => cb([{addedNodes: [], removedNodes: [layer]}]));
   return layer;
 }
 /** The measured 1->2 flow up to G2 arming: rest capture on #1, detach, `glreplay-arm`. */
@@ -2453,7 +2543,7 @@ def test_armed_stash_declines_an_attached_or_off_scene_decoder(case):
 location.hash = '#1';
 tick();
 const v = makeMovie(MEASURED);
-moCallbacks.slice().forEach((cb) => cb([{removedNodes: [v]}]));
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [], removedNodes: [v]}]));
 """,
         "detached-on-destination": r"""
 arm();
@@ -3647,7 +3737,7 @@ fresh.setAttribute('src', 'https://host/untitled.mov');
 if (fresh.__obedFacadeFor !== real) throw new Error('no facade');
 """ + tail + r"""
 fresh.parentNode = bodyEl;
-moCallbacks.slice().forEach((cb) => cb([{removedNodes: []}]));
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [], removedNodes: []}]));
 console.log(JSON.stringify({swaps: P.events.filter(e => e.kind === 'dom-swap').length,
   paused: real.paused, gen: real.__obedGen}));
 """)
@@ -3905,7 +3995,9 @@ console.log(JSON.stringify({
   notes: notesOf('poster-hold'), resumes: notesOf('poster-resume'),
 }));
 """)
-    assert result["feedKeys"] == ["claim", "decoderFor", "note", "onStandDown", "version"]
+    assert result["feedKeys"] == [
+        "cancelLinger", "claim", "decoderFor", "frameToken", "note", "onStandDown", "version",
+    ]
     assert result["feedVersion"] == 1
     assert result["during"] == {"paused": True, "opacity": "0", "inBody": True, "t": 4.25}
     assert result["held"] == {"paused": True, "plays": 1, "t": 4.25}
@@ -3964,6 +4056,102 @@ console.log(JSON.stringify({decoder, claimed, beforeDeparture, riding, stoodDown
 def test_feed_seam_is_absent_when_no_runtime_entry_has_feed():
     result = _run_chain(_MOVIE_PLAN, "console.log(JSON.stringify({feed: P.feed || null}));")
     assert result == {"feed": None}
+
+
+def test_interim_slots_survive_the_real_two_movie_handback_order():
+    rect_a = {"x": 100, "y": 120, "w": 300, "h": 180}
+    rect_b = {"x": 520, "y": 140, "w": 240, "h": 160}
+    plan = {
+        "schema": 2,
+        "movies": {
+            "movie1": {"assetKeys": ["a.mov"], "footprint": rect_a},
+            "movie2": {"assetKeys": ["b.mov"], "footprint": rect_b},
+        },
+        "boundaries": [
+            {"atScene": 2, "action": "pin", "movieKey": "movie1", "loop": False, "underArtwork": True,
+             "src": _inst("A1", rect_a), "dst": _inst("A2", rect_a)},
+            {"atScene": 2, "action": "pin", "movieKey": "movie2", "loop": False, "underArtwork": True,
+             "src": _inst("B1", rect_b), "dst": _inst("B2", rect_b)},
+        ],
+    }
+    script = r"""
+function treeNode(id) {
+  const node = {id, nodeType: 1, parentNode: null, parentElement: null, children: [], __inStage: true};
+  Object.defineProperty(node, 'isConnected', {get() { return !!this.__inStage; }});
+  function sync() {
+    node.children.forEach((child, i) => {
+      child.parentNode = node; child.parentElement = node; child.__inStage = node.__inStage;
+      child.previousSibling = i ? node.children[i - 1] : null;
+      child.nextSibling = i + 1 < node.children.length ? node.children[i + 1] : null;
+    });
+  }
+  node.insertBefore = function(child, ref) {
+    if (child.parentNode && child.parentNode.removeChild) child.parentNode.removeChild(child);
+    const i = ref ? this.children.indexOf(ref) : -1;
+    this.children.splice(i < 0 ? this.children.length : i, 0, child); sync(); return child;
+  };
+  node.appendChild = function(child) { return this.insertBefore(child, null); };
+  node.removeChild = function(child) {
+    const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1);
+    child.parentNode = child.parentElement = null; child.__inStage = false; sync(); return child;
+  };
+  node.replaceChild = function(child, old) {
+    const i = this.children.indexOf(old); this.removeChild(old); this.insertBefore(child, this.children[i] || null); return old;
+  };
+  return node;
+}
+function canvas(id, rect) {
+  return {id, nodeType: 1, parentNode: null, parentElement: null, __inStage: true,
+    getBoundingClientRect() { return {left: rect.x, top: rect.y, width: rect.w, height: rect.h}; }};
+}
+goToScene(0);
+const a = playing('A1', 'https://host/a.mov');
+const b = playing('B1', 'https://host/b.mov');
+a._rect = {left: 100, top: 120, width: 300, height: 180};
+b._rect = {left: 520, top: 140, width: 240, height: 160};
+goToScene(1); a.pause(); b.pause(); detach(a); detach(b); goToScene(2);
+const matchBefore = [a.__obedLayer || null, a.__obedParent || null, b.__obedLayer || null, b.__obedParent || null];
+const root = treeNode('layerRoot');
+const layerA = treeNode('layerA'), layerB = treeNode('layerB'), label = treeNode('layerLabel');
+layerA.__screenOrigin = layerB.__screenOrigin = {x: 0, y: 0}; layerA.__scale = layerB.__scale = 1;
+const posterA = canvas('posterA', {x: 100, y: 120, w: 300, h: 180});
+const posterB = canvas('posterB', {x: 520, y: 140, w: 240, h: 160});
+const slotA = treeNode('slotA');
+layerA.appendChild(posterA); layerA.appendChild(slotA); layerB.appendChild(posterB);
+canvases.push(posterA, posterB);
+root.appendChild(layerA); root.appendChild(layerB); root.appendChild(label);
+root.querySelectorAll = (sel) => sel === 'canvas' ? [posterA, posterB] : [];
+root.parentNode = root.parentElement = stageEl; root.__inStage = true;
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [root], removedNodes: []}]));
+const matchInterim = [a.__obedLayer || null, a.__obedParent || null, b.__obedLayer || null, b.__obedParent || null];
+const interim = {
+  a: a.parentNode === root && a.previousSibling === layerA,
+  b: b.parentNode === root && b.previousSibling === layerB,
+  bConnected: b.isConnected,
+};
+const stub = video('A2');
+stub.setAttribute('src', 'https://host/a.mov');
+const afterSet = {aInMovieLayer: a.parentNode === layerA, bInterim: b.parentNode === root && b.isConnected,
+  aOnRoot: a.parentNode === root};
+layerA.replaceChild(stub, slotA);
+moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: [slotA]}]));
+console.log(JSON.stringify({
+  interim, matchingUntouched: matchBefore.every((value, i) => value === matchInterim[i]), afterSet,
+  final: {aInMovieLayer: a.parentNode === layerA, bInterim: b.parentNode === root && b.isConnected,
+    aOnRoot: a.parentNode === root, layer: a.__obedLayer && a.__obedLayer.id},
+  rootOrder: root.children.map((node) => node.id || node.__obedInstance),
+  notes: P.events.filter((e) => /^interim-/.test(e.kind)).map((e) => e.kind),
+}));
+"""
+    result = _run_chain(plan, script)
+    assert result == {
+        "interim": {"a": True, "b": True, "bConnected": True},
+        "matchingUntouched": True,
+        "afterSet": {"aInMovieLayer": True, "bInterim": True, "aOnRoot": False},
+        "final": {"aInMovieLayer": True, "bInterim": True, "aOnRoot": False, "layer": "layerA"},
+        "rootOrder": ["layerA", "layerB", "B1-video", "layerLabel"],
+        "notes": ["interim-scan", "interim-placed", "interim-placed", "interim-release"],
+    }
 
 
 @pytest.mark.parametrize(("second_action", "tied"), [

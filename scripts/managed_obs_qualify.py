@@ -118,6 +118,7 @@ from live_continuity_probe import (  # noqa: E402
     ground_truth_facts,
     ground_truth_plan,
     feed_instrument_pre_navigation_scripts,
+    require_feed_fixture,
     load_slides,
     matches_asset_keys,
     rects_overlap,
@@ -402,9 +403,11 @@ def fixture_facts(fixture: Path) -> dict[str, Any]:
 def feed_fixture_facts(fixture: Path) -> dict[str, Any]:
     dest, slides = make_export("feed-facts", fixture)
     try:
+        identity = require_feed_fixture(dest, slides)
         facts = ground_truth_facts(ground_truth_plan(dest, slides))
         if not any(spec.get("underArtwork") is True for spec in facts.get("verdicts") or []):
             raise SystemExit("feed fixture derives no under-artwork carries")
+        facts["fixtureIdentity"] = identity
         return facts
     finally:
         shutil.rmtree(dest.parent, ignore_errors=True)
@@ -519,6 +522,8 @@ def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any
     out: dict[str, Any] = {"session": name, "glReplayArg": gl_replay, "mmOpacityArg": mm_opacity, "mmFeedArg": mm_feed,
                            "mmFeedQualifyOnce": mm_feed_qualify_once, "seed": seed, "square": square}
     try:
+        if ctx.get("feedFacts"):
+            out["fixtureIdentity"] = require_feed_fixture(dest, slides)
         with contextlib.ExitStack() as stack:
             stack.enter_context(mm_opacity_probe.square_player(square))
             if seed is not None:
@@ -2200,10 +2205,11 @@ def feed_gates(run: dict[str, Any], facts: dict[str, Any] | None) -> dict[str, A
             carry = verdicts.get(spec_id) if isinstance(verdicts.get(spec_id), dict) else {}
             under = carry.get("underArtwork") if isinstance(carry.get("underArtwork"), dict) else {}
             if name == "feed":
-                wanted = {"feedLive": True, "noRiderAboveCanvas": True, "labelsOverFeed": True, "artworkAbove": True}
+                wanted = {"feedLive": True, "noRiderAboveCanvas": True, "labelsOverFeed": True,
+                          "artworkAbove": True, "handbackContinuity": True}
             else:
                 wanted = {"feedLive": False, "holdFrame": True, "posterHold": True,
-                          "noRiderAboveCanvas": True, "artworkAbove": True}
+                          "noRiderAboveCanvas": True, "artworkAbove": True, "handbackContinuity": True}
             for verdict, value in wanted.items():
                 actual = (under.get(verdict) or {}).get("verdict") if isinstance(under.get(verdict), dict) else None
                 check(checks, f"{name} {spec_id} {verdict}", actual, actual is value, f"is {value}")
@@ -2381,16 +2387,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("An OBS is already running; quit it first (one OBS at a time).")
     if not (args.fixture / "html-player").is_dir() or not (args.fixture / "html-unmodified/index.html").is_file():
         parser.error(f"fixture missing: {args.fixture}")
-    args.fixture_identity = (
-        {"headerSha256": hashlib.sha256((args.fixture / "html-player/assets/header.json").read_bytes()).hexdigest()}
-        if args.arm == "feed" else binary_counter_movie.verify_fixture(args.fixture)
-    )
+    args.fixture_identity = None if args.arm == "feed" else binary_counter_movie.verify_fixture(args.fixture)
     if args.kb:
         args.kb_splice = apply_kb(args.kb)
     armed = None
     if args.arm not in ("2x", "positive", "both", "dissolve"):
         armed = feed_fixture_facts(args.fixture) if args.arm == "feed" else fixture_facts(args.fixture)
         if args.arm == "feed":
+            args.fixture_identity = armed["fixtureIdentity"]
             print("FEED", json.dumps([spec["id"] for spec in armed["verdicts"] if spec.get("underArtwork")]), flush=True)
         else:
             print("ARMED", json.dumps({k: armed[k] for k in ("instanceRect", "movieSlot", "overrideSlots", "assetKeys")}), flush=True)

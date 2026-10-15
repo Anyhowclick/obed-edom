@@ -11693,6 +11693,39 @@ def test_feed_live_needs_two_decoder_reads_and_distinguishes_a_frozen_decoder() 
     assert probe.score_feed_live(frozen)["verdict"] is False
 
 
+def _handback_continuity(*, fps: int = 30, source_frames: float = 1.0) -> dict[str, Any]:
+    period = 1000 / fps
+    dom = {"connected": True, "inStage": True, "onBody": False, "shown": True, "opacityProduct": 1.0,
+           "canvasCount": 1, "afterCanvas": True, "sameStackingContext": True, "rectError": 0.0}
+    return {
+        "complete": True, "timedOut": False, "frameMappingComplete": True,
+        "lastUpload": {"frameIndex": 8, "frameTimestamp": 8 * period, "mediaTime": 4.0,
+                       "presentedFrames": 120},
+        "closed": {"frameIndex": 9, "timestamp": 9 * period, "dom": copy.deepcopy(dom)},
+        "presented": [{"mediaTime": 4.0 + source_frames / 30, "presentedFrames": 121, "dom": copy.deepcopy(dom)},
+                      {"mediaTime": 4.0 + (source_frames + 1) / 30, "presentedFrames": 122, "dom": copy.deepcopy(dom)},
+                      {"mediaTime": 4.0 + (source_frames + 2) / 30, "presentedFrames": 123, "dom": copy.deepcopy(dom)}],
+        "sourceFrameDurationS": 1 / 30, "adjacentFrames": True, "canvasLingerMs": period,
+    }
+
+
+@pytest.mark.parametrize(("case", "fps", "source_frames", "expected"), [
+    ("pass-25", 25, 1.0, True), ("pass-30", 30, 1.0, True),
+    ("nine-frame", 30, 9.0, False), ("dom-exposure", 30, 1.0, False),
+    ("unreadable", 30, 1.0, None), ("rounded-held-plus-two", 30, 2.49, True),
+])
+def test_handback_continuity_scorer(case: str, fps: int, source_frames: float, expected: bool | None) -> None:
+    record = _handback_continuity(fps=fps, source_frames=source_frames)
+    if case == "dom-exposure":
+        record["closed"]["dom"]["afterCanvas"] = False
+    elif case == "unreadable":
+        record["frameMappingComplete"] = False
+    scored = probe.score_handback_continuity(record)
+    assert scored["verdict"] is expected
+    if expected is not None and case != "dom-exposure":
+        assert scored["frameGap"] == 1
+
+
 @pytest.mark.parametrize(("rows", "expected"), [
     ([{"visible": True, "intersectsCanvas": True, "opacityProduct": 0.0}], True),
     ([{"visible": True, "intersectsCanvas": True, "opacityProduct": 1.0}], False),
@@ -12140,6 +12173,10 @@ console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
     assert [(row["entryId"], row["serial"]) for row in report["departures"]] == [
         ("carry-hold", 2), ("carry-killed", 3), ("chain-14", 6),
     ]
+    hold_departure = next(row for row in report["departures"] if row["entryId"] == "carry-hold")
+    hold_context = next(row for row in report["contexts"] if row["serial"] == 2)
+    assert hold_departure["t"] < hold_context["createdAt"]
+    assert hold_departure["generation"] > 0 and hold_departure["visit"] == 1
     assert [(row["entryId"], row["serial"]) for row in report["standDowns"]] == [
         ("carry-hold", 2), ("chain-14", 6),
     ]
@@ -12267,7 +12304,8 @@ def test_lingering_canvas_does_not_exempt_settled_dwell_and_null_close_still_bou
                       "textures": [{"ordinal": 1, "size": [100, 100]}, None]}],
             "riders": [], "labels": [], "labelExpected": [],
         })
-        uploads.append({"serial": 1, "atScene": 8, "frameN": n, "t": float(frame_time), "textureOrdinal": 1})
+        uploads.append({"serial": 1, "atScene": 8, "frameN": n, "t": float(frame_time),
+                        "frameIndex": n - 1, "frameTimestamp": float(frame_time), "textureOrdinal": 1})
     report = {
         "contexts": [{"serial": 1, "atScene": 8, "entryIds": ["carry-a"], "lost": False, "closedAt": 4000.0}],
         "frames": frames, "media": [], "mediaDropped": [], "mediaOverflow": 0, "artwork": [],
@@ -12307,7 +12345,7 @@ def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() ->
     expected = {
         "feed-on", "feed-off", "attach-once", "hold-upload-killed", "ordinal", "after-feed",
         "from-only-crossfade", "from-only-single", "overlay-ride", "settle-on-stage",
-        "no-pause", "mm-opacity-off",
+        "no-pause", "mm-opacity-off", "no-linger", "interim-delay",
     }
     assert set(probe.MM_FEED_GATE_EXPECTATIONS) == expected
     text = (REPO / "scripts" / "run_gates.sh").read_text()
@@ -12339,6 +12377,13 @@ def test_repaired_full_alpha_runtime_plan_is_pinned() -> None:
     assert probe.plan_signature(runtime) == probe.ALPHA_DSK_PLAN_SHA256
 
 
+def test_original_d7_feed_fixture_is_refused_with_slide_and_leaf_diagnostics() -> None:
+    root = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Continuity/q7-fixtures/D7-unrepaired/html-player")
+    slides = probe.load_slides(root)
+    with pytest.raises(RuntimeError, match=r"feed fixture refused.*slide 3 0/baseLayer/layers/4/layers/0/layers/0"):
+        probe.require_feed_fixture(root, slides)
+
+
 def test_ground_truth_feed_facts_are_keyed_by_scene_and_destination_object(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = {"id": "carry-a", "alias": None, "kind": "carry", "atScene": 2, "toPlayer": 1,
             "srcObjectId": "src-a", "dstObjectId": "dst-a"}
@@ -12365,8 +12410,10 @@ def test_ground_truth_feed_facts_are_keyed_by_scene_and_destination_object(monke
 def test_feed_control_cli_registers_both_tampers_and_kill_switch() -> None:
     after = probe.parse_args(["--feed-tamper", "after-feed", "--feed-tamper-scene", "10",
                               "--skip-arms", "B,C,V,Voff,attach"])
+    no_linger = probe.parse_args(["--feed-tamper", "no-linger", "--skip-arms", "B,C,V,Voff,attach"])
     killed = probe.parse_args(["--hold-upload-kill-switch", "--mm-feed", "off", "--feed-dwell", "12"])
     variant = probe.parse_args(["--feed-variant", "from-only", "--mm-opacity", "off"])
     assert after.feed_tamper == "after-feed" and after.feed_tamper_scene == 10
+    assert no_linger.feed_tamper == "no-linger"
     assert killed.hold_upload_kill_switch is True and killed.mm_feed == "off" and killed.feed_dwell == 12
     assert variant.feed_variant == "from-only" and variant.mm_opacity == "off"

@@ -89,6 +89,7 @@ from obed_edom.fixture_paths import fixture  # noqa: E402
 from obed_edom import live_host as live_host_module  # noqa: E402
 from obed_edom import live_mm_feed_js  # noqa: E402
 from obed_edom import live_continuity as live_continuity_module  # noqa: E402
+from obed_edom import preview_textures  # noqa: E402
 from obed_edom.html_preview import cache_dir, safe_export_file  # noqa: E402
 from obed_edom.live_continuity import (  # noqa: E402
     ContinuityPlan, MovieContinuity, Unsupported, canonical_asset_name, derive_plan, plan_signature,
@@ -347,10 +348,10 @@ FEED_DWELL_S: float | None = None
 
 MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
     "feed-on": {"feedLive": True, "holdFrame": None, "noRiderAboveCanvas": True,
-                "labelsOverFeed": True, "artworkAbove": True},
-    "feed-off": {"feedLive": False, "holdFrame": True, "posterHold": True},
+                "labelsOverFeed": True, "artworkAbove": True, "handbackContinuity": True},
+    "feed-off": {"feedLive": False, "holdFrame": True, "posterHold": True, "handbackContinuity": True},
     "attach-once": {"holdFrame": True, "posterHold": True,
-                    "noRiderAboveCanvas": True, "artworkAbove": True},
+                    "noRiderAboveCanvas": True, "artworkAbove": True, "handbackContinuity": True},
     "hold-upload-killed": {"holdFrame": False},
     "ordinal": {"feedLive": False, "holdFrame": False, "posterHold": True},
     "after-feed": {"feedLive": False, "holdFrame": True, "posterHold": True},
@@ -360,6 +361,8 @@ MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
     "settle-on-stage": {"artworkAbove": False},
     "no-pause": {"posterHold": False},
     "mm-opacity-off": {"labelsOverFeed": False},
+    "no-linger": {"handbackContinuity": False},
+    "interim-delay": {"handbackContinuity": False},
 }
 MM_FEED_STRIP_EXPECTATIONS = {
     (ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off"): (
@@ -968,8 +971,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "rAF (early) or a later rAF (late); passes only on the exact injected seq set",
     )
     parser.add_argument(
-        "--feed-tamper", choices=("ordinal", "after-feed"), default=None,
-        help="Probe control: corrupt the first feed binding before the move, or force stand-down after a successful feed",
+        "--feed-tamper", choices=("ordinal", "after-feed", "no-linger"), default=None,
+        help="Probe control: corrupt the first feed binding, force stand-down after a feed, or disable linger",
     )
     parser.add_argument(
         "--feed-tamper-scene", type=int, default=None, metavar="N",
@@ -1106,6 +1109,34 @@ def load_slides(export_root: Path) -> list[dict[str, Any]]:
         {"originalOrdinal": index + 1, "playerIndex": index, "exportedUuid": slide, "skipped": False}
         for index, slide in enumerate(header["slideList"])
     ]
+
+
+def feed_fixture_identity(export_root: Path, slides: list[dict[str, Any]]) -> dict[str, Any]:
+    hashes = []
+    for slide in sorted((s for s in slides if not s.get("skipped")), key=lambda s: s["playerIndex"]):
+        uuid = slide["exportedUuid"]
+        path = export_root / "assets" / uuid / f"{uuid}.json"
+        hashes.append({
+            "originalOrdinal": slide["originalOrdinal"], "exportedUuid": uuid,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    header = export_root / "assets" / "header.json"
+    return {
+        "exportRoot": str(export_root.resolve()),
+        "headerSha256": hashlib.sha256(header.read_bytes()).hexdigest(),
+        "slideJson": hashes,
+    }
+
+
+def require_feed_fixture(export_root: Path, slides: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        identity = feed_fixture_identity(export_root, slides)
+        hits = preview_textures.json_hits(export_root, slides)
+    except Exception as exc:
+        raise RuntimeError(f"feed fixture inspection failed for {export_root}: {exc}") from exc
+    if hits:
+        raise RuntimeError(f"feed fixture refused for {export_root}: " + "; ".join(hits))
+    return identity
 
 
 def force_viewport(width: int, height: int) -> None:
@@ -1823,7 +1854,7 @@ def feed_specs_for(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
         {
             "id": spec["id"], "objectId": spec.get("srcObjectId"), "dstObjectId": spec.get("dstObjectId"),
             "atScene": spec.get("atScene"), "feed": spec.get("feed"), "draws": spec.get("feedDraws"),
-            "artwork": spec.get("artworkAbove"),
+            "artwork": spec.get("artworkAbove"), "dstRect": spec.get("dstRect"),
         }
         for spec in (facts or {}).get("verdicts") or []
         if spec.get("underArtwork") is True and isinstance(spec.get("feed"), dict)
@@ -3654,6 +3685,7 @@ score_labels_over_feed = mm_feed_instrument.score_labels_over_feed
 score_hold_frame = mm_feed_instrument.score_hold_frame
 score_poster_hold = mm_feed_instrument.score_poster_hold
 score_artwork_above = mm_feed_instrument.score_artwork_above
+score_handback_continuity = mm_feed_instrument.score_handback_continuity
 
 
 def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
@@ -3671,12 +3703,15 @@ def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
         return _inconclusive(record.get("reason") or "the under-artwork feed mode is unavailable")
     rider = score_no_rider_above_canvas(record.get("rider"))
     artwork = score_artwork_above(record.get("artwork"))
+    handback = score_handback_continuity(record.get("handback")) if record.get("evidenceVersion") == 2 else None
     results: dict[str, Any] = {"noRiderAboveCanvas": rider, "artworkAbove": artwork}
+    if handback is not None:
+        results["handbackContinuity"] = handback
     if mode == "continuous":
         primary = score_feed_live(record.get("feed"), continuous_expected=record.get("continuousExpected", True) is True)
         labels = score_labels_over_feed(record.get("labels"))
         results.update(feedLive=primary, labelsOverFeed=labels)
-        applicable = (primary, rider, labels, artwork)
+        applicable = (primary, rider, labels, artwork, *((handback,) if handback is not None else ()))
         interval = mm_feed_instrument.feed_interval(record.get("feed"))
     elif mode in ("once", "departure", "standDown"):
         hold = score_hold_frame(record.get("hold"))
@@ -3684,9 +3719,10 @@ def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
         results.update(holdFrame=hold, posterHold=poster)
         if record.get("continuousExpected") is True:
             results["feedLive"] = score_feed_live(record.get("feed"), continuous_expected=True)
-            applicable = (results["feedLive"], hold, poster, rider, artwork)
+            applicable = (results["feedLive"], hold, poster, rider, artwork,
+                          *((handback,) if handback is not None else ()))
         else:
-            applicable = (hold, poster, rider, artwork)
+            applicable = (hold, poster, rider, artwork, *((handback,) if handback is not None else ()))
         interval = mm_feed_instrument.feed_interval(record.get("hold"))
     else:
         return _inconclusive(f"unknown under-artwork evidence mode {mode!r}")
@@ -7295,12 +7331,15 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
     facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
+    fixture_identity = require_feed_fixture(export_plan, plan_slides) if feed_specs_for(facts) else None
     armed = gl_ground_truth(export_plan, plan_slides, facts)[1]["armed"]
     retire = facts["retire"]
     if not retire or retire["boundaryKey"] != armed["boundaryKey"]:
         raise SystemExit("a forced stand-down needs the flag-off plan to retire the armed boundary")
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
     result: dict[str, Any] = {"groundTruth": {"retire": retire, "armed": armed}, "visible": {}}
+    if fixture_identity is not None:
+        result["fixtureIdentity"] = fixture_identity
 
     v_sink: dict[str, Any] = {}
     export_v = prepare_export(args.fixture, args.original_index, root, "forced-v")
@@ -7425,6 +7464,8 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
     export_r = prepare_export(args.fixture, args.original_index, root, "red-arm")
     slides_r = load_slides(export_r)
+    if feed_specs_for(facts):
+        result["fixtureIdentity"] = require_feed_fixture(export_r, slides_r)
     patch = injected_core_variant(args.core_variant) if args.core_variant else stripped_runtime(*args.strip)
     with patch:
         arm = run_arm(
@@ -9222,7 +9263,8 @@ def run_carry_cover_cli(args: argparse.Namespace) -> None:
 def main() -> None:
     global FEED_CONTROL, MM_FEED_REQUEST, MM_OPACITY_REQUEST, FEED_DWELL_S
     args = parse_args()
-    FEED_CONTROL = {"tamper": args.feed_tamper, "tamperScene": args.feed_tamper_scene,
+    FEED_CONTROL = {"tamper": None if args.feed_tamper == "no-linger" else args.feed_tamper,
+                    "tamperScene": args.feed_tamper_scene,
                     "killHoldUpload": args.hold_upload_kill_switch}
     MM_FEED_REQUEST = args.mm_feed
     MM_OPACITY_REQUEST = args.mm_opacity
@@ -9230,7 +9272,7 @@ def main() -> None:
     try:
         with run_scope(args.rescore if args.rescore is not None else args.artifact), (
             tampered_feed_ordinal(args.feed_tamper_scene) if args.feed_tamper == "ordinal" else nullcontext()
-        ), injected_feed_variant(args.feed_variant):
+        ), injected_feed_variant("no-linger" if args.feed_tamper == "no-linger" else args.feed_variant):
             run_cli(args)
     finally:
         FEED_CONTROL = {}
@@ -9289,6 +9331,8 @@ def run_cli(args: argparse.Namespace) -> None:
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
         facts = ground_truth_facts(plan, arrival=arrival_starts(export_a, slides_a, plan))
+        if feed_specs_for(facts):
+            result["fixtureIdentity"] = require_feed_fixture(export_a, slides_a)
         bind_dom_ids(facts, movie_nodes(export_a, slides_a))
         result["groundTruth"] = {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts}
         expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})

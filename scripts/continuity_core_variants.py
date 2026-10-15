@@ -31,6 +31,7 @@ VARIANTS: tuple[str, ...] = (
     "overlay-ride",
     "settle-on-stage",
     "no-pause",
+    "interim-delay",
 )
 
 _POOL_PLANNED_ONLY = "    if (!armedPool && !poolable(v)) return;\n"
@@ -44,6 +45,7 @@ _POSTER_PAUSE = (
     "    v.__obedPosterHeld = true;\n"
     "    try { v.pause(); } catch (e) {}\n"
 )
+_INTERIM_SCAN = "    interimScan(roots, performance.now());\n"
 
 _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     # Pool every decoder: neither the plan-asset filter nor the planned-instance filter.
@@ -79,6 +81,13 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     "overlay-ride": ((_HIDDEN_BRIDGE, "    }, 'keepThroughBridge', false);\n"),),
     "settle-on-stage": ((_SETTLE_REHOME, "    if (bridge) {\n"),),
     "no-pause": ((_POSTER_PAUSE, "    v.__obedPosterHeld = true;\n"),),
+    "interim-delay": ((
+        _INTERIM_SCAN,
+        "    const observedAt = performance.now();\n"
+        "    requestAnimationFrame(function() {\n"
+        "      interimScan(roots.filter(function(r) { return r.isConnected; }), observedAt);\n"
+        "    });\n",
+    ),),
 }
 
 

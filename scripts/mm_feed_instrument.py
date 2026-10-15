@@ -24,12 +24,17 @@ INSTRUMENT_JS = r"""
   'use strict';
   if(window.__obedMmFeedProbe)return;
   var READS=[0.25,0.5,0.75],PATCH_UV=[[0.2,0.2],[0.5,0.2],[0.8,0.2],[0.2,0.5],[0.5,0.5],[0.8,0.5],[0.2,0.8],[0.5,0.8],[0.8,0.8]];
-  var S={config:null,entries:[],contexts:[],live:[],frames:[],media:[],mediaOverflow:0,artwork:[],errors:[],tamper:null,killedOnce:[],forcedDecoders:{},uploads:[],claims:[],standDowns:[],departures:[],costs:[]};
+  var S={config:null,entries:[],contexts:[],live:[],frames:[],browserFrames:[],handbacks:[],media:[],mediaOverflow:0,artwork:[],errors:[],tamper:null,killedOnce:[],forcedDecoders:{},uploads:[],claims:[],standDowns:[],departures:[],costs:[]};
   var originalGetContext=HTMLCanvasElement.prototype.getContext;
   var locationName=new WeakMap(),programUniforms=new WeakMap(),textureInfo=new WeakMap();
-  var decoderState=new WeakMap(),entryState={},media=HTMLMediaElement.prototype,originalPause=media.pause,originalPlay=media.play;
+  var decoderState=new WeakMap(),entryState={},decoderGeneration=0,media=HTMLMediaElement.prototype,originalPause=media.pause,originalPlay=media.play;
   function finite(v){return typeof v==='number'&&isFinite(v)}
   function frameTime(){var t=document.timeline&&document.timeline.currentTime;return finite(t)?t:null}
+  function browserFrame(t){
+    if(!finite(t))return null;var last=S.browserFrames[S.browserFrames.length-1];
+    if(last&&last.timestamp===t)return last.index;
+    var row={index:S.browserFrames.length,timestamp:t};S.browserFrames.push(row);return row.index;
+  }
   function noteError(where,e){if(S.errors.length<50)S.errors.push({where:where,error:String(e&&e.stack||e)})}
   function scene(){
     var n=parseInt(String(location.hash||'').replace(/^#/,''),10);return Number.isInteger(n)?n:null;
@@ -65,20 +70,25 @@ INSTRUMENT_JS = r"""
   function mediaEvent(kind,v,extra){
     var move=moveFor(v),state=decoderState.get(v),current=scene();
     if(move&&move.atScene!==current&&move.atScene!==current+1)move=null;
-    if(!move&&state){var candidates=Object.keys(state.entries).map(function(id){return state.entries[id]}).filter(function(e){return e.atScene===current||e.atScene===current+1});
-      if(candidates.length===1)move={serial:null,atScene:candidates[0].atScene,entryId:candidates[0].id}}
+    if(!move){var candidates=entries().filter(function(e){return (e.atScene===current||e.atScene===current+1)&&
+        (sameId(v.__obedInstance,e.objectId)||sameId(v.__obedInstance,e.dstObjectId))});
+      if(candidates.length===1){var pending=entryState[candidates[0].id]||{};move={serial:null,atScene:candidates[0].atScene,
+        entryId:candidates[0].id,generation:state&&state.generation,visit:(pending.visit||0)+(current===candidates[0].atScene-1?1:0)}}}
     if(!move)return;if(S.media.length>=20000){S.mediaOverflow++;return}
     S.media.push(Object.assign({kind:kind,t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,
+      generation:move.generation==null&&state?state.generation:move.generation,visit:move.visit==null?(entryState[move.entryId]||{}).visit:move.visit,
       instance:v.__obedInstance==null?null:String(v.__obedInstance),elId:v.__obedElId==null?null:v.__obedElId,
       currentTime:v.currentTime,paused:!!v.paused,presentedFrames:v.__obedPresentedFrames==null?null:v.__obedPresentedFrames,
       mediaTime:v.__obedMediaTime==null?null:v.__obedMediaTime},extra||{}));
-    if(kind==='pause'&&v.__obedPosterHeld)S.departures.push({t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,objectId:move.objectId||null});
+    if(kind==='pause'&&v.__obedPosterHeld)S.departures.push({t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,
+      objectId:move.objectId||null,generation:move.generation==null&&state?state.generation:move.generation,
+      visit:move.visit==null?(entryState[move.entryId]||{}).visit:move.visit});
   }
   media.pause=function(){mediaEvent('pause',this);return originalPause.apply(this,arguments)};
   media.play=function(){mediaEvent('play',this);return originalPlay.apply(this,arguments)};
   function armDecoder(v,entry){
     var state=decoderState.get(v);
-    if(!state){state={entries:{},move:null};decoderState.set(v,state)}
+    if(!state){state={entries:{},move:null,generation:++decoderGeneration};decoderState.set(v,state)}
     state.entries[entry.id]=entry;entryState[entry.id]=entryState[entry.id]||{ring:[]};entryState[entry.id].decoder=v;
     if(state.armed)return;state.armed=true;
     v.addEventListener('seeking',function(){mediaEvent('seeking',v)},true);
@@ -86,6 +96,11 @@ INSTRUMENT_JS = r"""
       var callback=function(now,meta){var costStart=performance.now();v.__obedPresentedFrames=meta.presentedFrames;v.__obedMediaTime=meta.mediaTime;
         mediaEvent('videoFrame',v,{now:now,presentedFrames:meta.presentedFrames,mediaTime:meta.mediaTime});
         Object.keys(state.entries).forEach(function(id){var e=state.entries[id],size=entryState[id].leafSize||e.feed&&e.feed.from&&e.feed.from.size;
+          if(scene()===e.atScene){var dom=domRead(v,e),stamp=frameTime(),domFrame={now:now,t:performance.now(),frameIndex:browserFrame(stamp),
+            frameTimestamp:stamp,mediaTime:meta.mediaTime,presentedFrames:meta.presentedFrames,dom:dom};
+            if(dom&&dom.shown){var domFrames=entryState[id].domFrames;domFrames.push(domFrame);if(domFrames.length>12)domFrames.shift();
+              S.handbacks.forEach(function(handback){if(handback.entryId===id&&handback.decoder===v&&!handback.complete&&!handback.timedOut&&domFrame.frameIndex>=handback.closedFrameIndex){
+                handback.frames.push(domFrame);if(handback.frames.length>=3)handback.complete=true}})}}
           var current=scene(),move=state.move,moveLive=move&&move.entryId===id&&S.live.some(function(pair){return pair[1].serial===move.serial&&pair[1].frame});if(!size||!(current===e.atScene-1||moveLive))return;try{var ring=entryState[id].ring;ring.push({frame:meta.presentedFrames,mediaTime:meta.mediaTime,patches:capture(v,size,entryState[id])});if(ring.length>18)ring.shift()}catch(x){noteError('rVFC capture',x)}});
         S.costs.push(performance.now()-costStart);if(S.costs.length>1000)S.costs.shift();
         v.requestVideoFrameCallback(callback)};v.requestVideoFrameCallback(callback);
@@ -96,6 +111,22 @@ INSTRUMENT_JS = r"""
     if(!el||!el.isConnected)return false;
     var s=getComputedStyle(el),r=el.getBoundingClientRect();
     return s.display!=='none'&&s.visibility==='visible'&&r.width>0&&r.height>0&&(!el.checkVisibility||el.checkVisibility({opacityProperty:true,visibilityProperty:true}));
+  }
+  function stageMap(){var stage=document.getElementById('stage');if(!stage||!(stage.offsetWidth>1))return null;var r=stage.getBoundingClientRect();return {stage:stage,s:r.width/stage.offsetWidth,ox:r.left,oy:r.top}}
+  function expectedBox(entry,v){var m=stageMap(),r=entry&&entry.dstRect;if(m&&r)return {stage:m.stage,x:m.ox+r.x*m.s,y:m.oy+r.y*m.s,w:r.w*m.s,h:r.h*m.s,s:m.s};
+    var vr=v&&v.getBoundingClientRect?v.getBoundingClientRect():null;return vr&&m?{stage:m.stage,x:vr.left,y:vr.top,w:vr.width,h:vr.height,s:m.s}:null}
+  function commonParent(a,b){var seen=[];for(var n=a;n;n=n.parentNode)seen.push(n);for(var q=b;q;q=q.parentNode)if(seen.indexOf(q)>=0)return q;return null}
+  function plainStack(node,top){for(var n=node;n&&n!==top;n=n.parentElement){var s=getComputedStyle(n);if(s.position!=='static'&&s.zIndex!=='auto'&&s.zIndex!=='0')return false}return true}
+  function domRead(v,entry){
+    var box=expectedBox(entry,v),stage=box&&box.stage,r=v&&v.getBoundingClientRect?v.getBoundingClientRect():null;
+    if(!v||!box||!r)return null;var canvases=[],pos=10*box.s,size=16*box.s;
+    stage.querySelectorAll('canvas').forEach(function(c){if(/^\d+-canvas$/.test(String(c.id||'')))return;var cr=c.getBoundingClientRect();
+      if(Math.abs(cr.left-box.x)<=pos&&Math.abs(cr.top-box.y)<=pos&&Math.abs(cr.width-box.w)<=size&&Math.abs(cr.height-box.h)<=size&&visible(c))canvases.push(c)});
+    var after=canvases.length?canvases.every(function(c){return !!(c.compareDocumentPosition(v)&Node.DOCUMENT_POSITION_FOLLOWING)}):null;
+    var same=canvases.length?canvases.every(function(c){var top=commonParent(c,v);return !!top&&plainStack(c,top)&&plainStack(v,top)}):null;
+    return {connected:!!v.isConnected,inStage:!!stage.contains(v),onBody:!!(v.parentElement&&v.parentElement===document.body),
+      opacityProduct:opacityProduct(v),shown:visible(v),canvasCount:canvases.length,afterCanvas:after,sameStackingContext:same,
+      rectError:Math.max(Math.abs(r.left-box.x),Math.abs(r.top-box.y),Math.abs(r.width-box.w),Math.abs(r.height-box.h))};
   }
   function entries(){return S.entries}
   // Facts carry lowercased objectIds; the plan, core seam and player use the export's spelling.
@@ -181,14 +212,18 @@ INSTRUMENT_JS = r"""
   function wrap(gl,canvas){
     if(gl.__obedMmFeedProbe)return;
     gl.__obedMmFeedProbe=true;
-    var atScene=resolveAtScene();S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1]);if(pair[1].atScene!==atScene)finishContext(pair[1])});
+    var atScene=resolveAtScene();S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1])});
     var active=entriesAt(atScene),O={},G={unit:gl.TEXTURE0,bindings:{},program:null,flip:false,premultiply:false,
       frame:null,serial:S.contexts.length+1,regularUploads:0,atScene:atScene,entries:active,closed:false};
     ['texImage2D','activeTexture','bindTexture','pixelStorei','useProgram','getUniformLocation','uniform1f','uniformMatrix4fv','clear','drawArrays','drawElements'].forEach(function(n){O[n]=gl[n]});
-    var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),closedAt:null,atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};G.context=contextRecord;
+    var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),closedAt:null,closedFrameIndex:null,atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};G.context=contextRecord;
     S.contexts.push(contextRecord);S.live.push([gl,G]);
-    active.forEach(function(e){entryState[e.id].serial=G.serial;[S.media,S.departures,S.claims,S.standDowns].forEach(function(stream){stream.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial})});
-      var v=decoderForEntry(e);if(v){armDecoder(v,e);decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId}}});
+    active.forEach(function(e){var es=entryState[e.id];es.visit=(es.visit||0)+1;es.serial=G.serial;
+      [S.claims,S.standDowns].forEach(function(stream){stream.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial})});
+      var v=decoderForEntry(e),ds=v&&decoderState.get(v);[S.media,S.departures].forEach(function(stream){stream.forEach(function(row){
+        if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene&&row.visit===es.visit&&ds&&row.generation===ds.generation)row.serial=G.serial})});
+      if(v){armDecoder(v,e);decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,
+        generation:decoderState.get(v).generation,visit:es.visit}}});
     gl.activeTexture=function(u){G.unit=u;return O.activeTexture.apply(gl,arguments)};
     gl.bindTexture=function(target,texture){if(target===gl.TEXTURE_2D)G.bindings[G.unit]=texture;return O.bindTexture.apply(gl,arguments)};
     gl.pixelStorei=function(p,v){if(p===gl.UNPACK_FLIP_Y_WEBGL)G.flip=!!v;if(p===gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL)G.premultiply=!!v;return O.pixelStorei.apply(gl,arguments)};
@@ -205,14 +240,17 @@ INSTRUMENT_JS = r"""
       if(texture){var previous=textureInfo.get(texture)||{},poster=previous.poster,ordinal=previous.ordinal,size=previous.size;
         if(!isVideo){ordinal=++G.regularUploads;var planned=G.entries.filter(function(e){return [e.feed&&e.feed.from,e.feed&&e.feed.to].some(function(p){return p&&p.upload===ordinal})})[0];if(src&&planned)try{poster=capture(src,[w,h],entryState[planned.id])}catch(e){noteError('poster capture',e)}}
         if(!isVideo)size=[w,h];var info={serial:G.serial,ordinal:ordinal,size:size,uploadedSize:isVideo?[w,h]:null,flip:G.flip,premultiply:G.premultiply,poster:poster,video:isVideo,presentedFrames:src&&src.__obedPresentedFrames,mediaTime:src&&src.__obedMediaTime};textureInfo.set(texture,info);
-        if(isVideo)S.uploads.push({serial:G.serial,atScene:G.atScene,t:performance.now(),frameN:G.frame&&G.frame.n,textureOrdinal:ordinal,presentedFrames:info.presentedFrames,mediaTime:info.mediaTime})}
+        if(isVideo)S.uploads.push({serial:G.serial,atScene:G.atScene,t:performance.now(),frameN:G.frame&&G.frame.n,
+          frameIndex:G.frame&&G.frame.frameIndex,frameTimestamp:G.frame&&G.frame.frameTimestamp,textureOrdinal:ordinal,
+          presentedFrames:info.presentedFrames,mediaTime:info.mediaTime})}
       return O.texImage2D.apply(gl,arguments);
     };
     gl.clear=function(){
-      if(G.frame)finishFrame(gl,G);
-      G.frame={serial:G.serial,atScene:G.atScene,n:S.frames.length+1,t:performance.now(),frameTime:frameTime(),draws:0,uploads:0,rows:[],labels:[],riders:[],
+      if(G.frame){collectRiders(gl,G);finishFrame(gl,G)}
+      var stamp=frameTime();G.frame={serial:G.serial,atScene:G.atScene,n:S.frames.length+1,t:performance.now(),frameTime:stamp,
+        frameIndex:browserFrame(stamp),frameTimestamp:stamp,draws:0,uploads:0,rows:[],labels:[],riders:[],
         quads:{},under:[],labelExpected:[],module:moduleRead(),pixelsDone:false};
-      return O.clear.apply(gl,arguments);
+      var result=O.clear.apply(gl,arguments);collectRiders(gl,G);return result;
     };
     function draw(name,args){
       if(!G.frame)return O[name].apply(gl,args);
@@ -240,7 +278,7 @@ INSTRUMENT_JS = r"""
     }
     gl.drawArrays=function(){return draw('drawArrays',arguments)};
     gl.drawElements=function(){return draw('drawElements',arguments)};
-    canvas.addEventListener('webglcontextlost',function(){contextRecord.lost=true;if(G.frame)finishFrame(gl,G);finishContext(G)},true);
+    canvas.addEventListener('webglcontextlost',function(){contextRecord.lost=true;if(G.frame)finishFrame(gl,G)},true);
   }
   function laterQuads(F,draw){return Object.keys(F.quads).filter(function(k){return +k>draw}).map(function(k){return F.quads[k]})}
   function bestGeneric(gl,F,row){
@@ -287,8 +325,13 @@ INSTRUMENT_JS = r"""
     if(!F.pixelsDone){F.rows.forEach(function(row){row.feedRead={patchInside:false,coveredByLaterDraw:false,kind:null,late:true};row.holdMatch=null;delete row._reference;delete row._matrix;delete row._layerSize});F.under=[]}
     F.glErrors=[];S.frames.push(F);G.frame=null;
   }
-  function finishContext(G){
-    if(G.closed)return;G.closed=true;if(G.context)G.context.closedAt=frameTime();
+  function finishContext(G,stamp,index){
+    if(G.closed)return;G.closed=true;stamp=finite(stamp)?stamp:frameTime();index=Number.isInteger(index)?index:browserFrame(stamp);
+    if(G.context){G.context.closedAt=stamp;G.context.closedFrameIndex=index}
+    G.entries.forEach(function(entry){var v=decoderForEntry(entry),uploads=S.uploads.filter(function(row){return row.serial===G.serial&&row.atScene===G.atScene});
+      var prior=(entryState[entry.id].domFrames||[]).filter(function(row){return row.frameIndex>=index}).slice(0,3);
+      S.handbacks.push({entryId:entry.id,serial:G.serial,atScene:G.atScene,entry:entry,decoder:v,closedAt:stamp,closedFrameIndex:index,
+        closedDom:v?domRead(v,entry):null,frames:prior,complete:prior.length>=3,timedOut:false,deadline:performance.now()+1000,lastUpload:uploads.length?uploads[uploads.length-1]:null})});
     if(S.tamper&&S.tamper.kind==='after-feed'&&S.tamper.applied!==true&&G.atScene===S.tamper.atScene){S.tamper.failed=true;S.tamper.reason='target move context finished without a trigger'}
   }
   function installKillSwitch(){
@@ -304,8 +347,8 @@ INSTRUMENT_JS = r"""
     if(S.config)return true;
     S.config=config||{};S.tamper=S.config.tamper?{kind:S.config.tamper,atScene:Number.isInteger(S.config.tamperScene)?S.config.tamperScene:null,applied:false}:null;
     S.entries=(Array.isArray(S.config.entries)?S.config.entries:[]).map(function(source){var e=JSON.parse(JSON.stringify(source)),planned=JSON.stringify(e.feed),row=planRow(e),runtime=row&&row.feed&&typeof row.feed==='object'?JSON.parse(JSON.stringify(row.feed)):null;e.planObjectId=row?row.src.objectId:e.objectId;e.planDstObjectId=row&&row.dst?row.dst.objectId:e.dstObjectId;e.feed=runtime;if(S.tamper&&S.tamper.kind==='ordinal'&&(!Number.isInteger(S.tamper.atScene)||e.atScene===S.tamper.atScene)&&planned!==JSON.stringify(runtime))S.tamper.applied=true;return e});
-    entries().forEach(function(e){entryState[e.id]={ring:[]};var v=decoderFor(e.planObjectId);if(v)armDecoder(v,e)});
-    S.live.forEach(function(pair){var G=pair[1],atScene=resolveAtScene(),active=entriesAt(atScene),context=S.contexts.filter(function(c){return c.serial===G.serial})[0];G.atScene=atScene;G.entries=active;if(context){context.atScene=atScene;context.entryIds=active.map(function(e){return e.id})}active.forEach(function(e){entryState[e.id].serial=G.serial;var v=decoderForEntry(e);if(v)decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId}})});
+    entries().forEach(function(e){entryState[e.id]={ring:[],domFrames:[],visit:0};var v=decoderFor(e.planObjectId);if(v)armDecoder(v,e)});
+    S.live.forEach(function(pair){var G=pair[1],atScene=resolveAtScene(),active=entriesAt(atScene),context=S.contexts.filter(function(c){return c.serial===G.serial})[0];G.atScene=atScene;G.entries=active;if(context){context.atScene=atScene;context.entryIds=active.map(function(e){return e.id})}active.forEach(function(e){entryState[e.id].serial=G.serial;var v=decoderForEntry(e),ds=v&&decoderState.get(v);if(ds)ds.move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,generation:ds.generation,visit:entryState[e.id].visit}})});
     installKillSwitch();
     if(S.tamper&&S.tamper.kind==='after-feed')requestAnimationFrame(afterFeedTamper);
     return true;
@@ -343,12 +386,14 @@ INSTRUMENT_JS = r"""
     if(typeof claim==='function')feed.claim=function(objectId){var result=claim.apply(feed,arguments),entry=entryForObject(objectId),v=decoderFor(objectId),move=v&&moveFor(v);S.claims.push({objectId:objectId,entryId:entry&&entry.id,serial:move&&entry&&move.atScene===entry.atScene?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),claimed:result===true});return result};
     if(typeof stand==='function')feed.onStandDown=function(objectId,reason){var v=decoderFor(objectId),move=v&&moveFor(v),result=stand.apply(feed,arguments),entry=entryForObject(objectId);S.standDowns.push({objectId:objectId,entryId:entry&&entry.id,serial:move&&entry&&move.atScene===entry.atScene?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),reason:reason==null?null:String(reason),accepted:result===true});return result};
   }
-  function riderTick(){
-    armSeam();installKillSwitch();
-    S.live.forEach(function(pair){var gl=pair[0],G=pair[1],F=G.frame,canvas=gl.canvas;if(!F||G.closed||!canvas||!canvas.isConnected)return;var cr=canvas.getBoundingClientRect();
-      G.entries.forEach(function(e){if(F.riders.some(function(r){return r.entryId===e.id}))return;var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
-        opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})});
-    S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G);if(!canvas||!canvas.isConnected)finishContext(G)});settledArtwork();requestAnimationFrame(riderTick);
+  function collectRiders(gl,G){var F=G.frame,canvas=gl.canvas;if(!F||G.closed||!canvas||!canvas.isConnected)return;var cr=canvas.getBoundingClientRect();
+    G.entries.forEach(function(e){if(F.riders.some(function(r){return r.entryId===e.id}))return;var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
+      opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})}
+  function riderTick(stamp){
+    var index=browserFrame(finite(stamp)?stamp:frameTime());armSeam();installKillSwitch();entries().forEach(function(e){decoderForEntry(e)});
+    S.live.forEach(function(pair){collectRiders(pair[0],pair[1])});
+    S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G);if(!canvas||!canvas.isConnected)finishContext(G,stamp,index)});
+    S.handbacks.forEach(function(h){if(!h.complete&&!h.timedOut&&performance.now()>=h.deadline)h.timedOut=true});settledArtwork();requestAnimationFrame(riderTick);
   }
   function rectMatchesFact(node,fact){for(var n=node;n&&n.nodeType===1;n=n.parentElement){var r=n.getBoundingClientRect&&n.getBoundingClientRect();if(r&&Math.abs(r.left-fact.x)<=2&&Math.abs(r.top-fact.y)<=2&&Math.abs(r.right-(fact.x+fact.w))<=2&&Math.abs(r.bottom-(fact.y+fact.h))<=2)return true}return false}
   function settledArtwork(){
@@ -365,8 +410,10 @@ INSTRUMENT_JS = r"""
   function p95(values){if(!values.length)return null;var a=values.slice().sort(function(x,y){return x-y}),p=(a.length-1)*.95,l=Math.floor(p),h=Math.ceil(p);return l===h?a[l]:a[l]+(a[h]-a[l])*(p-l)}
   function droppedMedia(){var counts={};S.media.forEach(function(row){if(row.serial===null)counts[row.atScene]=(counts[row.atScene]||0)+1});return Object.keys(counts).map(function(key){return {atScene:+key,count:counts[key]}})}
   requestAnimationFrame(riderTick);
-  window.__obedMmFeedProbe={version:1,bootstrap:bootstrap,configure:configure,report:function(){S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1])});return {kind:'mm-feed',version:1,config:S.config,
+  window.__obedMmFeedProbe={version:2,bootstrap:bootstrap,configure:configure,report:function(){S.live.forEach(function(pair){if(pair[1].frame){collectRiders(pair[0],pair[1]);finishFrame(pair[0],pair[1])}});S.handbacks.forEach(function(h){if(!h.complete&&!h.timedOut&&performance.now()>=h.deadline)h.timedOut=true});return {kind:'mm-feed',version:2,config:S.config,
     contexts:S.contexts,frames:S.frames.slice().sort(function(a,b){return a.t-b.t}),media:S.media.filter(function(row){return row.serial!==null}),mediaDropped:droppedMedia(),mediaOverflow:S.mediaOverflow,artwork:S.artwork,errors:S.errors,
+    browserFrames:S.browserFrames,handbacks:S.handbacks.map(function(h){return {entryId:h.entryId,serial:h.serial,atScene:h.atScene,closedAt:h.closedAt,
+      closedFrameIndex:h.closedFrameIndex,closedDom:h.closedDom,frames:h.frames,complete:h.complete,timedOut:h.timedOut,lastUpload:h.lastUpload}}),
     uploads:S.uploads,claims:S.claims,standDowns:S.standDowns,departures:S.departures,callbackCostP95Ms:p95(S.costs),module:moduleRead(),tamper:S.tamper,killedOnce:S.killedOnce}}};
 })();
 """
@@ -421,6 +468,8 @@ def verdict_records(
     claims = [row for row in report.get("claims") or [] if isinstance(row, dict)]
     stand_downs = [row for row in report.get("standDowns") or [] if isinstance(row, dict)]
     departures = [row for row in report.get("departures") or [] if isinstance(row, dict)]
+    handbacks = [row for row in report.get("handbacks") or [] if isinstance(row, dict)]
+    browser_frames = [row for row in report.get("browserFrames") or [] if isinstance(row, dict)]
     media_dropped = [row for row in report.get("mediaDropped") or [] if isinstance(row, dict)]
     media_overflow = report.get("mediaOverflow")
     records: dict[str, dict[str, Any]] = {}
@@ -436,7 +485,9 @@ def verdict_records(
         ]
         visits = [_visit_record(
             report, entry, move, frames, media_rows, artwork_rows, uploads, claims, stand_downs, departures,
-            continuous_expected=continuous_expected, media_overflow=media_overflow, media_dropped=media_dropped,
+            handbacks=handbacks, browser_frames=browser_frames, continuous_expected=continuous_expected,
+            media_overflow=media_overflow,
+            media_dropped=media_dropped,
         ) for move in moves]
         if len(visits) == 1:
             records[entry_id] = visits[0]
@@ -451,6 +502,7 @@ def _visit_record(
     report: dict[str, Any], entry: dict[str, Any], move: dict[str, Any], frames: list[dict[str, Any]],
     media_rows: list[dict[str, Any]], artwork_rows: list[dict[str, Any]], uploads: list[dict[str, Any]],
     claims: list[dict[str, Any]], stand_downs: list[dict[str, Any]], departures: list[dict[str, Any]], *,
+    handbacks: list[dict[str, Any]], browser_frames: list[dict[str, Any]],
     continuous_expected: bool, media_overflow: Any, media_dropped: list[dict[str, Any]],
 ) -> dict[str, Any]:
     entry_id, serial, at_scene = entry["id"], move.get("serial"), entry.get("atScene")
@@ -523,7 +575,10 @@ def _visit_record(
     period = statistics.median(frame_periods) if frame_periods else 1000 / 60
     last_move_frame_time = move_frame_times[-1] if frame_times_complete and move_frame_times else None
     closed_at = move.get("closedAt")
-    canvas_linger = float(closed_at) - last_move_frame_time if _finite(closed_at) and last_move_frame_time is not None else None
+    last_upload_row = max(move_uploads, key=lambda row: row["t"] if _finite(row.get("t")) else -math.inf, default=None)
+    upload_frame_time = last_upload_row.get("frameTimestamp") if isinstance(last_upload_row, dict) else None
+    canvas_linger = float(closed_at) - float(upload_frame_time) \
+        if _finite(closed_at) and _finite(upload_frame_time) else None
     interval_end = min(float(closed_at), last_move_frame_time + 1.5 * period) if _finite(closed_at) \
         and last_move_frame_time is not None else last_move_frame_time + 1.5 * period \
         if last_move_frame_time is not None else None
@@ -627,12 +682,20 @@ def _visit_record(
                            and isinstance(r.get("artworkAbove"), bool)
                            for r in related_artwork)
     artwork = [r for r in related_artwork if r.get("entryId") == entry_id and r.get("serial") == serial]
+    visit_handbacks = [r for r in handbacks if r.get("entryId") == entry_id and r.get("serial") == serial
+                       and r.get("atScene") == at_scene]
+    handback = _handback_record(
+        visit_handbacks[0] if len(visit_handbacks) == 1 else None,
+        media, last_upload_row, move, browser_frames,
+    )
     poster["complete"] = frames_complete and media_complete and departures_complete
     return {
-        "mode": mode, "reason": reason, **common, "continuousExpected": continuous_expected,
+        "mode": mode, "reason": reason, "evidenceVersion": report.get("version", 1), **common,
+        "continuousExpected": continuous_expected,
         "feed": feed, "rider": {"riders": riders, "coverage": rider_coverage, "complete": frames_complete},
         "labels": {"labels": labels, "coverage": label_coverage, "complete": frames_complete},
         "hold": hold, "poster": poster, "artwork": {"reads": artwork, "complete": artwork_complete},
+        "handback": handback,
         "module": report.get("module"),
     }
 
@@ -640,6 +703,66 @@ def _visit_record(
 def _rider_readable(row: Any) -> bool:
     return isinstance(row, dict) and isinstance(row.get("visible"), bool) and _finite(row.get("opacityProduct")) \
         and isinstance(row.get("intersectsCanvas"), bool)
+
+
+def _source_frame_duration(media: list[dict[str, Any]]) -> float | None:
+    frames = [row for row in media if row.get("kind") == "videoFrame"
+              and _finite(row.get("mediaTime")) and _finite(row.get("presentedFrames"))]
+    steps = [
+        (b["mediaTime"] - a["mediaTime"]) / (b["presentedFrames"] - a["presentedFrames"])
+        for a, b in zip(frames, frames[1:])
+        if b["presentedFrames"] > a["presentedFrames"] and b["mediaTime"] > a["mediaTime"]
+    ]
+    if len(steps) < 2:
+        return None
+    duration = statistics.median(steps)
+    return duration if duration > 0 and max(abs(step - duration) for step in steps) <= duration * .2 else None
+
+
+def _handback_record(
+    handback: dict[str, Any] | None, media: list[dict[str, Any]], last_upload: dict[str, Any] | None,
+    move: dict[str, Any], browser_frames: list[dict[str, Any]],
+) -> dict[str, Any]:
+    mapping_complete = bool(browser_frames) and all(
+        row.get("index") == index and _finite(row.get("timestamp"))
+        for index, row in enumerate(browser_frames)
+    )
+    frames = handback.get("frames") if isinstance(handback, dict) else None
+    closed_index = handback.get("closedFrameIndex") if isinstance(handback, dict) else move.get("closedFrameIndex")
+    closed_at = handback.get("closedAt") if isinstance(handback, dict) else move.get("closedAt")
+    last_index = last_upload.get("frameIndex") if isinstance(last_upload, dict) else None
+    last_stamp = last_upload.get("frameTimestamp") if isinstance(last_upload, dict) else None
+    mapped = {row.get("index"): row.get("timestamp") for row in browser_frames if isinstance(row, dict)}
+    endpoints = [(closed_index, closed_at), (last_index, last_stamp)] + [
+        (row.get("frameIndex"), row.get("frameTimestamp"))
+        for row in (frames[:3] if isinstance(frames, list) else []) if isinstance(row, dict)
+    ]
+    mapping_complete = mapping_complete and len(endpoints) == 5 and all(
+        isinstance(index, int) and not isinstance(index, bool) and _finite(stamp)
+        and index in mapped and mapped[index] == stamp
+        for index, stamp in endpoints
+    )
+    duration = _source_frame_duration(media)
+    return {
+        "complete": bool(isinstance(handback, dict) and handback.get("complete") is True and not handback.get("timedOut")
+                         and isinstance(frames, list) and len(frames) >= 3),
+        "timedOut": handback.get("timedOut") if isinstance(handback, dict) else None,
+        "frameMappingComplete": mapping_complete,
+        "lastUpload": {
+            "frameIndex": last_index, "frameTimestamp": last_stamp,
+            "mediaTime": last_upload.get("mediaTime") if isinstance(last_upload, dict) else None,
+            "presentedFrames": last_upload.get("presentedFrames") if isinstance(last_upload, dict) else None,
+        },
+        "closed": {
+            "frameIndex": closed_index, "timestamp": closed_at,
+            "dom": handback.get("closedDom") if isinstance(handback, dict) else None,
+        },
+        "presented": frames if isinstance(frames, list) else [],
+        "sourceFrameDurationS": duration,
+        "adjacentFrames": closed_index - last_index == 1
+        if isinstance(closed_index, int) and isinstance(last_index, int) else None,
+        "canvasLingerMs": closed_at - last_stamp if _finite(closed_at) and _finite(last_stamp) else None,
+    }
 
 
 def score_feed_live(record: Any, *, continuous_expected: bool = True, alpha_floor: float = ALPHA_POSTER_FLOOR) -> dict[str, Any]:
@@ -720,6 +843,65 @@ def score_no_rider_above_canvas(record: Any) -> dict[str, Any]:
     offenders = [row for row in frames if row["visible"] and row["intersectsCanvas"] and row["opacityProduct"] > RIDER_OPACITY_FLOOR]
     return _verdict(not offenders, "a carried decoder composited above the GL canvas" if offenders else None,
                     offenders=offenders[:10], sampleCount=len(frames))
+
+
+def _dom_handback_ok(value: Any) -> bool | None:
+    if not isinstance(value, dict):
+        return None
+    required = ("connected", "inStage", "onBody", "shown", "opacityProduct", "canvasCount",
+                "afterCanvas", "sameStackingContext")
+    if any(key not in value for key in required) or not all(isinstance(value.get(key), bool) for key in (
+        "connected", "inStage", "onBody", "shown",
+    )) or not _finite(value.get("opacityProduct")) or not isinstance(value.get("canvasCount"), int):
+        return None
+    if value["canvasCount"] != 1:
+        return None
+    if not all(value.get(key) is True for key in ("afterCanvas", "sameStackingContext")):
+        return False if any(value.get(key) is False for key in ("afterCanvas", "sameStackingContext")) else None
+    return value["connected"] and value["inStage"] and not value["onBody"] and value["shown"] \
+        and value["opacityProduct"] > 0
+
+
+def score_handback_continuity(record: Any, *, max_source_frames: int = 2) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return _verdict(None, "hand-back evidence is missing")
+    if record.get("complete") is not True:
+        return _verdict(None, "the three-frame hand-back read window is incomplete", timedOut=record.get("timedOut"))
+    if record.get("frameMappingComplete") is not True:
+        return _verdict(None, "the shared browser-frame mapping is incomplete")
+    last, closed, presented = record.get("lastUpload"), record.get("closed"), record.get("presented")
+    if not isinstance(last, dict) or not isinstance(closed, dict) or not isinstance(presented, list) or len(presented) < 3:
+        return _verdict(None, "hand-back endpoints are missing")
+    if record.get("adjacentFrames") is not True:
+        if record.get("adjacentFrames") is False:
+            return _verdict(False, "the last upload was not in the frame immediately before canvas removal",
+                            frameGap=closed.get("frameIndex") - last.get("frameIndex")
+                            if isinstance(closed.get("frameIndex"), int) and isinstance(last.get("frameIndex"), int) else None)
+        return _verdict(None, "the upload/removal frame adjacency is unreadable")
+    dom_values = [closed.get("dom"), *(row.get("dom") for row in presented[:3] if isinstance(row, dict))]
+    dom_checks = [_dom_handback_ok(value) for value in dom_values]
+    if any(value is False for value in dom_checks):
+        return _verdict(False, "a static poster was exposed during DOM hand-back", dom=dom_values)
+    if len(dom_checks) != 4 or any(value is None for value in dom_checks):
+        return _verdict(None, "DOM hand-back coverage is unreadable", dom=dom_values)
+    duration = record.get("sourceFrameDurationS")
+    first = presented[0] if presented else None
+    if not _finite(duration) or duration <= 0 or not _finite(last.get("mediaTime")) \
+            or not isinstance(first, dict) or not _finite(first.get("mediaTime")):
+        return _verdict(None, "hand-back media-time endpoints or source-frame duration are unreadable")
+    delta = first["mediaTime"] - last["mediaTime"]
+    source_frames = round(delta / duration)
+    detail = {
+        "lastUploadMediaTime": last["mediaTime"], "firstPresentedMediaTime": first["mediaTime"],
+        "deltaS": delta, "sourceFrameDurationS": duration, "sourceFrames": source_frames,
+        "maxSourceFrames": max_source_frames, "canvasLingerMs": record.get("canvasLingerMs"),
+        "frameGap": closed["frameIndex"] - last["frameIndex"], "dom": dom_values,
+    }
+    if delta < -1e-6:
+        return _verdict(False, "hand-back media time moved backwards", **detail)
+    return _verdict(source_frames <= max_source_frames,
+                    "hand-back exceeded the source-frame tolerance" if source_frames > max_source_frames else None,
+                    **detail)
 
 
 def score_labels_over_feed(record: Any) -> dict[str, Any]:
