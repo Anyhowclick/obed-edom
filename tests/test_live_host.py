@@ -3287,7 +3287,7 @@ def test_real_export_rate_warnings_come_from_probed_movie_fps(tmp_path, monkeypa
 
 
 # --- Dissolve cross-fade W6: the host placement grant (plan rev 17 §3.3) --------------------
-# The take freezes a movie with Chrome 154's snapped rule only when `window.__obedPlacement`
+# The take freezes a movie with Chrome 154/155's snapped rule only when `window.__obedPlacement`
 # reads "snap". The host grants it iff it launched Chrome itself, `Browser.getVersion` names a
 # qualified major and `SystemInfo.getInfo` reports GPU compositing; eligibility is decided before
 # anything exposes "snap" (r13 finding 2), the round trip and the commit are bound to the program
@@ -4009,7 +4009,8 @@ def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monk
         ("launch", {}, "snap", "granted", "enabled"),
         ("launch", {"product": "Chrome/154.0.8037.59"}, "snap", "granted", "enabled"),
         ("launch", {"product": "Chrome/153.0.7999.1"}, None, "unqualified-version", None),
-        ("launch", {"product": "Chrome/155.0.1.2"}, None, "unqualified-version", None),
+        ("launch", {"product": "Chrome/155.0.1.2"}, "snap", "granted", "enabled"),
+        ("launch", {"product": "Chrome/156.0.1.2"}, None, "unqualified-version", None),
         ("launch", {"product": "HeadlessChrome/1540.0.1.2"}, None, "unqualified-version", None),
         ("launch", {"product": "Chromium/154.0.8037.59"}, None, "unqualified-version", None),
         ("launch", {"product": None}, None, "version-unavailable", None),
@@ -4022,7 +4023,7 @@ def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monk
     ],
 )
 def test_placement_grant_matrix(tmp_path, monkeypatch, mode, attrs, grant, reason, gpu):
-    """Only a host-launched Chrome/HeadlessChrome 154 with GPU compositing is granted, after a
+    """Only a host-launched Chrome/HeadlessChrome 154 or 155 with GPU compositing is granted, after a
     round trip and a commit both bound to the program document's unique context. Every other
     case is decided before the page could ever read "snap": no round trip is sent, the page
     stays `invalid` and the report carries the reason. Attach mode (incl. managed OBS) still

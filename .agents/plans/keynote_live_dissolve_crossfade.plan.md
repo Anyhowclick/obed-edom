@@ -1107,6 +1107,7 @@ translation-only scene transforms, integer `left`/`top`, `sn` on the 1/DPR grid;
 - **Host grant (decision 15).**
   - *Version allowlist:* a Chrome auto-update to a new major means no grant (the reason is recorded) until that version is
     qualified (W1 adds it to `QUALIFIED_SNAP_MAJORS` after an `m-snap` run). A failure here is a skip, never a wrong freeze.
+    *2026-10-15:* Chrome auto-updated to 155.0.8059.79 (no grant, live Dissolves jumped to frame 0); 155 added after DX-1 + `m-snap` on 155, gate record `.agents/reviews/chrome155-requal/gates-r1.md`. The rev-17 text above (`(154,)`, §10 `Chrome/155` no-grant unit case) is history.
   - *Coverage limit:* a player-internal automatic transition that runs while the host's CDP connection is down, after a
     GPU-to-software fallback the host has not yet observed, would use a stale grant.
   - *Channel:* page code cannot set or keep a grant. A predefined getter needs code running before the host's first-run script
