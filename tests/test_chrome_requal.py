@@ -13,7 +13,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import chrome_requal as requal  # noqa: E402
 
-BASELINE = json.loads((REPO / ".agents/reviews/chrome155-requal/dx1-verdict.json").read_text())
+BASELINE = json.loads((REPO / "tests/fixtures/chrome_requal/verdict-155.0.8059.79.json").read_text())
 VERSION = "155.0.8059.79"
 
 

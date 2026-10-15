@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> int: ...
 ```
 
 - Use script constants `GATES`, `CORE_ARMS`, `SNAP_CELLS: dict[str, tuple[str, ...]]`, `ARMS`, and `DECISION_SHA256`; add only a small pacing helper if useful.
-- The constants are the committed baseline summary. Retain `.agents/reviews/chrome155-requal/dx1-verdict.json` as the measured 155 positive control for the 154/155 qualification bar; create no duplicate baseline JSON.
+- The constants are the committed baseline summary. The measured 155 positive control is the acceptance run's own `verdict.json`, committed as `tests/fixtures/chrome_requal/verdict-155.0.8059.79.json` (#285 pruned #284's `dx1-verdict.json` from `.agents/reviews/`).
 - `products` maps every selected non-raw arm (27) to its recorded product; a missing key detects an absent capture, twins included. `m-raw`'s presence is checked through `verdict['detail']`.
 - Save and report the original DX-1 verdict. Its overall INCONCLUSIVE is expected and does not determine qualification.
 
