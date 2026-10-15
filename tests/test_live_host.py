@@ -2613,7 +2613,7 @@ def ready(monkeypatch) -> None:
     [
         ("Chrome/127.0.6533.120", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.120 OBS/32.2.2 Safari/537.36", "cef"),
         ("Chrome/156.0.8100.10", "Mozilla/5.0 Chrome/156.0.8100.10 Safari/537.36", None),
-        ("Chrome/155.0.8059.40", "Mozilla/5.0 Chrome/155.0.8059.40 Safari/537.36", "chrome"),
+        ("Chrome/155.0.8059.79", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/155.0.0.0 Safari/537.36", "chrome"),
         ("Chrome/154.0.8037.59", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36", "chrome"),
     ],
 )
@@ -3760,9 +3760,10 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
         True, "classified", (),
     )
     monkeypatch.setattr(live_host, "classify_probe", lambda _data: classified)
+    pre_navigation_scripts = ("window.__probeOne = true;", "window.__probeTwo = true;")
     output = attach_host(
         tmp_path, monkeypatch, bridge="obs-managed", calibration=adapter,
-        server_factory=ProbeServer, output_rate=25,
+        server_factory=ProbeServer, output_rate=25, pre_navigation_scripts=pre_navigation_scripts,
     )
 
     observed = output.observe()
@@ -3819,6 +3820,10 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     output.transport_factory = reconnect_factory
     reconnected = output.observe()
     assert original.stopped and reconnected.output["placement"]["state"] == "probing"
+    assert FakeCdp.instances[-1].new_document_scripts == [
+        *pre_navigation_scripts,
+        live_host.placement_init_script(output._placement_token, mode="probe"),
+    ]
     reconnect_run = adapter.starts[-1]
     assert reconnect_run[0].connection_generation == 2
     reconnect_run[3].set_result(result(reconnect_run[0]))

@@ -1867,6 +1867,8 @@ class LiveOutputHost:
             replacement.start()
             try: version = replacement.call("Browser.getVersion", deadline_s=2.0)
             except Exception: version = None
+            for source in self._pre_navigation_scripts:
+                replacement.call("Page.addScriptToEvaluateOnNewDocument", deadline_s=2.0, source=source)
             replacement.call(
                 "Page.addScriptToEvaluateOnNewDocument",
                 deadline_s=2.0,

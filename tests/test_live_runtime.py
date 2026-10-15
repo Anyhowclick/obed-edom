@@ -360,6 +360,9 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # 7d9eb308...; the placement branch had 63c328b2... / 7b0af749... and rendering a117b3ee... / 2432c819....
 # The frac boundary repair replaces True e57025c3... / bff8f5ae...; False and rendering remain unchanged. Absorbing a
 # proved ancestor zero replaces True d3ddd770... / 1036a8e2... and rendering 8202717a... / c0faaa3c...; False unchanged.
+# Merging main #278–#287 into Stage B: True = main's 0c94dd74…/451d2473… plus the continuity take →
+# 0906c8a0…/896d4007… (was Stage B bf2c36d1…/6d3a3d91…). Rendering = main's 573d292b…/ecff39e1…
+# (Stage B's ae7f1040…/467fa332… included the take; rendering now excludes it). False unchanged.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
         True: "0906c8a0bab229b68e122d6fec884624567c2afe65b7086181f60f612f7d2ef3",
