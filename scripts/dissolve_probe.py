@@ -2700,6 +2700,7 @@ class Profile:
     overrides: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = ()
     mid_frames: int = MIN_MID_FRAMES
     placement: str | None = None
+    not_run: tuple[str, ...] = ()
 
     def arm(self, name: str, identity: bool | None = None) -> Arm:
         arm = ARMS[name]
@@ -2759,6 +2760,59 @@ CEF_PLACEMENT = Profile(
     ),
     mid_frames=5,
 )
+
+_DEV_RENDERER_ARMS = (
+    "opaque-off", "off", "noblend", "on2", "on", "m-snap-cef", "m-snap-cef-twin",
+    "wrongrule-cef", "wrongrule-cef-twin", "perfect-shift", "m-tone-cef", "m-tone-cef-twin",
+    "m-geo-scale", "m-paused-cef", "m-off-cef", "m-fg-cef", "m-hold-cef", "m-fg-omit-cef",
+    "m-fg-swap-cef", "m-snap-cef-underlay-omit",
+)
+_DEV_HARNESS_ARMS = (
+    *_DEV_RENDERER_ARMS,
+    "m-snap-cef-nooffset-x", "m-snap-cef-nooffset-x-twin",
+    "m-snap-cef-nooffset-y", "m-snap-cef-nooffset-y-twin", "m-geo-base", "m-snap-cef-dsk",
+)
+
+
+def _dev_overrides(arms: tuple[str, ...]) -> tuple[tuple[str, tuple[tuple[str, ...], ...]], ...]:
+    selected = set(arms)
+    return tuple(
+        (check, tuple(tuple(name for name in names if name.startswith("case:") or name in selected) for names in controls))
+        for check, controls in dict(CEF_PLACEMENT.overrides).items()
+    )
+
+
+CEF_PLACEMENT_DEV_RENDERER = Profile(
+    "CEF-placement-DEV-renderer", _DEV_RENDERER_ARMS,
+    reported=(*CEF_PLACEMENT.reported, "cost"), headless=False, lifecycle=False, placement="frac",
+    overrides=_dev_overrides(_DEV_RENDERER_ARMS), mid_frames=5, not_run=("cost",),
+)
+CEF_PLACEMENT_DEV_HARNESS = Profile(
+    "CEF-placement-DEV-harness", _DEV_HARNESS_ARMS,
+    reported=CEF_PLACEMENT.reported, headless=False, lifecycle=False, placement="frac",
+    overrides=_dev_overrides(_DEV_HARNESS_ARMS), mid_frames=5,
+)
+CEF_PLACEMENT_DEV_PROFILES = {
+    "renderer": CEF_PLACEMENT_DEV_RENDERER,
+    "harness": CEF_PLACEMENT_DEV_HARNESS,
+}
+
+
+def profile_coverage_problems(profile: Profile) -> list[str]:
+    problems = []
+    if not set(profile.not_run) <= set(profile.reported):
+        problems.append(f"not_run outside reported: {sorted(set(profile.not_run) - set(profile.reported))}")
+    for check, controls in profile.controls().items():
+        live_controls = [name for names in controls for name in names if not name.startswith("case:")]
+        missing = [name for name in live_controls if name not in profile.arms]
+        candidates = [name for name in profile.arms if profile.arm(name, False).expect.get(check) == "PASS"]
+        if missing:
+            problems.append(f"{check}: live controls outside profile: {missing}")
+        if not candidates:
+            problems.append(f"{check}: no live PASS candidate")
+    if not {"on", "on2"} <= set(profile.arms):
+        problems.append("cvc: on/on2 candidates missing")
+    return problems
 
 
 ANIM_STATES = ("idle", "running", "paused", "finished")
@@ -4109,6 +4163,8 @@ def score_round(scored: dict[str, dict[str, Any]], cal: Calibration = Calibratio
         verdict = "INCONCLUSIVE" if reasons or any(v not in ("PASS", "FAIL") for v in candidates.values()) else (
             "FAIL" if "FAIL" in candidates.values() else "PASS")
         gates[check] = {"verdict": verdict, "reasons": reasons, "candidates": candidates}
+    for check in profile.not_run:
+        gates[check] = {"verdict": "NOT RUN", "reasons": [f"{profile.name} does not run this family"], "candidates": {}}
     blocking = {"cvc": {"cvc": (extra.get("cvc") or {}).get("verdict")}}
     if profile.lifecycle:
         blocking["lifecycle"] = {n: {"MATCH": "PASS", "MISMATCH": "FAIL"}.get(s["outcome"], "INCONCLUSIVE")
@@ -4126,8 +4182,12 @@ def score_round(scored: dict[str, dict[str, Any]], cal: Calibration = Calibratio
     verdicts += ["FAIL" if o == "MISMATCH" else "INCONCLUSIVE" for o in arms.values() if o != "MATCH"]
     if missing:
         verdicts.append("INCONCLUSIVE")
+    coverage = profile_coverage_problems(profile) if profile in CEF_PLACEMENT_DEV_PROFILES.values() else []
+    if coverage:
+        verdicts.append("INCONCLUSIVE")
     overall = next((v for v in ("FAIL", "INCONCLUSIVE") if v in verdicts), "PASS" if verdicts else "INCONCLUSIVE")
-    return {"overall": overall, "gates": gates, "arms": arms, "missing": sorted(set(missing)), "profile": profile.name}
+    return {"overall": overall, "gates": gates, "arms": arms, "missing": sorted(set(missing)),
+            "profile": profile.name, "coverageProblems": coverage}
 
 
 def decode_rgba(data: str | bytes) -> np.ndarray:
@@ -4806,9 +4866,18 @@ class RunImages(Mapping):
 
     def __init__(self, folder: Path) -> None:
         self.paths = {p.stem: p for p in folder.glob("*.png")}
+        self.decode_s = 0.0
+        self.decode_bytes = 0
+        self.decode_count = 0
 
     def __getitem__(self, key: str) -> np.ndarray:
-        return np.asarray(Image.open(self.paths[key]).convert("RGBA"))
+        started = time.monotonic()
+        path = self.paths[key]
+        image = np.asarray(Image.open(path).convert("RGBA"))
+        self.decode_s += time.monotonic() - started
+        self.decode_bytes += path.stat().st_size
+        self.decode_count += 1
+        return image
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.paths)
@@ -4875,6 +4944,7 @@ def score_runs(runs: dict[str, tuple[dict[str, Any], Mapping[str, np.ndarray]]],
                cal: Calibration = Calibration(), *, profile: Profile = DX1, lut: np.ndarray | None = None) -> dict[str, Any]:
     """Score every run the profile names (DX-1 here; DX-2 passes `CEF` and `launch_lut`'s map) and the round. DX-1 reads
     `L_path` from the decision record; DX-2 never falls back to it (no launch map -> holder pixels INCONCLUSIVE)."""
+    started = time.monotonic()
     identity = None if not decision or "L" not in decision else decision["L"] == "identity"
     required = set(profile.required(identity))
     scored = {}
@@ -4901,6 +4971,12 @@ def score_runs(runs: dict[str, tuple[dict[str, Any], Mapping[str, np.ndarray]]],
         extra["matched"] = matched_report(frames("opaque-on"), frames("opaque-off"))
     verdict = score_round(scored, cal, identity=identity, extra=extra, profile=profile)
     verdict["detail"] = scored
+    verdict["timingS"] = {
+        "pixelScoring": round(time.monotonic() - started, 6),
+        "pngDecode": round(sum(getattr(images, "decode_s", 0.0) for _, images in runs.values()), 6),
+        "pngDecodeCount": sum(getattr(images, "decode_count", 0) for _, images in runs.values()),
+        "pngBytes": sum(getattr(images, "decode_bytes", 0) for _, images in runs.values()),
+    }
     return verdict
 
 

@@ -86,6 +86,47 @@ def test_main_refuses_while_the_mm_opacity_env_is_set(monkeypatch, tmp_path, cap
     assert "OBED_LIVE_MM_OPACITY is set" in capsys.readouterr().err
 
 
+def test_placement_cli_defaults_tiers_and_dev_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.delenv(q.GL_REPLAY_ENV, raising=False)
+    monkeypatch.delenv(q.MM_OPACITY_ENV, raising=False)
+    monkeypatch.setattr(q, "obs_running", lambda: False)
+    monkeypatch.setattr(q.binary_counter_movie, "verify_fixture", lambda _path: {})
+    preflights = []
+    monkeypatch.setattr(q, "placement_disk_preflight", lambda *args, **kwargs: preflights.append((args, kwargs)) or {})
+
+    class Awake:
+        def terminate(self) -> None: pass
+
+    monkeypatch.setattr(q.subprocess, "Popen", lambda *_args, **_kwargs: Awake())
+    calls = []
+
+    def run_take(arm, rate, take, _home, _out, args, _armed):
+        calls.append((arm, rate, take, args.tier, args.dev_profile))
+        return {"arm": arm, "rate": rate, "take": take, "ts": f"{rate}-{take}", "valid": True, "invalid": [],
+                "passed": args.tier == "full", **({"devPassed": True} if args.tier == "dev" else {}),
+                "gates": {}, "timingS": {}, "sessions": [], **q.placement_scope(args.tier, args.dev_profile)}
+
+    monkeypatch.setattr(q, "run_take", run_take)
+    monkeypatch.setattr(q, "placement_launch_record", lambda run: run)
+    monkeypatch.setattr(q, "placement_launch_set_check", lambda launches: {
+        "tier": launches[0]["tier"], "checks": [], "qualified": launches[0]["tier"] == "full",
+        "devPassed": launches[0]["tier"] == "dev"})
+    assert q.main(["--arm", "placement", "--out", str(tmp_path / "full")]) == 0
+    assert calls == [("placement", 25, 1, "full", None), ("placement", 30, 1, "full", None)]
+    assert preflights[-1][1]["rates"] == q.MMO_RATES and preflights[-1][0][2] == 1
+    calls.clear()
+    assert q.main(["--arm", "placement", "--tier", "dev", "--out", str(tmp_path / "dev")]) == 10
+    assert calls == [("placement", 25, 1, "dev", "renderer")]
+    assert "DEV — NOT A QUALIFICATION PASS" in capsys.readouterr().out
+    q.print_run({"arm": "placement", "rate": 25, "take": 1, "valid": True, "invalid": [], "passed": False,
+                 "devPassed": True, "launch": "hidden", "kb": None, "sessions": [], "checks": [], "gates": {}},
+                tmp_path / "dev-run.json")
+    assert "DEV — NOT A QUALIFICATION PASS" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        q.main(["--arm", "placement", "--rate", "25", "--out", str(tmp_path / "bad")])
+    assert exc.value.code == 2
+
+
 @pytest.mark.parametrize("n, want", [
     (0.0, (4.0, 2.0, 252.0)),
     (1.3, (4.0, 4.0, 250.0)),
@@ -188,6 +229,11 @@ def test_placement_capture_retries_only_for_sole_coverage_shortage_and_scores_ev
     )
     assert scored["verdict"] == "INCONCLUSIVE"
     assert [row["outcome"] for row in scored["detail"]["attempts"]] == ["MATCH", "INCONCLUSIVE"]
+    monkeypatch.setattr(q.dissolve_probe, "score_arm", lambda *_args, **_kwargs: {
+        "outcome": "MISMATCH", "problems": [], "mismatch": ["cost"]})
+    assert q.score_placement_capture_attempts(
+        run_dir, q.dissolve_probe.ARMS["m-snap-cef-dsk"], q.dissolve_probe.Calibration(), None
+    )["verdict"] == "FAIL"
 
     problem_rows = iter((
         {"midFrames": threshold - 1, "fitted": [],
@@ -212,7 +258,6 @@ def test_placement_capture_retries_only_for_sole_coverage_shortage_and_scores_ev
                         lambda *_args: pytest.fail("single-attempt arms do not need coverage scoring"))
     single = q.placement_session("m-snap-cef", {"shots": tmp_path}, None)
     assert single["runDir"] == str(tmp_path / "runs" / "m-snap-cef")
-
 
 @pytest.mark.parametrize("g2_mode, g2, missing", [("off", None, False), ("off", "IDLE", True), ("injected", "IDLE", False),
                                                     ("injected", None, True)])
@@ -1636,12 +1681,18 @@ class TestPrecheckA:
 class TestTiming:
     def test_timing_summary_keys(self) -> None:
         run = {"arm": "soak", "take": 1, "timingS": {"launch": 4.2, "quit": 3.1, "total": 400.0},
-               "sessions": [{"session": "soak", "timingS": {"script": 330.5, "decode": 20.25}},
-                            {"session": "soak-off", "timingS": {"script": 20.0, "decode": 0.0}}]}
+               "sessions": [{"session": "soak", "timingS": {"script": 330.5, "decode": 20.25, "preparation": 2.5}},
+                            {"session": "soak-off", "timingS": {"attempts": [
+                                {"script": 12.0, "recordingAnalysis": 1.25},
+                                {"script": 8.0, "recordingAnalysis": 0.75}], "decode": 0.0}}]}
         summary = q.timing_summary(run)
-        assert summary == {"arm": "soak", "take": 1, "launch": 4.2, "script": 350.5, "quit": 3.1, "decode": 20.25,
-                           "total": 400.0, "sessions": {"soak": {"script": 330.5, "decode": 20.25},
-                                                        "soak-off": {"script": 20.0, "decode": 0.0}}}
+        assert {key: summary[key] for key in ("arm", "take", "launch", "script", "quit", "obsRelease", "decode",
+                                               "preparation", "preparationNested", "recordingAnalysis", "total",
+                                               "exclusiveUnattributed")} == {
+            "arm": "soak", "take": 1, "launch": 4.2, "script": 350.5, "quit": 3.1, "obsRelease": 3.1,
+            "decode": 20.25, "preparation": None, "preparationNested": 2.5, "recordingAnalysis": 2.0,
+            "total": 400.0, "exclusiveUnattributed": 392.7}
+        assert summary["sessions"]["soak-off"]["attempts"][1]["script"] == 8.0
 
     def test_timing_summary_of_a_run_that_never_launched(self) -> None:
         summary = q.timing_summary({"arm": "g2", "take": 1, "timingS": {"quit": 0.5}, "sessions": []})
@@ -2120,7 +2171,10 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 (destination / "record.json").write_text(json.dumps({"placementCalibration": encoded}))
             for name in q.PLACEMENT_CONTROL_SESSIONS:
                 _placement_control(offline / "take-controls" / "runs", name)
-            assert q.score_placement_runs(offline) == 0
+            assert q.score_placement_runs(offline) == 1
+            offline_report = json.loads(max(offline.glob("placement-rescore-*.json")).read_text())
+            assert offline_report["qualified"] is False
+            assert checks_of({"checks": offline_report["launchSet"]["checks"]})["every placement launch complete"]["ok"] is False
             rgba = np.zeros((4, 4, 4), np.uint8)
             rgba[0, 0] = (255, 128, 0, 128)
             rgba_paths = []
@@ -2296,7 +2350,7 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=10 ** 15))
             disk = q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
             assert disk["recordings"] == (len(q.PLACEMENT_ARMS) + 2) * len(q.MMO_RATES) * 2
-            assert disk["retainedBytes"] == 0
+            assert disk["requiredOutBytes"] == 2 * q.PLACEMENT_RECORDING_ESTIMATE_BYTES
             monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=1))
             with pytest.raises(RuntimeError, match="placement needs about"):
                 q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
@@ -2304,3 +2358,176 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             large.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
             large_ref = q.dissolve_probe.placement_file_ref(large, tmp_path)
             assert q.dissolve_probe._placement_ref_bytes(large_ref, tmp_path, load=False) == b""
+
+
+def test_placement_rescore_launch_matrix_and_dev_relocation(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from test_dissolve_probe import H as SCORER_H, W as SCORER_W, media_run
+
+    monkeypatch.setattr(q.dissolve_probe, "VIEWPORT", (SCORER_W, SCORER_H))
+    score_calls: list[Path] = []
+
+    def score_control(_control: Any, run_dir: Path) -> dict[str, Any]:
+        return {"verdict": "PASS", "problems": [], "detail": {}}
+
+    def score_calibration(_calibration: Any, run_dir: Path, **_kwargs: Any) -> dict[str, Any]:
+        score_calls.append(Path(run_dir) / "record.json")
+        return {"overall": "PASS", "gates": {"probe-chrome-harness": {"verdict": "PASS"}}, "problems": []}
+
+    monkeypatch.setattr(q, "score_placement_control", score_control)
+    monkeypatch.setattr(q, "score_placement_calibration", score_calibration)
+
+    def write_record(folder: Path, body: dict[str, Any], images: dict[str, np.ndarray] | None = None) -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, image in (images or {}).items():
+            Image.fromarray(image).save(folder / f"{name}.png")
+        (folder / "record.json").write_text(json.dumps(body))
+
+    def build(root: Path, rate: int, token: int, *, tier: str = "full", dev_profile: str | None = None,
+              legacy: bool = False, launch_id: str | None = None, skip: tuple[str, ...] = (),
+              child_override: tuple[str, dict[str, Any]] | None = None, missing_dsk_attempt: bool = False,
+              valid: bool = True, renderer_images: bool = False, dev_passed: bool = True) -> None:
+        ts = f"{root.name}-{rate}-{token}"
+        launch = launch_id or f"{ts}:target-{token}"
+        profile = q.placement_profile(tier, dev_profile)
+        names = (*q.PLACEMENT_CONTROL_SESSIONS, "probe-chrome-gpu", "probe-chrome-software",
+                 *(name for name in q.PLACEMENT_ARMS if name in profile.arms))
+        runs = root / "shots" / f"placement-{ts}" / "runs"
+        scope = {} if legacy else q.placement_scope(tier, dev_profile)
+        acquisition = {} if legacy else {"acquisition": {
+            "launchId": launch, "rate": rate, "take": 1, **scope}}
+        engine = {"pid": token, "launch_date": float(token), "ready_generation": 1}
+        for name in names:
+            if name in skip:
+                continue
+            folder = runs / name
+            body: dict[str, Any] = {**scope, **acquisition}
+            images = None
+            if name in q.PLACEMENT_CONTROL_SESSIONS:
+                body["placementControl"] = {"session": name}
+            elif name.startswith("probe-chrome-"):
+                telemetry = folder / "placement" / "telemetry.json"
+                telemetry.parent.mkdir(parents=True, exist_ok=True)
+                telemetry.write_text(json.dumps({"chromeGpu": name.endswith("gpu")}))
+                body["placementCalibration"] = {
+                    "backend": "chrome-harness", "input": {"identity": {"target_id": f"{name}-{token}"}},
+                    "integrity": {"telemetry": q.dissolve_probe.placement_file_ref(telemetry, folder)},
+                }
+            else:
+                if renderer_images:
+                    body, images = media_run(name)
+                    body.update(scope)
+                    body.update(acquisition)
+                body.update(arm=name, placementCalibration={"backend": "cef", "engine": engine})
+                if q.dissolve_probe.ARMS[name].counter_strip == "distinct":
+                    attempt = folder / "attempt-1"
+                    parent = {"arm": name, **scope, **acquisition,
+                              "captureAttempts": [{"attempt": 1, "record": "attempt-1/record.json"}]}
+                    write_record(folder, parent)
+                    if not missing_dsk_attempt:
+                        write_record(attempt, body, images)
+                    continue
+            if child_override and name == child_override[0]:
+                body.update(child_override[1])
+            write_record(folder, body, images)
+        (root / "runs").mkdir(parents=True, exist_ok=True)
+        metadata = {"arm": "placement", "rate": rate, "take": 1, "ts": ts, "valid": valid,
+                    "invalid": [] if valid else ["not lossless: x"], "checks": [],
+                    "passed": valid and tier == "full", **({"devPassed": dev_passed} if tier == "dev" else {}),
+                    **({} if legacy else {"placementLaunchId": launch, **scope}),
+                    "decision": {"L": "identity"}}
+        (root / "runs" / f"placement-{ts}.json").write_text(json.dumps(metadata))
+
+    def aborted_summary(root: Path) -> None:
+        (root / "runs").mkdir(parents=True, exist_ok=True)
+        (root / "runs" / "placement-aborted.json").write_text(json.dumps({
+            "arm": "placement", "rate": 25, "take": 1, "ts": "aborted", "tier": "full",
+            "placementLaunchId": "aborted", "valid": False, "passed": False, "invalid": ["aborted"],
+            "checks": [],
+        }))
+
+    pair = ((25, 1), (30, 2))
+
+    def score_case(name: str, builds: list[dict[str, Any]], expected: int) -> Path:
+        root = tmp_path / name
+        for spec in builds:
+            build(root, **spec)
+        assert q.score_placement_runs(root) == expected
+        return root
+
+    score_case("complete-pair", [{"rate": rate, "token": token} for rate, token in pair], 0)
+    score_case("legacy-pair", [{"rate": rate, "token": token, "legacy": True} for rate, token in pair], 0)
+    score_case("missing-rate", [{"rate": 25, "token": 1}], 1)
+    score_case("duplicate-launch-id", [
+        {"rate": 25, "token": 1, "launch_id": "duplicate"},
+        {"rate": 30, "token": 2, "launch_id": "duplicate"},
+    ], 1)
+    score_case("missing-chrome-gpu", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2, "skip": ("probe-chrome-gpu",)},
+    ], 1)
+    score_case("dev-child-in-full", [
+        {"rate": 25, "token": 1},
+        {"rate": 30, "token": 2, "child_override": ("on", {"tier": "dev", "devProfile": "renderer"})},
+    ], 1)
+    score_case("dev-launch-and-full-pair", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2},
+        {"rate": 25, "token": 3, "tier": "dev", "dev_profile": "renderer"},
+    ], 1)
+    aborted = score_case("summary-only-aborted", [{"rate": rate, "token": token} for rate, token in pair], 0)
+    aborted_summary(aborted)
+    assert q.score_placement_runs(aborted) == 1
+    score_case("missing-dsk-attempt", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2, "missing_dsk_attempt": True},
+    ], 1)
+    invalid = score_case("invalid-run", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2, "valid": False},
+    ], 1)
+    invalid_report = json.loads(max(invalid.glob("placement-rescore-*.json")).read_text())
+    assert invalid_report["productControlPassed"] is True and invalid_report["qualified"] is False
+    score_case("two-takes-one-invocations", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2},
+        {"rate": 25, "token": 3}, {"rate": 30, "token": 4},
+    ], 0)
+
+    def pass_renderer_round(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"gates": {}, "arms": {}, "overall": "PASS", "missing": [], "profile": "test"}
+
+    monkeypatch.setattr(q.dissolve_probe, "score_runs", pass_renderer_round)
+    score_calls.clear()
+    dev = score_case("dev-single", [{
+        "rate": 25, "token": 1, "tier": "dev", "dev_profile": "renderer", "renderer_images": True,
+    }], 10)
+    assert len(score_calls) == len(set(score_calls))
+    dev_rescored = score_case("dev-recorded-fail-rescore-pass", [{
+        "rate": 25, "token": 1, "tier": "dev", "dev_profile": "renderer", "renderer_images": True,
+        "dev_passed": False,
+    }], 10)
+    dev_rescored_report = json.loads(max(dev_rescored.glob("placement-rescore-*.json")).read_text())
+    assert dev_rescored_report["renderer"][0]["recordedDevPassed"] is False
+    assert dev_rescored_report["devPassed"] is True and dev_rescored_report["qualified"] is False
+    relocated = tmp_path / "dev-relocated"
+    shutil.move(dev, relocated)
+    score_calls.clear()
+    assert q.score_placement_runs(relocated) == 10
+    assert len(score_calls) == len(set(score_calls))
+    renderer_dir = relocated / "shots" / "placement-dev-single-25-1" / "runs" / "opaque-off"
+    renderer_record = json.loads((renderer_dir / "record.json").read_text())
+    required_renderer_png = renderer_dir / f"{renderer_record['shots'][0]['name']}.png"
+    required_renderer_png.unlink()
+    assert q.score_placement_runs(relocated) == 1
+    report = json.loads(max(relocated.glob("placement-rescore-*.json")).read_text())
+    assert report["renderer"][0]["verdict"] == "INCONCLUSIVE" and report["qualified"] is False
+
+    dev_rates = score_case("dev-across-rates", [
+        {"rate": 25, "token": 1, "tier": "dev", "dev_profile": "renderer", "renderer_images": True},
+        {"rate": 30, "token": 2, "tier": "dev", "dev_profile": "renderer", "renderer_images": True},
+    ], 10)
+    assert json.loads(max(dev_rates.glob("placement-rescore-*.json")).read_text())["qualified"] is False
+
+    dev_fallback = tmp_path / "dev-mixed-profile-no-summary"
+    build(dev_fallback, 25, 1, tier="dev", dev_profile="renderer",
+          child_override=("on", {"devProfile": "harness"}))
+    next((dev_fallback / "runs").glob("placement-*.json")).unlink()
+    assert q.score_placement_runs(dev_fallback) == 1
+    fallback_report = json.loads(max(dev_fallback.glob("placement-rescore-*.json")).read_text())
+    assert fallback_report["tier"] == "dev" and fallback_report["qualified"] is False
