@@ -9,9 +9,9 @@ the qualifying run is `cef-placement-live-2026-10-14/live6` (25 fps ×2, 30 fps 
 
 1. **DeckLink field test** with a configured device: Keyer output → Recalibrate, then a movie-slide freeze. The configured-device
    `decklink_preview_output` response is untested (the precheck only knows the no-device 600 response).
-2. **Qualification run time** (~45 min for both rates): the measured plan for ~22 min needs a §5/§11.6 evidence-model change (three
-   genuine calibration anchors, other rows with harness-injected grants, shared invariant controls) — owner sign-off first. No
-   committed fast tier (owner). One rate: a scratch wrapper setting `managed_obs_qualify.MMO_RATES` (kept as
+2. **Qualification run time** (~45 min per 25+30 pair today): restructure approved by the owner 2026-10-15 — plan
+   `.agents/plans/keynote_live_obs_run_restructure.plan.md` rev 3 (DEV tier, one-pair `--takes 1`, three anchors + injected grants;
+   target ≈22 min). One rate today: a scratch wrapper setting `managed_obs_qualify.MMO_RATES` (kept as
    `cef-placement-live-2026-10-14/live6/qualify_rates.py`).
 3. W5 tone map / non-identity application (the take stays identity; `tone` is REPORTED). DX-1 `cut` capture timing (dissolve
    follow-ups; `cut` REPORTED). Frac letterbox-offset rounding: the frac quad rounds `cy-r.top`; no arm checks frac pixels with a
