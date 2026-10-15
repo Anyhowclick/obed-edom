@@ -221,8 +221,32 @@ def _codec_display(entry: dict[str, Any] | None) -> str:
     return entry["codec"] or "unreadable"
 
 
+def movie_codec_refusal(runtime: dict[str, Any], codecs: list[dict[str, Any]], *, attach: bool, headless: bool, managed: bool) -> str | None:
+    codec_by_asset = {entry["asset"]: entry for entry in codecs}
+    for movie in runtime["movies"].values():
+        asset = movie["assetKeys"][0]
+        entry = codec_by_asset.get(asset)
+        family = entry["family"] if entry is not None else "other"
+        if family == "vp9":
+            return f"movie continuity does not support VP9 movies: {asset} ({_codec_display(entry)})"
+        if not _codec_supported(family, attach=attach, headless=headless, managed=managed):
+            return f"movie codec is not playable in this output: {asset} ({_codec_display(entry)})"
+    return None
+
+
+def is_sixteen_nine(width: int, height: int) -> bool:
+    return width * 9 == height * 16
+
+
 class LiveHostError(RuntimeError):
     """The owned browser cannot provide an observed player state."""
+
+
+def gl_replay_env_preference(*, managed: bool) -> str:
+    value = os.environ.get(GL_REPLAY_ENV, "").strip().lower()
+    if value not in ("", "off", "auto"):
+        raise LiveHostError("OBED_LIVE_GL_REPLAY must be off or auto.")
+    return value or ("auto" if managed else "off")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -1302,24 +1326,14 @@ class LiveOutputHost:
         if isinstance(derived, Unsupported):
             return "unsupported", derived.reason, None
         plan, runtime = derived
-        codec_by_asset = {entry["asset"]: entry for entry in self._codec_report}
-        attach = self._attach_endpoint is not None
-        for movie in runtime["movies"].values():
-            asset = movie["assetKeys"][0]
-            entry = codec_by_asset.get(asset)
-            family = entry["family"] if entry is not None else "other"
-            if family == "vp9" or not _codec_supported(
-                family, attach=attach, headless=self.headless, managed=self._managed_obs
-            ):
-                display = _codec_display(entry)
-                if self._gl_replay_mode == "injected":
-                    self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
-                reason = (
-                    f"movie continuity does not support VP9 movies: {asset} ({display})"
-                    if family == "vp9"
-                    else f"movie codec is not playable in this output: {asset} ({display})"
-                )
-                return "unsupported", reason, None
+        reason = movie_codec_refusal(
+            runtime, self._codec_report, attach=self._attach_endpoint is not None,
+            headless=self.headless, managed=self._managed_obs,
+        )
+        if reason is not None:
+            if self._gl_replay_mode == "injected":
+                self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
+            return "unsupported", reason, None
         self._continuity_not_carried = not_carried(plan, self.slides)
         self._continuity_plan_sha256 = plan_signature(runtime)
         if self._attach_endpoint:
@@ -1462,10 +1476,7 @@ class LiveOutputHost:
         if self._gl_replay_request is not _UNSET:
             self._gl_replay_preference = self._gl_replay_request
         else:
-            env_gl_replay = os.environ.get(GL_REPLAY_ENV, "").strip().lower()
-            if env_gl_replay not in ("", "off", "auto"):
-                raise LiveHostError("OBED_LIVE_GL_REPLAY must be off or auto.")
-            self._gl_replay_preference = env_gl_replay or ("auto" if self._managed_obs else "off")
+            self._gl_replay_preference = gl_replay_env_preference(managed=self._managed_obs)
         if self._mm_opacity_request is not _UNSET:
             self._mm_opacity_preference = self._mm_opacity_request
         else:
@@ -2532,7 +2543,7 @@ class LiveOutputHost:
             height = int(header["slideHeight"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise LiveHostError("Prepared export has no valid 16:9 header.") from exc
-        if width * 9 != height * 16:
+        if not is_sixteen_nine(width, height):
             raise LiveHostError("Prepared export is not 16:9.")
         if header.get("showMode") != 0:
             raise LiveHostError("Prepared export is not in manual presentation mode.")

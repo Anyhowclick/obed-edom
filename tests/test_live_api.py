@@ -186,7 +186,7 @@ def client_for(tmp_path, monkeypatch, engine=None, events=None, player=OLD_PLAYE
     monkeypatch.setattr(live, 'safe_export_file', lambda *_: thumb)
     monkeypatch.setattr(live, 'file_sha256', lambda *_: player)
     monkeypatch.setattr(live, 'load_header', lambda *_: ({'slideWidth': 1920, 'slideHeight': 1080, 'showMode': 0}, 'header.json'))
-    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=()), {}))
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=()), {'movies': {}}))
     claims, releases = [], []
     events = events if events is not None else []
 
@@ -747,7 +747,7 @@ def test_deck_qualification_reports_continuity_and_conversions_without_starting_
     monkeypatch.delenv('OBED_LIVE_CONTINUITY', raising=False)
     refusal = {'fromPlayer': 0, 'toPlayer': 1, 'atScene': 2, 'asset': 'vid-20250608-wa0125.mp4', 'movieKey': 'm1',
                'objectId': 'instance-without-runtime-entry', 'code': 'R11', 'reason': 'R11: unmeasured export shape'}
-    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=(refusal,)), {}))
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=(refusal,)), {'movies': {}}))
     job.result['slides'].append({'originalOrdinal': 2, 'playerIndex': 1, 'skipped': False})
     converted = [
         {'path': f'assets/{folder}/assets/untitled.mov', 'asset': 'untitled.mov', 'sourceCodec': 'HEVC',
@@ -840,13 +840,17 @@ def test_unsupported_continuity_is_reported_and_never_blocks_start(tmp_path, mon
     assert len(claims) == 1
 
 
-@pytest.mark.parametrize('invalid', ['player', 'canvas', 'mode', 'media', 'slides'])
+@pytest.mark.parametrize('invalid', ['player', 'canvas', 'near-canvas', 'mode', 'media', 'slides'])
 def test_qualification_uses_same_export_checks_as_start(tmp_path, monkeypatch, invalid):
     client, _, _, job, adapters, _ = client_for(tmp_path, monkeypatch)
     if invalid == 'player':
         job.result['manifest']['playerDigest'] = 'changed'
     elif invalid in ('canvas', 'mode'):
         header = {'slideWidth': 7680 if invalid == 'canvas' else 1920, 'slideHeight': 1080, 'showMode': 1 if invalid == 'mode' else 0}
+        monkeypatch.setattr(live, 'load_header', lambda *_: (header, 'header.json'))
+    elif invalid == 'near-canvas':
+        # Within 0.001 of 16:9 but not exact; the host's export check refuses it.
+        header = {'slideWidth': 1366, 'slideHeight': 768, 'showMode': 0}
         monkeypatch.setattr(live, 'load_header', lambda *_: (header, 'header.json'))
     elif invalid == 'media':
         job.result['slides'][0]['unsupportedMedia'] = ['remote video']
@@ -859,6 +863,31 @@ def test_qualification_uses_same_export_checks_as_start(tmp_path, monkeypatch, i
     assert not adapters
 
 
+@pytest.mark.parametrize(('gl_replay', 'family', 'status', 'expected'), [
+    ('', 'h264', 200, {'mode': 'qualified', 'reason': None, 'notCarried': []}),
+    ('sometimes', 'h264', 409, 'OBED_LIVE_GL_REPLAY must be off or auto.'),
+    (None, 'vp9', 200, {'mode': 'unsupported', 'reason': 'movie continuity does not support VP9 movies: keyed.webm (vp09)',
+                        'notCarried': []}),
+])
+def test_qualification_reports_the_continuity_the_host_loads(tmp_path, monkeypatch, gl_replay, family, status, expected):
+    """A blank GL replay env falls back to the default and an invalid one refuses the load, as in the host;
+    a carried movie the host cannot carry (here VP9 alpha) makes continuity unsupported rather than qualified."""
+    client, _, _, _, _, _ = client_for(tmp_path, monkeypatch)
+    monkeypatch.delenv('OBED_LIVE_CONTINUITY', raising=False)
+    if gl_replay is None:
+        monkeypatch.delenv('OBED_LIVE_GL_REPLAY', raising=False)
+    else:
+        monkeypatch.setenv('OBED_LIVE_GL_REPLAY', gl_replay)
+    runtime = {'movies': {'m1': {'assetKeys': ['keyed.webm']}}}
+    monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=()), runtime))
+    codec = 'vp09' if family == 'vp9' else 'avc1'
+    monkeypatch.setattr(live, 'codec_report', lambda *args, **kwargs: [
+        {'asset': 'keyed.webm', 'codec': codec, 'family': family, 'files': 1}], raising=False)
+    response = client.get('/api/live/decks/prepared/qualification')
+    assert response.status_code == status
+    assert response.json().get('continuity', response.json().get('detail')) == expected
+
+
 def test_keyer_qualification_uses_gl_plan_and_native_fallback(tmp_path, monkeypatch):
     client, _, _, _, _, _ = client_for(tmp_path, monkeypatch)
     settings_mod.save_settings({'akOutputMode': 'keyer'}, validate_dir=False)
@@ -868,7 +897,7 @@ def test_keyer_qualification_uses_gl_plan_and_native_fallback(tmp_path, monkeypa
 
     def derive(*args, **kwargs):
         calls.append(kwargs.get('gl_replay', False))
-        return live.Unsupported('no GL plan') if kwargs.get('gl_replay') else (SimpleNamespace(refusals=()), {})
+        return live.Unsupported('no GL plan') if kwargs.get('gl_replay') else (SimpleNamespace(refusals=()), {'movies': {}})
 
     monkeypatch.setattr(live, 'derive_runtime', derive)
     assert client.get('/api/live/decks/prepared/qualification').json()['continuity']['mode'] == 'qualified'
