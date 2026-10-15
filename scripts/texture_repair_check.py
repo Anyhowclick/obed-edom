@@ -3,9 +3,9 @@
 
 g1 (offline): every known export is copied to a temp dir (header, player, slide JSON/JSONP, PDF/PDFP only), run through
 `preview_textures.json_hits` and `repair_textures`, and compared with the plan's expected outcome table.
-The two F2 rows are pinned by source and export-tree SHA-256, pass source_path/source_digest to repair, and label
-F2/synthetic-357 "synthetic defect, real chain/donor"; post-repair invariants are checked, while a missing or mismatched
-pin or PreviewStale makes g1 INCONCLUSIVE (exit 3).
+The F2 row is pinned by source and export-tree SHA-256, passes source_path/source_digest to repair, and covers both
+collided maps in the real export; post-repair invariants are checked, while a missing or mismatched pin or PreviewStale
+makes g1 INCONCLUSIVE (exit 3).
 
 g2 (headless, continuity off, GL replay off): a temp copy of the Alpha 7e3c export with movies is repaired (unless
 `--no-repair`) and driven through `LiveOutputHost`:
@@ -54,10 +54,13 @@ ALPHA_3B9019 = "3b9019f068d8ef1c14e586c86e75274a2bebad3c65116fd2247362ed9f39a7e3
 MINIMAL_59CB = "59cb220d674317326e710ccdc7d65fe1d7e473c83646227d2f691e6373d6fa0c"
 F2_SOURCE = Path.home() / "Desktop" / "Convert wall to 16x9 CGs" / "F2.key"
 F2_EXPORT = F2_SOURCE.with_name("F2-html")
-F2_SOURCE_SHA256 = "9fc882c130dffd2d600d816d98f97ea01a2f3a1e38ae9ef4127254c6296a55e1"
-F2_EXPORT_TREE_SHA256 = "25495ad190eacdfe298310be41e2400f911e8acb8e92a3ef07ec2889edfe428f"
-F2_WINNER = "DF3DB700EEDF01B099F884EDCEAB50D3"
-F2_OTHER_MAP = "B37026D59346E052B9E3697C923C552D"
+F2_SOURCE_SHA256 = "6fea812c38a43f239ab8cd9101bfe9c8ac550596ae8b01dd6ca05fef8ddb0022"
+F2_EXPORT_TREE_SHA256 = "a2c7fd9a19f3caee02595fe8a639a5f8be8dfb319385c838f89caf557dd6647a"
+F2_EXPECTED_REPAIRS = (
+    (4, "D2", 11, "B37026D59346E052B9E3697C923C552D"),
+    (4, "D2", 12, "DF3DB700EEDF01B099F884EDCEAB50D3"),
+)
+F2_COLLIDING_IDS = {donor_id for _ordinal, _rule, _page, donor_id in F2_EXPECTED_REPAIRS}
 G1_FIXTURES = ("alpha-dsk-textures", "qual-decks", "p2-recovery", "p2-binary", "p2-loop", "p2-loop-grey", "p2-soak-loop", "gl-decks")
 UNNAMED_FIXTURES = ("minimal-alpha-dsk-17c0c938",)
 REFUSAL_3B9019 = (
@@ -69,8 +72,7 @@ EXPECT: dict[str, dict[str, Any]] = {
     "qual-decks/D2/html-unmodified": {"kind": "repaired", "rules": {"D3": 2}},
     "qual-decks/D2/html-unmodified.across-first-build": {"kind": "repaired", "rules": {"D3": 1}},
     "preview/3b9019": {"kind": "refused", "message": REFUSAL_3B9019},
-    "F2": {"kind": "repaired", "rules": {"D2": 1}},
-    "F2/synthetic-357": {"kind": "repaired", "rules": {"D2": 2}},
+    "F2": {"kind": "repaired", "rules": {"D2": 2}},
 }
 DEFAULT_EXPECT = {"kind": "0 hits"}
 CLEAN_EXPORTS = (
@@ -119,7 +121,7 @@ def export_slides(root: Path) -> tuple[list[dict[str, Any]], str]:
 
 
 def g1_exports() -> list[tuple[str, Path]]:
-    exports = [("F2", F2_EXPORT), ("F2/synthetic-357", F2_EXPORT)]
+    exports = [("F2", F2_EXPORT)]
     tops = [(name, fixture(name)) for name in G1_FIXTURES] + [(name, main_checkout() / "output" / "fixtures" / name) for name in UNNAMED_FIXTURES]
     for name, top in tops:
         if not top.is_dir():
@@ -170,33 +172,6 @@ def f2_manifest_slides(root: Path) -> list[dict[str, Any]]:
     ]
 
 
-def inject_f2_357(root: Path, slides: list[dict[str, Any]]) -> dict[str, Any]:
-    slide = next(item for item in slides if item["originalOrdinal"] == 4)
-    uuid = slide["exportedUuid"]
-    folder = root / "assets" / uuid
-    json_path = folder / f"{uuid}.json"
-    jsonp_path = folder / f"{uuid}.jsonp"
-    before = {"json": file_sha256(json_path), "jsonp": file_sha256(jsonp_path)}
-    payload = read_jsonish(json_path)
-    node = payload["events"][0]["baseLayer"]["layers"][3]["layers"][0]["layers"][0]
-    if node.get("texture") != F2_OTHER_MAP or not {F2_OTHER_MAP, F2_WINNER} <= set(payload["assets"]):
-        raise PreviewError("F2 synthetic mutation no longer matches the pinned slide-4 field")
-    node["texture"] = F2_WINNER
-    json_path.write_text(json.dumps(payload, ensure_ascii=True, separators=(",", ":")), encoding="utf-8")
-    jsonp_path.write_text(
-        f"local_slide( {json.dumps({'name': uuid, 'json': payload}, ensure_ascii=True, separators=(',', ':'))} )",
-        encoding="utf-8",
-    )
-    return {
-        "label": "synthetic defect, real chain/donor",
-        "field": "events/0/baseLayer/layers/3/layers/0/layers/0/texture",
-        "from": F2_OTHER_MAP,
-        "to": F2_WINNER,
-        "before": before,
-        "after": {"json": file_sha256(json_path), "jsonp": file_sha256(jsonp_path)},
-    }
-
-
 def outcome_of(record: dict[str, Any]) -> dict[str, Any]:
     if "skipped" in record:
         return {"kind": "skipped", "reason": record["skipped"]}
@@ -234,7 +209,6 @@ def f2_checks(
     blind_before: list[Any],
     winner_before: set[str],
     plan_before: Any,
-    synthetic: bool,
 ) -> dict[str, Any]:
     from obed_edom import preview_textures
 
@@ -244,9 +218,6 @@ def f2_checks(
         (entry["ordinal"], entry["rule"], entry["donor"]["page"], entry["donor"]["id"])
         for entry in record["repaired"]
     )
-    exact = [(4, "D2", 15, F2_WINNER)] + (
-        [(4, "D2", 14, F2_OTHER_MAP)] if synthetic else []
-    )
     slide_four = next(slide for slide in loaded_after if slide.ordinal == 4)
     repaired_leaves = {
         leaf
@@ -254,7 +225,7 @@ def f2_checks(
         if entry["ordinal"] == 4
         for leaf in entry["leaves"]
     }
-    winner_after = {leaf.key for leaf in slide_four.leaves if leaf.texture == F2_WINNER}
+    winner_after = {leaf.key for leaf in slide_four.leaves if leaf.texture in F2_COLLIDING_IDS}
     json_pairs = all(
         not (jsonp := slide.json_path.with_suffix(".jsonp")).is_file()
         or read_jsonish(jsonp).get("json") == slide.payload
@@ -266,7 +237,7 @@ def f2_checks(
         for slide in loaded_after
     )
     checks = {
-        "exactRepairs": actual == sorted(exact),
+        "exactRepairs": actual == sorted(F2_EXPECTED_REPAIRS),
         "fullDetectorHits": [
             f"slide {loaded_after[hit.slide].ordinal} {hit.rule} {hit.leaf.key}"
             for hit in full_hits
@@ -292,7 +263,7 @@ def run_g1(out: Path) -> int:
         row: dict[str, Any] = {"export": label, "root": str(root)}
         before = after = None
         expected = EXPECT.get(label, DEFAULT_EXPECT)
-        is_f2 = label in ("F2", "F2/synthetic-357")
+        is_f2 = label == "F2"
         if is_f2 and (not F2_SOURCE.is_file() or not (root / "assets" / "header.json").is_file()):
             row.update(
                 outcome={"kind": "inconclusive", "message": "pinned F2 source or export is missing"},
@@ -330,16 +301,13 @@ def run_g1(out: Path) -> int:
                     with tempfile.TemporaryDirectory(prefix="texture-g1-") as tmp:
                         copy = Path(tmp) / "html"
                         copy_minimal(root, copy)
-                        injection = inject_f2_357(copy, slides) if label == "F2/synthetic-357" else None
-                        if injection is not None:
-                            row["injection"] = injection
                         loaded_before = preview_textures._load(copy, slides)
                         blind_before = [preview_textures._fingerprint(slide.payload) for slide in loaded_before]
                         winner_before = None
                         if is_f2:
                             slide_four = next(slide for slide in loaded_before if slide.ordinal == 4)
                             winner_before = {
-                                leaf.key for leaf in slide_four.leaves if leaf.texture == F2_WINNER
+                                leaf.key for leaf in slide_four.leaves if leaf.texture in F2_COLLIDING_IDS
                             }
                         plan_before = (
                             derive_plan(copy, slides, resolver=lambda base, relative: base / relative)
@@ -379,7 +347,6 @@ def run_g1(out: Path) -> int:
                                     blind_before,
                                     winner_before,
                                     plan_before,
-                                    synthetic=label == "F2/synthetic-357",
                                 )
                         except PreviewStale as exc:
                             row.update(

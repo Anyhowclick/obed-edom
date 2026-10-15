@@ -16,8 +16,9 @@ Branch `claude/texture-mm-image-graft` (from main `25849a82`, incl. #277). Plan 
 | G1 offline corpus (`scripts/texture_repair_check.py g1`; `g1-result.json`) | **PASS** |
 | Full suite, Python 3.13.11 (worktree venv) | 10882 passed, 38 skipped, 1 xfailed |
 | Full suite, Python 3.10.10 floor | 10882 passed, 38 skipped, 1 xfailed |
-| G2 live prepare (F2 + Alpha_DSK) | pending (Keynote, owner-run) |
-| G3 owner eye on repaired F2 copy | pending |
+| G2 live prepare (F2 + Alpha_DSK), 2026-10-15, owner-run, cache outside every `output/` | Alpha_DSK **ready**: D4×1 repaired, slide 8. F2 **refused**: slide 4, a 33×135 *text* glyph of the per-character Twist & Scale build. Out of scope (text, no D1 identity); new issue. |
+| G3 owner eye on the repaired F2 copy (stock + patched player) | **PASS for the repair**: correct Malaysia map in place of the squashed Asia map. Owner also saw two duplicate small maps after MM 3→4 in both players. A JSON diff shows the repair changed only the Malaysia leaf id, so this is a separate, pre-existing MM end-of-transition bug, tracked separately. |
+| Re-export after the owner's deck edit (F2.key `6fea812c…`, export tree `a2c7fd9a…`) | Keynote collided **both** maps for real. The new route repaired both (D2, slide 3 pages 11 and 12; corr 0.996 / 0.985). G1 re-pinned to this export. |
 
 G1 rows:
 - **F2:** 1 hit → D2×1 → 0 hits.
