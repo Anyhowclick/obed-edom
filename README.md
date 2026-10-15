@@ -327,10 +327,10 @@ image)`); re-export the deck. A cached export without a current
 Every session still probes each movie the export references (reading its box
 tree directly, no ffprobe) and reports it on `output.codecs`;
 `output.codecWarnings` flags any that may not play in the current output. HEVC
-(`hvc1`/`hev1`) and VP9 are attempted only in headful launch mode — never headless
-launch or an attach output. VP9 remains unsupported for movie continuity. A deck's
-continuity plan reports `unsupported` if it needs such a movie, while ordinary
-unqualified playback warns and proceeds.
+(`hvc1`/`hev1`) is attempted only in headful launch mode. VP9 is also supported in
+managed OBS, but not headless launch or external attach. VP9 remains unsupported
+for movie continuity. A deck's continuity plan reports `unsupported` if it needs
+such a movie, while ordinary unqualified playback warns and proceeds.
 
 Residuals:
 

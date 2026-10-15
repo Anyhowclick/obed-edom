@@ -748,8 +748,8 @@ for the parked `iwa-surgical-write-generator` feature.
   `converted[]`: `path`, `asset`, `sourceCodec`, `targetCodec` (absent = H.264), `sourceSha256`, `sha256`, `bytes`).
   Non-ProRes alpha, alpha with rotation/edits or audio, HEVC whose transparency cannot be checked, odd dimensions or
   unreadable timing fail the prepare (`PreviewError` naming every movie); never flatten alpha. `load_cached` reuses a
-  cache only when `preview_movies.unconverted` is empty. VP9 plays in headful launch only (warns elsewhere, owner
-  2026-10-15) and is refused for continuity. The host codec gate stays for exports that bypass the prepare.
+  cache only when `preview_movies.unconverted` is empty. VP9 plays in headful launch and managed OBS (CEF alpha
+  probe 2026-10-15; warns elsewhere) and is refused for continuity. The host codec gate stays for exports that bypass the prepare.
 * **Prepare-time texture repair (Stage T).** `apply_preview` runs `preview_textures.repair_textures` right after
   `manifest_from_export`, before `convert_movies`, on the cached export only (never the `.key`). It fixes Keynote's
   per-slide texture-id mis-mapping (a leaf pointing at another object's page: R1/R1b JSON size checks, R4/R6 pixel

@@ -2008,12 +2008,17 @@ def test_h264_movie_qualifies_with_no_codec_warning(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("attach", "headless", "supported"),
-    [(False, False, True), (False, True, False), (True, False, False), (True, True, False)],
-    ids=["headful-launch", "headless-launch", "headful-attach", "headless-attach"],
+    ("attach", "headless", "managed", "supported"),
+    [
+        (False, False, False, True),
+        (False, True, False, False),
+        (True, False, False, False),
+        (True, False, True, True),
+    ],
+    ids=["headful-launch", "headless-launch", "external-attach", "managed-obs"],
 )
-def test_vp9_ordinary_playback_support_is_mode_based(attach, headless, supported):
-    assert live_host._codec_supported("vp9", attach=attach, headless=headless) is supported
+def test_vp9_ordinary_playback_support_is_mode_based(attach, headless, managed, supported):
+    assert live_host._codec_supported("vp9", attach=attach, headless=headless, managed=managed) is supported
 
 
 def test_unplanned_hevc_movie_does_not_block_continuity_but_warns(tmp_path, monkeypatch):

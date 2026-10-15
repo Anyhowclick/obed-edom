@@ -200,14 +200,16 @@ def _continuity_scripts(plan: dict[str, Any], canvas: dict[str, int]) -> str:
     return _continuity_plan_script(plan, canvas) + _continuity_core_script()
 
 
-def _codec_supported(family: str, *, attach: bool, headless: bool) -> bool:
-    """h264 plays everywhere. HEVC and VP9 are attempted only in headful launch: headless
-    Chrome and OBS CEF decode is unqualified, so they warn. Everything else, including ProRes,
-    is unsupported."""
+def _codec_supported(family: str, *, attach: bool, headless: bool, managed: bool = False) -> bool:
+    """h264 plays everywhere. HEVC plays only in headful launch; VP9 also in managed OBS
+    (CEF alpha probe 2026-10-15). Headless Chrome and external attach are unqualified, so they
+    warn. Everything else, including ProRes, is unsupported."""
     if family == "h264":
         return True
-    if family in ("hevc", "vp9"):
+    if family == "hevc":
         return not attach and not headless
+    if family == "vp9":
+        return managed or (not attach and not headless)
     return False
 
 
@@ -1278,7 +1280,9 @@ class LiveOutputHost:
         warnings = [
             f"{entry['asset']} ({_codec_display(entry)}) may not play in this output"
             for entry in report
-            if not _codec_supported(entry["family"], attach=attach, headless=self.headless)
+            if not _codec_supported(
+                entry["family"], attach=attach, headless=self.headless, managed=self._managed_obs
+            )
         ]
         return report, warnings
 
@@ -1304,7 +1308,9 @@ class LiveOutputHost:
             asset = movie["assetKeys"][0]
             entry = codec_by_asset.get(asset)
             family = entry["family"] if entry is not None else "other"
-            if family == "vp9" or not _codec_supported(family, attach=attach, headless=self.headless):
+            if family == "vp9" or not _codec_supported(
+                family, attach=attach, headless=self.headless, managed=self._managed_obs
+            ):
                 display = _codec_display(entry)
                 if self._gl_replay_mode == "injected":
                     self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
