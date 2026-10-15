@@ -2,7 +2,8 @@
 
 Landed in #278 (merge `b768f3f9`). Plan: `.agents/plans/keynote_live_cef_placement.plan.md` rev 3.3 (§11.5 amended 2026-10-14,
 §12 status + review log). Evidence (results only) `output/evidence/s2-dev/dissolve-alpha-2026-10-11/cef-placement-live-2026-10-1{3,4}/`;
-the qualifying run is `cef-placement-live-2026-10-14/live6` (25 fps ×2, 30 fps ×2). Run-time measurement:
+the qualifying run is `cef-placement-live-2026-10-14/live6` (25 fps ×2, 30 fps ×2). After the 2026-10-15 run restructure the current
+qualifying pair is `output/evidence/s2-dev/obs-run-restructure-2026-10-15/pairB-3268d95c` (one 25+30 pair, 19.6 min). Run-time measurement:
 `.agents/reviews/cef-placement-2026-10-13/speed-investigation.md`.
 
 ## Open items
