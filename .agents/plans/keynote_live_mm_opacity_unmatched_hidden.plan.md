@@ -1,6 +1,6 @@
 # Magic Move: keep zero-ancestor source leaves invisible through the held endpoint
 
-**rev 2 after Opus 5.5 high critique r1; r2 (Opus 5.5 high): ready to implement, two lows folded — critique closed**
+**rev 2 after Opus 5.5 high critique r1; r2 (Opus 5.5 high): ready to implement, two lows folded — critique closed** **Owner 2026-10-15: approved rev 2 — go to implementation (Codex GPT-5.6 Sol high implements, Opus 5.5 high reviews).**
 
 2026-10-15 · GPT-6 Astra · Implementation plan. Source review and an in-memory extracted-method probe completed. No product code changed; full suites and rendered gates have not run. Read-only repository: `/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/inspiring-feynman-06914e`. Evidence: its `.agents/reviews/mm-opacity-unmatched-hidden/investigation.md` and `offline_evidence.json`; exports: `~/Desktop/Convert wall to 16x9 CGs/F2-evidence-2026-10-14/` (`TEX` below).
 
