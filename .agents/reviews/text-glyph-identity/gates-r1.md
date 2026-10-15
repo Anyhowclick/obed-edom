@@ -28,7 +28,7 @@ Branch `claude/suspicious-yalow-7eadf3`, cut from main `a70bbc0e`. Plan `.agents
 | Gate | Result |
 |---|---|
 | Targeted (`test_preview_textures.py` + `test_html_preview.py`) | 86 passed |
-| G1 (`scripts/texture_repair_check.py g1`) | Every available row passes (see the next table). `preview/3b9019` and `preview/59cb` are **MISSING**: their cache dir under the `s2-followups-dsk-deck-902af1` worktree's `output/.html-preview/` was emptied at 15:12 by another actor, after this branch's first G1 run, in which both passed. That makes them unavailable evidence, so the script exits FAIL (2 missing). |
+| G1 (`scripts/texture_repair_check.py g1`) | **PASS** on the merged tree (main `6cf7da26` merged in). Every row passes. `preview/3b9019` and `preview/59cb` had been reported missing before the merge; #286 had moved them to `Continuity/stage-t-exports`. |
 | Full suite, Python 3.13.11 (worktree venv), commit `9847eb30` | 11003 passed, 38 skipped, 1 xfailed |
 | Full suite, Python 3.10.10 floor | 11003 passed, 38 skipped, 1 xfailed |
 | Dashboard `test:ui` / `test:maps` | 330 passed (44 files) / 542 + 2 passed |
