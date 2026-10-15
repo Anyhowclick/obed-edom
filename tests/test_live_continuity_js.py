@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "7da6ec2f9eaf0a2da55c86d94f683e4ad45e6eda39eafca3c3afad2d63272b12"
+PINNED_CORE_SHA256 = "302c218d1b16bf2e3e8821695aff76db6a93a0d708bf5b24f71bc33926523177"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -3968,10 +3968,11 @@ _UNDER_ARTWORK_BRIDGE_PLAN = {
 }
 
 
-def _departure_hide(mode: str) -> dict:
+def _departure_hide(mode: str, *, capture_departure_interim: bool = False) -> dict:
     continuous = mode in ("continuous", "stand-down")
     claim = "const claimed = P.feed.claim('A1');" if continuous else "const claimed = null;"
     before_first = "entry.framesFed += 1;" if mode == "continuous" else ""
+    departure_interim = "departureInterim: notesOf('departure-interim')," if capture_departure_interim else ""
     first_callback = (
         "entry.state = 'stoodDown'; P.feed.onStandDown('A1', 'gl-error');"
         if mode == "stand-down"
@@ -4029,6 +4030,7 @@ window.requestAnimFrame(function() {{
 }});
 glFrames.shift()(16);
 console.log(JSON.stringify({{
+  {departure_interim}
   claimed, beforeDraw, emptyInside, afterEmptyCallback, insideBefore, insideAfter,
   afterCallback: a.style.opacity, onBody: a.parentNode === bodyEl, frameCount: entry.framesFed,
 }}));
@@ -4042,7 +4044,11 @@ console.log(JSON.stringify({{
 
 
 def test_under_artwork_decoder_hides_after_the_first_fed_gl_callback_returns():
-    assert _departure_hide("continuous") == {
+    result = _departure_hide("continuous", capture_departure_interim=True)
+    departure_interim = result.pop("departureInterim")
+    assert len(departure_interim) == 1
+    assert departure_interim[0]["places"] == 1
+    assert result == {
         "claimed": True,
         "beforeDraw": {"opacity": "1", "paused": False, "once": 0, "parent": "source-root",
                        "order": ["layerSourceMovie", "A1-video", "layerSourceLabel"]},

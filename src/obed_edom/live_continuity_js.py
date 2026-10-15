@@ -1336,7 +1336,11 @@ PRESERVE_CORE_JS = r"""
   function departureInterimPlace(v, boundary) {
     const stage = document.getElementById('stage');
     const map = stageMap();
-    if (!stage || !map || !boundary.src.rect) return false;
+    if (!stage || !map || !boundary.src.rect) {
+      note('departure-interim', {elId: v.__obedElId, objectId: boundary.src.objectId,
+        roots: 0, places: 0, anchor: null});
+      return false;
+    }
     const box = toScreen(boundary.src.rect, map);
     const roots = [];
     Array.prototype.forEach.call(document.querySelectorAll('canvas'), function(c) {
@@ -1349,7 +1353,12 @@ PRESERVE_CORE_JS = r"""
       const found = interimAnchor(root, box, map);
       if (found.anchor) places.push({root: root, anchor: found.anchor});
     });
-    if (places.length !== 1) return false;
+    if (places.length !== 1) {
+      note('departure-interim', {elId: v.__obedElId, objectId: boundary.src.objectId,
+        roots: roots.length, places: places.length,
+        anchor: places.length === 1 ? (places[0].anchor.id || null) : null});
+      return false;
+    }
     const place = places[0];
     place.root.insertBefore(v, place.anchor.nextSibling);
     v.style.width = (box.w / map.s) + 'px';
@@ -1360,6 +1369,9 @@ PRESERVE_CORE_JS = r"""
     v.style.left = ((box.x - cur.left) / map.s) + 'px';
     v.style.top = ((box.y - cur.top) / map.s) + 'px';
     v.style.removeProperty('z-index');
+    note('departure-interim', {elId: v.__obedElId, objectId: boundary.src.objectId,
+      roots: roots.length, places: places.length,
+      anchor: places.length === 1 ? (places[0].anchor.id || null) : null});
     return true;
   }
   function rideTransition(v, owner, boundary, rectAt, caller, hidden) {
