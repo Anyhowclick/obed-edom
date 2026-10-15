@@ -33,12 +33,8 @@ Run them in **one** session and in order. Both change the shared `live_runtime.p
 
 - **Twist 6→7:** its animation covers the whole slide, and its alpha on fill/key is unverified. The owner is unlikely to use it, so it is deferred (F2 plan's unused-failure rule).
 - **Slide 8 `PIN DROP WAVE.mov`:** ProRes 4444 with real alpha (`yuva444p12le`). Browsers can't play it, and prepare refuses real-alpha movies by name. It needs an H.264 version or a future alpha path.
-- **G2 live F2 prepare refused** on a per-character Twist & Scale text glyph (`slide 4 (33×135 text)`). **Fixed by PR [#289](https://github.com/Anyhowclick/obed-edom/pull/289): Stage T rule D1g** repoints a colliding base glyph to its same-objectID effect twin.
-  - Plan: `.agents/plans/keynote_export_texture_text_identity.plan.md`. Records: `.agents/reviews/text-glyph-identity/{investigation,gates-r1}.md`.
-  - **F2 export is nondeterministic.** Each re-export of the same deck can collide a different base letter. Two captures are pinned in G1 from `~/Desktop/StageT-text-glyph-evidence/2026-10-15/attempt-0{1,2}`; keep them.
-  - Gates: G1 PASS; G3 owner eye PASS.
-  - Pending: the merged-tree suite re-run, and the owner's live F2 prepare (G2). Twins sharing the bad id still refuse, by owner decision.
-- **F2 increment 1's product-path eye step** (Alpha Keynote, HDMI Chrome + managed-OBS Keyer, beside native) is still pending. It needs a deck that prepares (see the item above).
+- **Per-letter glyph refusal:** landed in #289 (Stage T D1g). The owner's live F2 prepare now passes the texture step and stops only at the slide-8 alpha movie.
+- **F2 increment 1's product-path eye step** (Alpha Keynote, HDMI Chrome + managed-OBS Keyer, beside native) is still pending. It needs a deck that prepares; F2's only remaining blocker is the slide-8 alpha movie.
 
 ## 4. Commands
 

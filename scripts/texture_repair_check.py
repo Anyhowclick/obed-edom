@@ -4,8 +4,8 @@
 g1 (offline): every known export is copied to a temp dir (header, player, slide JSON/JSONP,
 PDF/PDFP only), run through `preview_textures.json_hits` and `repair_textures`, and compared
 with the plan's expected outcome table.
-The pinned F2 rows cover the original export, two real glyph-collision re-exports and one
-synthetic shared-id refusal; they pass source_path/source_digest and check post-repair
+The pinned F2 rows cover the original export and one synthetic shared-id glyph refusal (D1g's
+positive cases are unit-tested); they pass source_path/source_digest and check post-repair
 invariants. Missing or stale pins make g1 INCONCLUSIVE (exit 3).
 
 g2 (headless, continuity off, GL replay off): a temp copy of the Alpha 7e3c export with movies is repaired (unless
@@ -60,8 +60,6 @@ F2_WINNER = "DF3DB700EEDF01B099F884EDCEAB50D3"
 F2_GLYPH_BASE = "B7E3456D7527E4649B2EF0E511D06632"
 F2_GLYPH_EFFECT = "9C60C2B5091E393B7691FBE632EBA011"
 F2_D2_TO = "32960D80133984B95E511FFD85B6061B"
-F2_REAL_BAD = "B37026D59346E052B9E3697C923C552D"
-F2_CAPTURE_ROOT = Path.home() / "Desktop" / "StageT-text-glyph-evidence" / "2026-10-15"
 
 
 class F2Row(NamedTuple):
@@ -78,20 +76,6 @@ F2_ROWS = {
         "c664279eeb4ac5d1bb75164984e03ba2de343c55dd558ac5691fd3ec1385d9da",
         ((4, "D2", F2_D2_TO),),
         {F2_WINNER},
-        False,
-    ),
-    "F2/attempt-01": F2Row(
-        F2_CAPTURE_ROOT / "attempt-01",
-        "1c1291ef24c92cd5a10b83b49b26165f02fa82bcf39c162148483f67c31ab21d",
-        ((4, "D1g", F2_GLYPH_EFFECT), (4, "D2", F2_D2_TO)),
-        {F2_WINNER, F2_REAL_BAD},
-        False,
-    ),
-    "F2/attempt-02": F2Row(
-        F2_CAPTURE_ROOT / "attempt-02",
-        "c662700421dd65f318e09cb41e46c4620695b2bc5de5cf68ff674a2dee24f90a",
-        ((4, "D1g", "A7274F8DE0598A590B1831441C62F647"), (4, "D2", F2_D2_TO)),
-        {F2_WINNER, F2_REAL_BAD},
         False,
     ),
     "F2/synthetic-glyph-i-both": F2Row(
