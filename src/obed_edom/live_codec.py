@@ -43,6 +43,11 @@ _PIXEL_WIDTH = 0xB0
 _PIXEL_HEIGHT = 0xBA
 _ALPHA_MODE = 0x53C0
 _CLUSTER = 0x1F43B675
+_EBML_MASTERS = frozenset({_EBML, _SEGMENT, _INFO, _TRACKS, _TRACK_ENTRY, _VIDEO})
+_EBML_LEAVES = frozenset({
+    _DOCTYPE, _TIMECODE_SCALE, _DURATION, _TRACK_TYPE, _CODEC_ID,
+    _DEFAULT_DURATION, _PIXEL_WIDTH, _PIXEL_HEIGHT, _ALPHA_MODE,
+})
 
 
 def _read_box_header(f: BinaryIO, start: int, end: int) -> tuple[bytes, int, int] | None:
@@ -262,139 +267,42 @@ def _read_ebml_header(
     return element_id[0], payload_start, None if size[2] else payload_start + size[0]
 
 
-def _ebml_uint(f: BinaryIO, start: int, end: int) -> int | None:
-    raw = _read_at(f, start, end, 0, end - start)
-    if raw is None or not 1 <= len(raw) <= 8:
-        return None
-    return int.from_bytes(raw, "big")
-
-
-def _ebml_text(f: BinaryIO, start: int, end: int) -> str | None:
-    if end - start > 64:
-        return None
-    raw = _read_at(f, start, end, 0, end - start)
-    if raw is None:
-        return None
-    try:
-        return raw.decode("ascii")
-    except UnicodeDecodeError:
-        return None
-
-
-def _webm_info_element(
-    f: BinaryIO, start: int, end: int, budget: list[int]
-) -> float | None:
-    duration = None
-    scale = 1_000_000
+def _walk_ebml(
+    f: BinaryIO, start: int, end: int, budget: list[int], values: dict[int, bytes]
+) -> bool | None:
     pos = start
     while pos < end:
         header = _read_ebml_header(f, pos, end, budget)
-        if header is None or header[2] is None or header[2] > end:
+        if header is None:
             return None
         element_id, payload_start, element_end = header
-        if element_id == _TIMECODE_SCALE:
-            value = _ebml_uint(f, payload_start, element_end)
-            if not value:
+        if element_end is None:
+            if element_id != _SEGMENT:
                 return None
-            scale = value
-        elif element_id == _DURATION:
-            raw = _read_at(f, payload_start, element_end, 0, element_end - payload_start)
-            if raw is None or len(raw) not in (4, 8):
-                return None
-            value = struct.unpack(">f" if len(raw) == 4 else ">d", raw)[0]
-            if not math.isfinite(value) or value <= 0:
-                return None
-            duration = value
-        pos = element_end
-    if duration is None:
-        return None
-    return duration * scale / 1_000_000_000
-
-
-def _webm_video_element(f: BinaryIO, start: int, end: int, budget: list[int]) -> tuple[int, int, bool] | None:
-    width = height = None
-    alpha = False
-    pos = start
-    while pos < end:
-        header = _read_ebml_header(f, pos, end, budget)
-        if header is None or header[2] is None or header[2] > end:
+            element_end = end
+        if element_end > end:
             return None
-        element_id, payload_start, element_end = header
-        if element_id in (_PIXEL_WIDTH, _PIXEL_HEIGHT, _ALPHA_MODE):
-            value = _ebml_uint(f, payload_start, element_end)
-            if value is None:
+        if element_id == _CLUSTER:
+            return True
+        if element_id in _EBML_MASTERS:
+            stopped = _walk_ebml(f, payload_start, element_end, budget, values)
+            if stopped is None or stopped:
+                return stopped
+        elif element_id in _EBML_LEAVES:
+            size = element_end - payload_start
+            if element_id in values or size > 64:
                 return None
-            if element_id == _PIXEL_WIDTH:
-                width = value
-            elif element_id == _PIXEL_HEIGHT:
-                height = value
-            elif value in (0, 1):
-                alpha = value == 1
-            else:
+            f.seek(payload_start)
+            raw = f.read(size)
+            if len(raw) != size:
                 return None
+            values[element_id] = raw
         pos = element_end
-    if not width or not height:
-        return None
-    return width, height, alpha
-
-
-def _webm_track_entry(
-    f: BinaryIO, start: int, end: int, budget: list[int]
-) -> tuple[int | None, str | None, int | None, tuple[int, int, bool] | None] | None:
-    track_type = None
-    codec = None
-    default_duration = None
-    video = None
-    pos = start
-    while pos < end:
-        header = _read_ebml_header(f, pos, end, budget)
-        if header is None or header[2] is None or header[2] > end:
-            return None
-        element_id, payload_start, element_end = header
-        if element_id == _TRACK_TYPE:
-            track_type = _ebml_uint(f, payload_start, element_end)
-        elif element_id == _CODEC_ID:
-            codec = _ebml_text(f, payload_start, element_end)
-        elif element_id == _DEFAULT_DURATION:
-            default_duration = _ebml_uint(f, payload_start, element_end)
-            if not default_duration:
-                return None
-        elif element_id == _VIDEO:
-            video = _webm_video_element(f, payload_start, element_end, budget)
-            if video is None:
-                return None
-        pos = element_end
-    return track_type, codec, default_duration, video
-
-
-def _webm_tracks_element(
-    f: BinaryIO, start: int, end: int, budget: list[int]
-) -> tuple[str, int, int, int | None, bool] | None:
-    videos = []
-    pos = start
-    while pos < end:
-        header = _read_ebml_header(f, pos, end, budget)
-        if header is None or header[2] is None or header[2] > end:
-            return None
-        element_id, payload_start, element_end = header
-        if element_id == _TRACK_ENTRY:
-            entry = _webm_track_entry(f, payload_start, element_end, budget)
-            if entry is None:
-                return None
-            if entry[0] == 1:
-                videos.append(entry)
-        pos = element_end
-    if len(videos) != 1:
-        return None
-    _track_type, codec, default_duration, video = videos[0]
-    if codec != "V_VP9" or video is None:
-        return None
-    return codec, video[0], video[1], default_duration, video[2]
+    return False
 
 
 @dataclass(frozen=True)
 class WebMInfo:
-    codec: str
     width: int
     height: int
     duration_s: float
@@ -406,52 +314,39 @@ def webm_info(path: Path) -> WebMInfo | None:
     try:
         with open(path, "rb") as f:
             size = f.seek(0, 2)
-            budget = [_MAX_EBML_ELEMENTS]
-            ebml = _read_ebml_header(f, 0, size, budget)
-            if ebml is None or ebml[0] != _EBML or ebml[2] is None or ebml[2] > size:
+            values: dict[int, bytes] = {}
+            if _walk_ebml(f, 0, size, [_MAX_EBML_ELEMENTS], values) is None:
                 return None
-            doc_type = None
-            pos = ebml[1]
-            while pos < ebml[2]:
-                header = _read_ebml_header(f, pos, ebml[2], budget)
-                if header is None or header[2] is None or header[2] > ebml[2]:
-                    return None
-                if header[0] == _DOCTYPE:
-                    doc_type = _ebml_text(f, header[1], header[2])
-                pos = header[2]
-            if doc_type != "webm":
+            required = {_DOCTYPE, _DURATION, _TRACK_TYPE, _CODEC_ID, _PIXEL_WIDTH, _PIXEL_HEIGHT}
+            if not required <= values.keys() or values[_DOCTYPE] != b"webm" or values[_CODEC_ID] != b"V_VP9":
                 return None
-            segment = _read_ebml_header(f, ebml[2], size, budget)
-            if segment is None or segment[0] != _SEGMENT:
+            integer_ids = {
+                element_id for element_id in (
+                    _TIMECODE_SCALE, _TRACK_TYPE, _DEFAULT_DURATION,
+                    _PIXEL_WIDTH, _PIXEL_HEIGHT, _ALPHA_MODE,
+                ) if element_id in values
+            }
+            if any(not 1 <= len(values[element_id]) <= 8 for element_id in integer_ids):
                 return None
-            segment_end = size if segment[2] is None else segment[2]
-            if segment_end > size:
+            integers = {element_id: int.from_bytes(values[element_id], "big") for element_id in integer_ids}
+            scale = integers.get(_TIMECODE_SCALE, 1_000_000)
+            width, height = integers[_PIXEL_WIDTH], integers[_PIXEL_HEIGHT]
+            default_duration = integers.get(_DEFAULT_DURATION)
+            alpha = integers.get(_ALPHA_MODE, 0)
+            raw_duration = values[_DURATION]
+            if (
+                integers[_TRACK_TYPE] != 1 or not scale or not width or not height
+                or alpha not in (0, 1) or (default_duration is not None and not default_duration)
+                or len(raw_duration) not in (4, 8)
+            ):
                 return None
-            info = tracks = None
-            pos = segment[1]
-            while pos < segment_end:
-                header = _read_ebml_header(f, pos, segment_end, budget)
-                if header is None:
-                    return None
-                if header[0] == _CLUSTER:
-                    break
-                if header[2] is None or header[2] > segment_end:
-                    return None
-                if header[0] == _INFO:
-                    info = _webm_info_element(f, header[1], header[2], budget)
-                    if info is None:
-                        return None
-                elif header[0] == _TRACKS:
-                    tracks = _webm_tracks_element(f, header[1], header[2], budget)
-                    if tracks is None:
-                        return None
-                pos = header[2]
-            if info is None or tracks is None:
+            duration = struct.unpack(">f" if len(raw_duration) == 4 else ">d", raw_duration)[0]
+            duration_s = duration * scale / 1_000_000_000
+            if not math.isfinite(duration) or duration <= 0 or not math.isfinite(duration_s):
                 return None
-            codec, width, height, default_duration, alpha = tracks
             fps = 1_000_000_000 / default_duration if default_duration else None
-            return WebMInfo(codec, width, height, info, fps, alpha)
-    except OSError:
+            return WebMInfo(width, height, duration_s, fps, alpha == 1)
+    except (OSError, RecursionError):
         return None
 
 
@@ -579,27 +474,18 @@ def _probe_video_trak(path: Path, read: Callable[[BinaryIO, _VideoTrak, list[int
     return None
 
 
-def _has_webm_header(path: Path) -> bool:
-    try:
-        with open(path, "rb") as f:
-            return f.read(4) == _EBML.to_bytes(4, "big")
-    except OSError:
-        return False
-
-
 def movie_codec(path: Path) -> str | None:
-    """First video codec (`avc1`, `hvc1`, `V_VP9`), or `None` when unreadable."""
-    if _has_webm_header(path):
-        info = webm_info(path)
-        return info.codec if info is not None else None
+    """First video codec (`avc1`, `hvc1`, `V_VP9`), or `None` when unreadable. Never raises."""
+    if webm_info(path) is not None:
+        return "V_VP9"
     return _probe_video_trak(path, lambda _f, video, _budget: video[0])
 
 
 def movie_fps(path: Path) -> float | None:
-    """Frame rate from BMFF timing or WebM `DefaultDuration`, when readable."""
-    if _has_webm_header(path):
-        info = webm_info(path)
-        return info.fps if info is not None else None
+    """Frame rate from BMFF timing or WebM `DefaultDuration`, when readable. Never raises."""
+    info = webm_info(path)
+    if info is not None:
+        return info.fps
     return _probe_video_trak(path, lambda f, video, budget: _trak_fps(f, video[1], video[2], budget))
 
 

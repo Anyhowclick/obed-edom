@@ -131,29 +131,22 @@ def _media_data_sha256(path: Path) -> str | None:
 
 
 def _accepted(path: Path) -> bool:
-    if codec_family(movie_codec(path)) == "h264":
-        return True
     info = webm_info(path)
-    return info is not None and info.codec == "V_VP9" and info.alpha
+    return info.alpha if info is not None else codec_family(movie_codec(path)) == "h264"
 
 
-def _ffmpeg_input(path: Path) -> list[str]:
-    decoder = ["-c:v", "libvpx-vp9"] if movie_codec(path) == "V_VP9" else []
-    return [*decoder, "-i", str(path)]
-
-
-def _decoded_pix_fmt(exe: str, path: Path) -> str | None:
+def _decoded_pix_fmt(exe: str, path: Path) -> tuple[str | None, bool]:
     proc = subprocess.run(
-        [exe, "-nostdin", "-hide_banner", *_ffmpeg_input(path)], capture_output=True, text=True
+        [exe, "-nostdin", "-hide_banner", "-i", str(path)], capture_output=True, text=True
     )
     match = _VIDEO_STREAM_RE.search(proc.stderr)
-    return match.group(1) if match else None
+    return (match.group(1) if match else None, _AUDIO_STREAM_RE.search(proc.stderr) is not None)
 
 
 def _min_alpha(exe: str, path: Path) -> float | None:
     proc = subprocess.run(
         [
-            exe, "-nostdin", "-v", "error", *_ffmpeg_input(path), "-map", "0:v:0",
+            exe, "-nostdin", "-v", "error", "-i", str(path), "-map", "0:v:0",
             "-vf", "alphaextract,format=gray,signalstats,metadata=print:key=lavfi.signalstats.YMIN:file=-",
             "-f", "null", "-",
         ],
@@ -166,21 +159,14 @@ def _min_alpha(exe: str, path: Path) -> float | None:
     return min(values)
 
 
-def _has_audio(exe: str, path: Path) -> bool:
-    proc = subprocess.run(
-        [exe, "-nostdin", "-hide_banner", *_ffmpeg_input(path)], capture_output=True, text=True
-    )
-    return _AUDIO_STREAM_RE.search(proc.stderr) is not None
-
-
 def _conversion_target(exe: str, movie: _Movie) -> tuple[str | None, str | None]:
     if movie.timing is None or movie.geometry is None:
         return None, "its timing or size cannot be read"
     if movie.geometry.width % 2 or movie.geometry.height % 2:
-        return None, f"its size {movie.geometry.width}×{movie.geometry.height} is odd; H.264 needs even sizes"
+        return None, f"its size {movie.geometry.width}×{movie.geometry.height} is odd; conversion needs even sizes"
     if codec_family(movie.codec) == "hevc" and movie.geometry.depth == 32:
         return None, f"its transparency cannot be checked; {OPAQUE_FIX}"
-    pix_fmt = _decoded_pix_fmt(exe, movie.path)
+    pix_fmt, has_audio = _decoded_pix_fmt(exe, movie.path)
     if pix_fmt is None:
         return None, "ffmpeg cannot read its video"
     if _ALPHA_PIX_FMT_RE.match(pix_fmt):
@@ -192,7 +178,7 @@ def _conversion_target(exe: str, movie: _Movie) -> tuple[str | None, str | None]
                 return None, "it has transparency; alpha conversion currently supports ProRes movies"
             if movie.geometry.matrix != _IDENTITY_MATRIX or not movie.timing.identity_edits:
                 return None, "its rotation or edits are not supported for alpha conversion"
-            if _has_audio(exe, movie.path):
+            if has_audio:
                 return None, "it has audio; alpha conversion currently supports silent movies"
             return _ALPHA_TARGET, None
     return _H264_TARGET, None
@@ -274,7 +260,7 @@ def _verify(movie: _Movie, tmp: Path) -> str | None:
 def _decoded_frames(exe: str, path: Path) -> int | None:
     proc = subprocess.run(
         [
-            exe, "-nostdin", "-v", "error", *_ffmpeg_input(path), "-map", "0:v:0",
+            exe, "-nostdin", "-v", "error", "-c:v", "libvpx-vp9", "-i", str(path), "-map", "0:v:0",
             "-progress", "pipe:1", "-nostats", "-f", "null", "-",
         ],
         capture_output=True,
@@ -306,7 +292,7 @@ def _verify_alpha(exe: str, movie: _Movie, tmp: Path) -> str | None:
     source, geometry = movie.timing, movie.geometry
     assert source is not None and geometry is not None
     info = webm_info(tmp)
-    if info is None or info.codec != "V_VP9":
+    if info is None:
         return "the converted file is not VP9 WebM"
     if not info.alpha:
         return "lost transparency during conversion"
@@ -315,11 +301,10 @@ def _verify_alpha(exe: str, movie: _Movie, tmp: Path) -> str | None:
     half_frame = source.stts_duration / source.samples / source.timescale / 2
     if abs(info.duration_s - source.presented_s) > half_frame:
         return f"the converted file plays {info.duration_s:.3f} s, not {source.presented_s:.3f} s"
-    if source.identity_edits:
-        frames = _decoded_frames(exe, tmp)
-        if frames != source.samples:
-            count = frames if frames is not None else "an unreadable number of"
-            return f"the converted file has {count} frames, not {source.samples}"
+    frames = _decoded_frames(exe, tmp)
+    if frames != source.samples:
+        count = frames if frames is not None else "an unreadable number of"
+        return f"the converted file has {count} frames, not {source.samples}"
     psnr = _alpha_psnr(exe, movie.path, tmp)
     if psnr is None:
         return "its converted transparency cannot be compared"
@@ -343,7 +328,10 @@ def _swap_copy(original: Path, copy: Path) -> None:
 def convert_movies(
     export_root: Path, slides: list[dict[str, Any]], *, log: Callable[[str], None]
 ) -> dict[str, Any]:
-    """Convert referenced movies to an accepted playback target under their own names."""
+    """Convert referenced movies to an accepted playback target under their own names, one
+    encode per group of copies sharing media data, timing and geometry. Refusals are collected
+    and raised together before anything is written; an encode or verify failure leaves the
+    original untouched. Returns the manifest's `movieConversion` record."""
     root = export_root.resolve()
     files, missing = _referenced(export_root, slides)
     movies = []
@@ -357,23 +345,21 @@ def convert_movies(
     exe = ffmpeg_exe()
     if movies and not exe:
         raise PreviewError("ffmpeg is needed to convert movies and was not found")
-    targets: dict[Path, str] = {}
-    for movie in movies:
-        target, reason = _conversion_target(exe, movie)
-        if reason:
-            refused.setdefault(movie.asset, reason)
-        elif target is not None:
-            targets[movie.path] = target
     groups: dict[tuple[Any, ...], list[_Movie]] = {}
     for movie in movies:
-        if movie.path in targets:
-            groups.setdefault(
-                (_media_data_sha256(movie.path), movie.timing, movie.geometry, targets[movie.path]), []
-            ).append(movie)
+        groups.setdefault((_media_data_sha256(movie.path), movie.timing, movie.geometry), []).append(movie)
+    group_targets: dict[tuple[Any, ...], str] = {}
     for key, members in groups.items():
         if key[0] is None:
             for movie in members:
                 refused.setdefault(movie.asset, "its media data cannot be read")
+            continue
+        target, reason = _conversion_target(exe, members[0])
+        if reason:
+            for movie in members:
+                refused.setdefault(movie.asset, reason)
+        elif target is not None:
+            group_targets[key] = target
     if refused:
         raise PreviewError(
             "Cannot convert movies for playback: "
@@ -381,7 +367,7 @@ def convert_movies(
         )
     for key, members in groups.items():
         first = members[0]
-        target = key[3]
+        target = group_targets[key]
         tmp = _temp_sibling(first.path, "vp9" if target == _ALPHA_TARGET else "h264")
         try:
             source_shas = {movie.path: file_sha256(movie.path) for movie in members}

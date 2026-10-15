@@ -303,8 +303,8 @@ rotation and edits, and even dimensions are converted to VP9-alpha WebM
 keep the exported file names, and are verified before publication. Copies with
 the same media data, timing, geometry and target are encoded once.
 `manifest.movieConversion` records each encoder, source and target codec, and
-converted file. A cache is reused only while every referenced movie is H.264 or
-verified VP9 WebM with alpha.
+converted file. A cache is reused only while every referenced movie is H.264, or
+VP9 WebM whose metadata declares alpha.
 
 The prepare fails, naming every such movie, when transparency cannot be checked,
 an alpha movie is unsupported or has audio, a dimension is odd, or timing is

@@ -2063,7 +2063,7 @@ def test_planned_vp9_refuses_continuity_and_cleans_up_g2_in_headful_launch(tmp_p
     assert output.output["codecWarnings"] == []
     assert output._continuity_mode == "unsupported"
     assert output.output["continuity"]["reason"] == (
-        "movie codec is not playable in this output: movie.mov (V_VP9)"
+        "movie continuity does not support VP9 movies: movie.mov (V_VP9)"
     )
     assert output._server.continuity_script == ""
     assert output.output["continuity"]["glReplay"]["mode"] == "unavailable"

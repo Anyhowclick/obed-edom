@@ -185,8 +185,8 @@ def test_webm_metadata_under_a_mov_name(tmp_path, data, expected_alpha, expected
         assert movie_fps(path) is None
         return
     assert info is not None
-    assert (info.codec, info.width, info.height, info.duration_s, info.fps, info.alpha) == (
-        "V_VP9", 500, 500, pytest.approx(2.64), 25.0, expected_alpha,
+    assert (info.width, info.height, info.duration_s, info.fps, info.alpha) == (
+        500, 500, pytest.approx(2.64), 25.0, expected_alpha,
     )
     assert codec_family(movie_codec(path)) == "vp9"
     assert movie_fps(path) == 25.0

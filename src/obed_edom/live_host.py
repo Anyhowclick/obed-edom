@@ -201,7 +201,9 @@ def _continuity_scripts(plan: dict[str, Any], canvas: dict[str, int]) -> str:
 
 
 def _codec_supported(family: str, *, attach: bool, headless: bool) -> bool:
-    """Return whether the output mode is qualified for ordinary playback."""
+    """h264 plays everywhere. HEVC and VP9 are attempted only in headful launch: headless
+    Chrome and OBS CEF decode is unqualified, so they warn. Everything else, including ProRes,
+    is unsupported."""
     if family == "h264":
         return True
     if family in ("hevc", "vp9"):
@@ -1306,7 +1308,12 @@ class LiveOutputHost:
                 display = _codec_display(entry)
                 if self._gl_replay_mode == "injected":
                     self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
-                return "unsupported", f"movie codec is not playable in this output: {asset} ({display})", None
+                reason = (
+                    f"movie continuity does not support VP9 movies: {asset} ({display})"
+                    if family == "vp9"
+                    else f"movie codec is not playable in this output: {asset} ({display})"
+                )
+                return "unsupported", reason, None
         self._continuity_not_carried = not_carried(plan, self.slides)
         self._continuity_plan_sha256 = plan_signature(runtime)
         if self._attach_endpoint:

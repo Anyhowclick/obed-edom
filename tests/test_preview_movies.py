@@ -42,7 +42,8 @@ def clips(tmp_path_factory) -> dict[str, Path]:
     d = tmp_path_factory.mktemp("clips")
     out = {name: d / f"{name}.{ext}" for name, ext in [
         ("prores", "mov"), ("prores_copy", "mov"), ("hevc_full", "mov"), ("hevc", "mov"),
-        ("alpha_const", "mov"), ("alpha_real", "mov"), ("odd", "mov"), ("h264", "mp4"),
+        ("alpha_const", "mov"), ("alpha_real", "mov"), ("alpha_audio", "mov"), ("odd", "mov"),
+        ("h264", "mp4"),
     ]}
     ffmpeg(*LAVFI, "-f", "lavfi", "-i", "sine=d=1", *PRORES_LT, "-c:a", "aac", "-shortest", out["prores"])
     restamp_mvhd(out["prores"], out["prores_copy"])
@@ -53,6 +54,8 @@ def clips(tmp_path_factory) -> dict[str, Path]:
     ffmpeg(*LAVFI, "-vf", "format=yuva444p10le", *PRORES_4444, out["alpha_const"])
     ffmpeg(*LAVFI, "-vf", "format=rgba,colorchannelmixer=aa=0.5", *PRORES_4444, "-pix_fmt", "yuva444p10le",
            out["alpha_real"])
+    ffmpeg(*LAVFI, "-f", "lavfi", "-i", "sine=d=1", "-vf", "format=rgba,colorchannelmixer=aa=0.5",
+           *PRORES_4444, "-pix_fmt", "yuva444p10le", "-c:a", "aac", "-shortest", out["alpha_audio"])
     ffmpeg(*LAVFI, "-vf", "format=yuv444p10le,crop=319:180", *PRORES_4444, out["odd"])
     ffmpeg(*LAVFI, "-c:v", "libx264", out["h264"])
     return out
@@ -94,7 +97,7 @@ def tree_shas(export: Path) -> dict[str, str]:
     }
 
 
-def test_converts_every_non_h264_copy_in_place_with_identical_timing(tmp_path, monkeypatch, clips):
+def test_converts_every_unaccepted_copy_in_place_with_identical_timing(tmp_path, monkeypatch, clips):
     export, slides, paths = export_with(tmp_path, monkeypatch, [
         ("S1", clips["prores"], "clip.mov"),
         ("S2", clips["prores_copy"], "clip.mov"),
@@ -168,6 +171,7 @@ def test_converts_every_non_h264_copy_in_place_with_identical_timing(tmp_path, m
     "bad, match",
     [
         ("alpha_loss", "lost transparency during conversion"),
+        ("alpha_audio", "it has audio; alpha conversion currently supports silent movies"),
         ("odd", "its size 319×180 is odd"),
         ("dropped", "the converted file plays"),
         ("missing", "its file is missing from the export"),
