@@ -27,7 +27,6 @@ from obed_edom.live_continuity import Unsupported, codec_report
 from obed_edom.live_host import (
     ATTACH_ENV,
     CONTINUITY_ENV,
-    LiveHostError,
     derive_runtime,
     gl_replay_env_preference,
     is_sixteen_nine,
@@ -75,13 +74,10 @@ def _output_settings(settings: dict) -> dict:
 
 
 def _deck_qualification(root: Path, slides: list[dict], settings: dict) -> dict:
+    keyer = settings["akOutputMode"] == "keyer"
+    preference = gl_replay_env_preference(managed=keyer)
     if os.environ.get(CONTINUITY_ENV) == "off":
         return {"mode": "off", "reason": f"{CONTINUITY_ENV} is off.", "notCarried": []}
-    keyer = settings["akOutputMode"] == "keyer"
-    try:
-        preference = gl_replay_env_preference(managed=keyer)
-    except LiveHostError as exc:
-        return {"mode": "unsupported", "reason": str(exc), "notCarried": []}
     derived = derive_runtime(root, slides, gl_replay=preference == "auto")
     if isinstance(derived, Unsupported) and preference == "auto":
         derived = derive_runtime(root, slides)
@@ -163,7 +159,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
             raise ValueError("This player version is not supported for live controls.")
         header, _ = load_header(root)
         width, height = header.get("slideWidth", 0), header.get("slideHeight", 0)
-        if not width or not height or not is_sixteen_nine(width, height):
+        if not width or not height or not is_sixteen_nine(int(width), int(height)):
             raise ValueError("Live output currently requires a prepared 16:9 deck.")
         if header.get("showMode") != 0:
             raise ValueError("Live output requires manual presentation mode.")

@@ -863,14 +863,15 @@ def test_qualification_uses_same_export_checks_as_start(tmp_path, monkeypatch, i
     assert not adapters
 
 
-@pytest.mark.parametrize(('gl_replay', 'family', 'expected'), [
-    ('', 'h264', {'mode': 'qualified', 'reason': None, 'notCarried': []}),
-    (None, 'vp9', {'mode': 'unsupported', 'reason': 'movie continuity does not support VP9 movies: keyed.webm (vp09)',
-                   'notCarried': []}),
+@pytest.mark.parametrize(('gl_replay', 'family', 'status', 'expected'), [
+    ('', 'h264', 200, {'mode': 'qualified', 'reason': None, 'notCarried': []}),
+    ('sometimes', 'h264', 409, 'OBED_LIVE_GL_REPLAY must be off or auto.'),
+    (None, 'vp9', 200, {'mode': 'unsupported', 'reason': 'movie continuity does not support VP9 movies: keyed.webm (vp09)',
+                        'notCarried': []}),
 ])
-def test_qualification_reports_the_continuity_the_host_loads(tmp_path, monkeypatch, gl_replay, family, expected):
-    """A blank GL replay env falls back to the default as in the host, and a carried movie the host
-    cannot carry (here VP9 alpha) makes continuity unsupported rather than qualified."""
+def test_qualification_reports_the_continuity_the_host_loads(tmp_path, monkeypatch, gl_replay, family, status, expected):
+    """A blank GL replay env falls back to the default and an invalid one refuses the load, as in the host;
+    a carried movie the host cannot carry (here VP9 alpha) makes continuity unsupported rather than qualified."""
     client, _, _, _, _, _ = client_for(tmp_path, monkeypatch)
     monkeypatch.delenv('OBED_LIVE_CONTINUITY', raising=False)
     if gl_replay is None:
@@ -881,8 +882,10 @@ def test_qualification_reports_the_continuity_the_host_loads(tmp_path, monkeypat
     monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=()), runtime))
     codec = 'vp09' if family == 'vp9' else 'avc1'
     monkeypatch.setattr(live, 'codec_report', lambda *args, **kwargs: [
-        {'asset': 'keyed.webm', 'codec': codec, 'family': family, 'files': 1}])
-    assert client.get('/api/live/decks/prepared/qualification').json()['continuity'] == expected
+        {'asset': 'keyed.webm', 'codec': codec, 'family': family, 'files': 1}], raising=False)
+    response = client.get('/api/live/decks/prepared/qualification')
+    assert response.status_code == status
+    assert response.json().get('continuity', response.json().get('detail')) == expected
 
 
 def test_keyer_qualification_uses_gl_plan_and_native_fallback(tmp_path, monkeypatch):
