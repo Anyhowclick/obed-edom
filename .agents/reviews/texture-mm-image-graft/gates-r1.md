@@ -3,11 +3,11 @@
 Branch `claude/texture-mm-image-graft` (from main `25849a82`, incl. #277). Plan `.agents/plans/keynote_export_texture_identity.plan.md` rev 4; owner: OQ-1–7 per rec (2026-10-14).
 
 ## Roster
-- Plan: Codex GPT-6 Astra high (advisory + plan), critiqued by Opus 5.5 high r1–r3 (`plan-critique-r*.md`).
+- Plan: Codex GPT-6 Astra high (advisory + plan), critiqued by Opus 5.5 high r1–r3 (review log: plan §8; raw rounds pruned at merge).
 - Implementation: Codex GPT-5.6 Sol high.
-- Code review: Opus 5.5 high, two rounds.
-  - r1 (`code-review-r1.md`): 1 medium and 8 low folded; 1 informational item not folded (it would add test rows beyond the approved set).
-  - r2 (`code-review-r2.md`): r1 confirmed closed, no regressions; 4 low folded.
+- Code review: Opus 5.5 high, two rounds (raw rounds pruned at merge; dispositions below).
+  - r1: 1 medium and 8 low folded; 1 informational item not folded (it would add test rows beyond the approved set).
+  - r2: r1 confirmed closed, no regressions; 4 low folded.
 
 ## Results (2026-10-14)
 | Gate | Result |
