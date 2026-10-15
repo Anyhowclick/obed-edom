@@ -96,6 +96,18 @@ Ship only after UH-0…UH-4 and the **full suites (3.13 + 3.10 floor + dashboard
 | 9 · samples | **Folded.** Existing PERCENTS only; no timing predicate or endpoint-adjacent sample matrix. |
 | 10 · fixture census | **Folded.** Commit subtree fingerprint/local slots; record full F2 changed set in one-off offline evidence, outside `output/`. |
 | 11 · evidence paths | **Folded.** Use persisted TEX path; stale scan is provenance, not a runnable instruction. |
-
 | r2 low 1 · investigation wording | **Folded** (coordinator): investigation §4 notes the supersession. |
 | r2 low 2 · base mirror | **Folded** (coordinator): §3 names the base commit's mirror; 0 changed ⇒ INCONCLUSIVE. |
+
+## §9 Review log
+
+- Plan critique r1 (Opus 5.5 high): 1 major (replace the leaf predicate with an absorbing proved zero), 5 medium, 5 low. All folded in rev 2 (Astra); dispositions are in §8.
+- Plan critique r2 (Opus 5.5 high): ready. It independently re-verified R3/R4 precedence and the two-leaf changed set. 2 lows, folded by the coordinator. Critique closed.
+- Owner approved rev 2 on 2026-10-15.
+- Implementation (Codex GPT-5.6 Sol high): `ab58fdd6`.
+- Code review r1 (Opus 5.5 high): approved after 3 lows, folded in `ebe9704d`:
+  - the evidence script's base is now explicit;
+  - a redundant census loop was removed;
+  - the pin history now names the superseded hashes.
+- Gates: UH-0, UH-1 and UH-2 PASS, full suites green, owner eye (UH-4) PASS. See `.agents/reviews/mm-opacity-unmatched-hidden/gates-r1.md`.
+- Merged as #282 (`2bd0811b`) on 2026-10-15. UH-3 (Stage B composition) is re-run by Stage B on its rebase.
