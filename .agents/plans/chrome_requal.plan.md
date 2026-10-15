@@ -1,10 +1,10 @@
 # Chrome-major re-qualification plan (rev 2)
 
-Status: Astra (GPT-6 high) plan r0 → Opus 5.5 high critique r1 (13 findings, folded) → Astra r1 → Opus critique r2 (no blocker/major; 3 folded below). Awaiting owner review.
+Status: Astra (GPT-6 high) plan r0 → Opus 5.5 high critique r1 (13 findings, folded) → Astra r1 → Opus critique r2 (no blocker/major; 3 folded below). Owner approved 2026-10-15 with the 28-arm default ("Plan approved with the 28-arm default (DPR 1.5/2 and raw/preview-prod stay in full DX-1)").
 
 ## Owner decisions
 
-- **OWNER CALL — planned default: 28 arms**, comprising 14 core arms, seven DPR-1 cells and their twins. Budget approximately **8 minutes on an idle machine**, longer with load waits.
+- **OWNER DECISION (2026-10-15): 28 arms**, comprising 14 core arms, seven DPR-1 cells and their twins. Budget approximately **8 minutes on an idle machine**, longer with load waits.
 - Alternative: retain all **62 arms**, approximately **35 minutes** based on the measured 155 run. The additional 32 high-DPR arms and two production raw/preview arms supply no required qualification reading.
 - Document the reduced re-qualification scope in §13; high-DPR and production raw/preview coverage remains in full DX-1. Do not add a matrix-selection CLI option.
 
