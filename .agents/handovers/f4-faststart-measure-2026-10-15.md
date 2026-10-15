@@ -189,6 +189,12 @@ It no longer waits for slide 3.
   - a feed-on paint-verdict run (b3to4 `not-decoded` should drop from ~12 to ≤ 3);
   - a decision on decks with no H.264 movie, or only VP9: does a WebM warm-up also warm the pipeline? Not measured.
 
+**Owner decision (2026-10-15, ~22:30): agrees with the recommendation.**
+- Take the deck-load movie warm-up forward as a product change.
+- No faststart remux.
+- Implementation goes through the normal plan → critique → implement → review roster. The two pre-adoption checks
+  above become plan acceptance items.
+
 ## Repro
 
 `output/evidence/stage-b-2026-10-13/f4-faststart/tools/`:
