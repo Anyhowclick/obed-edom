@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePresenter } from "../src/live/LivePresenter";
 import { applyHtmlPreview, chooseKeynote, pollJob, startHtmlPreview, type Job } from "../src/api";
-import { liveClient, type LiveClient, type LiveCommand, type LiveContinuity, type LiveEngine, type LiveOutputSettings, type LiveResult, type LiveSnapshot } from "../src/live/api";
+import { liveClient, type LiveClient, type LiveCommand, type LiveContinuity, type LiveEngine, type LiveOutputSettings, type LiveResult, type LiveSnapshot, type Placement } from "../src/live/api";
 
 vi.mock("../src/api", () => ({ applyHtmlPreview: vi.fn(), chooseKeynote: vi.fn(), pollJob: vi.fn(), startHtmlPreview: vi.fn(), resolveDrop: vi.fn() }));
 
@@ -21,6 +21,7 @@ function state(overrides: Partial<LiveSnapshot> = {}): LiveSnapshot {
     outputVisible: true,
     capabilities: {
       advance: { supported: true }, goTo: { supported: true }, hide: { supported: true }, show: { supported: true },
+      recalibrate: { supported: false, reason: "Recalibration is available only for managed OBS output." },
     },
     slides: [
       { originalOrdinal: 1, skipped: false, notes: "Opening" },
@@ -29,6 +30,14 @@ function state(overrides: Partial<LiveSnapshot> = {}): LiveSnapshot {
     ],
     output: { transport: "hdmi", width: 1920, height: 1080, alpha: false, audio: false },
     ...overrides,
+  };
+}
+
+function placement(overrides: Partial<Placement> = {}): Placement {
+  return {
+    state: "invalid", grant: null, reason: "not-calibrated", at: null, product: "Chrome/127.0.0.0",
+    gpuCompositing: null, method: "probe", probeId: null, leaseMs: null, leaseExpiresAt: null,
+    tone: { observed: null, applied: "identity" }, automaticProbesDisabled: false, ...overrides,
   };
 }
 
@@ -128,6 +137,45 @@ describe("LivePresenter", () => {
     expect(await screen.findByText("Movie continuity · Unavailable")).toBeInTheDocument();
     expect(screen.getByText("This session has not reported movie continuity status.")).toBeInTheDocument();
     expect(screen.queryByText("Movie continuity · On")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["initial", placement(), { supported: true }, "Output not calibrated", true, ""],
+    ["probing", placement({ state: "probing", reason: "calibrating", probeId: "probe-1" }), { supported: false, reason: "Calibration is already running." }, "Calibrating…", false, "Calibration is already running."],
+    ["deferred", placement({ state: "probing", reason: "waiting-for-transition", probeId: "probe-2" }), { supported: false, reason: "Calibration is already running." }, "Waiting for the current transition to finish.", false, "Calibration is already running."],
+    ["valid", placement({ state: "valid", grant: "frac", reason: "granted", probeId: "probe-3", leaseMs: 15_000 }), { supported: true }, "Output calibrated", true, ""],
+    ["failed", placement({ reason: "probe-failed", probeId: "probe-4" }), { supported: true }, "Calibration unavailable. Movies use the standard transition.", true, ""],
+    ["suppressed", placement({ reason: "program-disturbed", automaticProbesDisabled: true }), { supported: true }, "Calibration paused. Recalibrate output to retry.", true, ""],
+    ["unsupported", undefined, { supported: false, reason: "Recalibration is available only for managed OBS output." }, "Recalibration is available only for managed OBS output.", false, "Recalibration is available only for managed OBS output."],
+    ["disconnected", placement({ reason: "disconnected" }), { supported: false, reason: "Waiting for connection to output host" }, "Waiting for connection to output host", false, "Waiting for connection to output host"],
+  ] as const)("shows %s calibration state and applies only its own run guard", async (_name, currentPlacement, capability, status, enabled, reason) => {
+    const base = state();
+    const api = client({
+      state: vi.fn(async () => state({
+        capabilities: { ...base.capabilities, recalibrate: capability },
+        output: { ...base.output, ...(currentPlacement ? { placement: currentPlacement } : {}) },
+      })),
+    });
+    render(<LivePresenter client={api} pollMs={60_000} />);
+
+    expect(await screen.findByText(status)).toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Recalibrate output" });
+    if (_name === "probing" || _name === "deferred") {
+      expect(screen.getByRole("button", { name: "Advance" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Hide output" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Stop session" })).toBeEnabled();
+    }
+    if (enabled) {
+      expect(button).toBeEnabled();
+      fireEvent.click(button);
+      await waitFor(() => expect(api.command).toHaveBeenCalledWith("live-1", expect.objectContaining({ operation: "recalibrate" })));
+      expect(screen.queryByText("Command accepted; waiting for observed player state.")).not.toBeInTheDocument();
+    } else {
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("title", reason);
+      fireEvent.click(button);
+      expect(api.command).not.toHaveBeenCalled();
+    }
   });
 
   it("says nothing about codecs when the host omits the fields", async () => {

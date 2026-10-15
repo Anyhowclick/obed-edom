@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import shutil
 from dataclasses import replace
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -20,7 +22,7 @@ from pypdf.generic import DecodedStreamObject
 
 from obed_edom import live_continuity as lc, preview_textures as pt
 from obed_edom.fixture_paths import fixture
-from obed_edom.html_preview import PreviewError, file_sha256
+from obed_edom.html_preview import PreviewError, PreviewStale, file_sha256
 from obed_edom.live_continuity import derive_plan
 from obed_edom.live_runtime import SUPPORTED_PLAYERS
 
@@ -136,7 +138,13 @@ def _export(root: Path, slides: list[tuple[str, dict, list]]) -> list[dict]:
         encoded = base64.b64encode(pdf.read_bytes()).decode()
         pdf.with_suffix(".pdfp").write_text(f"local_pdf( {json.dumps({'slide': uuid, 'pdf': encoded})} );")
     return [
-        {"originalOrdinal": i + 1, "skipped": False, "exportedUuid": uuid, "playerIndex": i}
+        {
+            "originalOrdinal": i + 1,
+            "originalSlideId": uuid,
+            "skipped": False,
+            "exportedUuid": uuid,
+            "playerIndex": i,
+        }
         for i, (uuid, _, _) in enumerate(slides)
     ]
 
@@ -145,9 +153,9 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def _repair(root: Path, slides: list[dict], player: str = PLAYER) -> tuple[dict, list[str]]:
+def _repair(root: Path, slides: list[dict], player: str = PLAYER, **kwargs) -> tuple[dict, list[str]]:
     lines: list[str] = []
-    return pt.repair_textures(root, slides, player_digest=player, log=lines.append), lines
+    return pt.repair_textures(root, slides, player_digest=player, log=lines.append, **kwargs), lines
 
 
 LABEL = (100, 100, 100, 20)
@@ -216,6 +224,74 @@ def _d2_slides():
             ],
         ),
     ]
+
+
+def _d2_image_slides(group_competitor: bool = False):
+    landed = (150, 100, 100, 20)
+    later = [_slot(landed, "BIG", kind=5)]
+    textures = {"BIG": (400, 300, "T")}
+    if group_competitor:
+        later.append(_slot(landed, "OTHER", kind=6))
+        textures["OTHER"] = (100, 20, "L")
+    return [
+        (
+            "S1",
+            {"HELLO": (100, 20, "L"), "TO": (100, 20, "L")},
+            [
+                _event([_slot(LABEL, "HELLO", kind=5)]),
+                _event([], [_magic_move(LABEL, "HELLO", "TO", 50, kind=5)]),
+            ],
+        ),
+        (
+            "S2",
+            textures,
+            [_event([_slot(landed, "BIG", kind=5)]), _event(later)],
+        ),
+    ]
+
+
+def _source_pdf() -> bytes:
+    writer = PdfWriter()
+    page = writer.add_blank_page(100, 20)
+    stream = DecodedStreamObject()
+    stream.set_data(b"0 g 0 0 50 20 re f")
+    page.replace_contents(stream)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def _source_deck(tmp_path: Path, monkeypatch, case: str) -> tuple[Path, str]:
+    source = tmp_path / "source.key"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("Data/map-44137.pdf", _source_pdf())
+    destination_data = "44140" if case == "different-data" else "44137"
+    objects = {
+        "S1": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "SRC"}]},
+        "S2": {"_pbtype": "KN.SlideArchive", "drawablesZOrder": [{"identifier": "DEST"}]},
+        "SRC": {
+            "_pbtype": "TSD.ImageArchive",
+            "geometry": {"position": {"x": 101, "y": 101}, "size": {"width": 98, "height": 18}},
+            "data": {"identifier": "44137"},
+            "style": {"opacity": 0},
+        },
+        "DEST": {
+            "_pbtype": "TSD.ImageArchive",
+            "geometry": {"position": {"x": 151, "y": 101}, "size": {"width": 98, "height": 18}},
+            "data": {"identifier": destination_data},
+        },
+    }
+    if case == "drawable-competitor":
+        objects["S2"]["drawablesZOrder"].append({"identifier": "OTHER"})
+        objects["OTHER"] = {
+            "_pbtype": "TSWP.ShapeInfoArchive",
+            "geometry": {"position": {"x": 152, "y": 102}, "size": {"width": 96, "height": 16}},
+        }
+    monkeypatch.setattr(
+        "obed_edom.iwa_runs._load_deck_full",
+        lambda *_args, **_kwargs: (objects, {}, {}, set()),
+    )
+    return source, file_sha256(source)
 
 
 def _d2_chained_slides():
@@ -314,6 +390,48 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
             id="D2-graft-magic-move-landing",
         ),
         pytest.param(
+            _d2_image_slides,
+            {
+                "ordinal": 2,
+                "rule": "D2",
+                "from": "BIG",
+                "to": D2_ID,
+                "donor": {"uuid": "S1", "id": "TO", "page": 2},
+                "verify": {"corr": 1.0, "object": "DEST", "sourceObject": "SRC", "data": "44137"},
+                "source": "ok",
+            },
+            id="D2-image-source-certificate-opacity-zero",
+        ),
+        pytest.param(
+            _d2_image_slides,
+            {
+                "refused": "slide 2 (100×20 image): its texture is mis-mapped and no verified replacement exists",
+                "source": "drawable-competitor",
+            },
+            id="D2-image-refuses-envelope-drawable-competitor",
+        ),
+        pytest.param(
+            _d2_image_slides,
+            {
+                "refused": "slide 2 (100×20 image): its texture is mis-mapped and no verified replacement exists",
+                "source": "different-data",
+            },
+            id="D2-image-refuses-different-source-data",
+        ),
+        pytest.param(
+            lambda: _d2_image_slides(group_competitor=True),
+            {
+                "refused": "slide 2 (100×20 image): its texture is mis-mapped and no verified replacement exists",
+                "source": "ok",
+            },
+            id="D2-image-refuses-unresolved-group-member",
+        ),
+        pytest.param(
+            _d2_image_slides,
+            {"stale": True, "source": "wrong-digest"},
+            id="D2-image-refuses-stale-source-before-writing",
+        ),
+        pytest.param(
             _d2_chained_slides,
             {"refused": "slide 3 ('Point 1' label): its texture is mis-mapped and no verified replacement exists"},
             id="D2-refuses-landing-repointed-in-this-pass",
@@ -346,21 +464,32 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
 def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, monkeypatch, build, expected):
     slides = _export(tmp_path, build())
     expected = dict(expected)
+    kwargs = {}
+    source_case = expected.pop("source", None)
+    if source_case is not None:
+        source, digest = _source_deck(tmp_path, monkeypatch, source_case)
+        kwargs = {"source_path": source, "source_digest": "0" * 64 if source_case == "wrong-digest" else digest}
     if (corr := expected.pop("raw_corr", None)) is not None:
         monkeypatch.setattr(pt, "_corr", lambda _a, _b: corr)
+    if expected.pop("stale", False):
+        before = _snapshot(tmp_path)
+        with pytest.raises(PreviewStale, match="source deck changed during texture repair"):
+            _repair(tmp_path, slides, **kwargs)
+        assert _snapshot(tmp_path) == before
+        return
     if refused := expected.pop("refused", None):
         before = _snapshot(tmp_path)
         with pytest.raises(pt.TextureRepairRefused) as raised:
-            _repair(tmp_path, slides)
+            _repair(tmp_path, slides, **kwargs)
         assert str(raised.value) == f"Cannot repair Keynote's HTML export: {refused}"
         assert _snapshot(tmp_path) == before
         return
-    record, lines = _repair(tmp_path, slides)
+    record, lines = _repair(tmp_path, slides, **kwargs)
 
     [entry] = record["repaired"]
     assert {k: entry[k] for k in expected} == expected
     assert entry["leaves"][0] == "0/baseLayer/layers/0/layers/0/layers/0"
-    assert set(entry["verify"]) <= {"ocr", "corr"}
+    assert set(entry["verify"]) <= {"ocr", "corr", "object", "sourceObject", "data"}
     assert lines[-1] == "Repaired 1 mis-mapped texture"
     assert pt.json_hits(tmp_path, slides) == []
 
@@ -387,7 +516,7 @@ def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, monkeypa
 def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
     # Event 1 swaps the label's text in place under the same bad id: it is its own group, and the
     # event 2 "Point 1" donor must not fix it. The Magic Move lands a contents.to on slide 2's
-    # non-poster image: D2 has no content check for it, so it is refused. Slide 2 event 1 has movie
+    # non-poster image: D2 has no source certificate for it, so it is refused. Slide 2 event 1 has movie
     # M1's slot at that image's rect on the same bad id: the image must not borrow M1's poster.
     # Slide 1 MIX: text without accessibility text (event 0) and an ordinary image (event 1) on one
     # bad id at one rect are two objects, each refused. Slide 2 SHARED: a flattened copy between

@@ -1,0 +1,1739 @@
+{
+ "overall": "INCONCLUSIVE",
+ "gates": {
+  "model": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "m-on": "PASS",
+    "on": "PASS",
+    "on2": "PASS"
+   }
+  },
+  "complement": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "on": "PASS",
+    "on2": "PASS"
+   }
+  },
+  "no_dip": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "on": "PASS",
+    "on2": "PASS"
+   }
+  },
+  "curve": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "on": "PASS"
+   }
+  },
+  "monotone": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "on": "PASS",
+    "on2": "PASS"
+   }
+  },
+  "no_flash": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control delay-on: missing (its whole contract must match)",
+    "control delay-off: missing (its whole contract must match)"
+   ],
+   "candidates": {
+    "on": "PASS",
+    "on2": "PASS"
+   }
+  },
+  "screen": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control screen-on: missing (its whole contract must match)",
+    "control screen-off: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "handoff": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "on": "PASS",
+    "on2": "PASS",
+    "opaque-off": "PASS"
+   }
+  },
+  "cut": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control cut-on: missing (its whole contract must match)",
+    "control cut-off: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "frozen_frame": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "m-on": "PASS",
+    "m-raw": "PASS"
+   }
+  },
+  "frozen_region": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {}
+  },
+  "foreground": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-fg: missing (its whole contract must match)",
+    "control m-fg-omit: missing (its whole contract must match)",
+    "control m-fg-swap: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "tone": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-tone: missing (its whole contract must match)",
+    "control m-tone-raw: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "overlay": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-bridge-off: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "cost": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "m-on": "PASS"
+   }
+  },
+  "holder_pixels": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-snap: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-clipx: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-clipy: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac-clipx: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac-clipy: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-dpr15: missing (its whole contract must match)",
+    "control m-snap-dpr15-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr15-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr2: missing (its whole contract must match)",
+    "control m-snap-dpr2-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr2-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr15-frac: missing (its whole contract must match)",
+    "control m-snap-dpr2-frac: missing (its whole contract must match)",
+    "control m-snap-shift: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-dpr15-shift: missing (its whole contract must match)",
+    "control m-snap-dpr2-shift: missing (its whole contract must match)",
+    "control wrongrule-chrome: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "reference": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-snap: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-clipx: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-clipy: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac-clipx: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac-clipy: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-dpr15: missing (its whole contract must match)",
+    "control m-snap-dpr15-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr15-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr2: missing (its whole contract must match)",
+    "control m-snap-dpr2-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr2-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr15-frac: missing (its whole contract must match)",
+    "control m-snap-dpr2-frac: missing (its whole contract must match)",
+    "control m-snap-shift: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-dpr15-shift: missing (its whole contract must match)",
+    "control m-snap-dpr2-shift: missing (its whole contract must match)",
+    "control perfect-shift: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "mask": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-snap: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-clipx: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-clipy: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac-clipx: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac-clipy: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-dpr15: missing (its whole contract must match)",
+    "control m-snap-dpr15-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr15-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr2: missing (its whole contract must match)",
+    "control m-snap-dpr2-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr2-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr15-frac: missing (its whole contract must match)",
+    "control m-snap-dpr2-frac: missing (its whole contract must match)",
+    "control m-snap-shift: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-dpr15-shift: missing (its whole contract must match)",
+    "control m-snap-dpr2-shift: missing (its whole contract must match)",
+    "control m-tone: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "geometry": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-snap: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-clipx: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-clipy: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac-clipx: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-lbfrac-clipy: INCONCLUSIVE (its whole contract must match)",
+    "control m-snap-dpr15: missing (its whole contract must match)",
+    "control m-snap-dpr15-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr15-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr15-lbfrac-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr2: missing (its whole contract must match)",
+    "control m-snap-dpr2-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr2-clipy: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac-clipx: missing (its whole contract must match)",
+    "control m-snap-dpr2-lbfrac-clipy: missing (its whole contract must match)",
+    "control m-geo-dpr125: missing (its whole contract must match)",
+    "control m-geo-2560: missing (its whole contract must match)",
+    "control m-geo-scale: missing (its whole contract must match)",
+    "control m-geo-base: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "exterior": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-raw-end: missing (its whole contract must match)",
+    "control m-raw-svgclip: missing (its whole contract must match)",
+    "control m-raw-caption: missing (its whole contract must match)",
+    "control m-raw-nav-open: missing (its whole contract must match)",
+    "control m-raw-modal: missing (its whole contract must match)",
+    "control m-raw-svg: missing (its whole contract must match)",
+    "control m-raw-script: missing (its whole contract must match)",
+    "control m-raw-shadow-modal: missing (its whole contract must match)",
+    "control m-raw-shadow-fixed: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "hidden": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control life-hide-twin: missing (its whole contract must match)",
+    "control life-hide-screen-twin: missing (its whole contract must match)",
+    "control life-hide-nohide: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "shown": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control life-hide-twin: missing (its whole contract must match)",
+    "control life-hide-screen-twin: missing (its whole contract must match)",
+    "control life-hide-noshow: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "grant": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "life-grant-reload": "PASS"
+   }
+  },
+  "scope": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [
+    "control m-raw-prod-forge-snap-getter-kb: missing (its whole contract must match)",
+    "control m-raw-prod: missing (its whole contract must match)",
+    "control m-preview-prod: missing (its whole contract must match)",
+    "control m-raw-prod-forge-snap-assignment: missing (its whole contract must match)",
+    "control m-raw-prod-forge-snap-getter: missing (its whole contract must match)",
+    "control m-raw-prod-forge-frac-assignment: missing (its whole contract must match)",
+    "control m-raw-prod-forge-frac-getter: missing (its whole contract must match)",
+    "control m-preview-prod-forge-snap-assignment: missing (its whole contract must match)",
+    "control m-preview-prod-forge-snap-getter: missing (its whole contract must match)",
+    "control m-preview-prod-forge-frac-assignment: missing (its whole contract must match)",
+    "control m-preview-prod-forge-frac-getter: missing (its whole contract must match)"
+   ],
+   "candidates": {}
+  },
+  "cvc": {
+   "verdict": "PASS",
+   "reasons": [],
+   "candidates": {
+    "cvc": "PASS"
+   }
+  },
+  "lifecycle": {
+   "verdict": "INCONCLUSIVE",
+   "reasons": [],
+   "candidates": {
+    "rows": null
+   }
+  }
+ },
+ "arms": {
+  "channel-predefined": "MATCH",
+  "grant-attach": "MATCH",
+  "grant-chrome": "MATCH",
+  "life-grant-reload": "MATCH",
+  "m-hold": "MATCH",
+  "m-off": "MATCH",
+  "m-on": "MATCH",
+  "m-paused": "MATCH",
+  "m-raw": "MATCH",
+  "m-snap": "INCONCLUSIVE",
+  "m-snap-clipx": "INCONCLUSIVE",
+  "m-snap-clipy": "INCONCLUSIVE",
+  "m-snap-lbfrac": "INCONCLUSIVE",
+  "m-snap-lbfrac-clipx": "INCONCLUSIVE",
+  "m-snap-lbfrac-clipy": "INCONCLUSIVE",
+  "m-snap-shift": "INCONCLUSIVE",
+  "noblend": "MATCH",
+  "off": "MATCH",
+  "on": "MATCH",
+  "on2": "MATCH",
+  "opaque-off": "MATCH"
+ },
+ "missing": [
+  "cut-off",
+  "cut-on",
+  "delay-off",
+  "delay-on",
+  "life-advance",
+  "life-automatic",
+  "life-back",
+  "life-end-of-show",
+  "life-goto",
+  "life-hide",
+  "life-hide-nohide",
+  "life-hide-noshow",
+  "life-hide-screen",
+  "life-hide-screen-twin",
+  "life-hide-twin",
+  "life-loop-wrap",
+  "life-queued-advance",
+  "life-queued-skip",
+  "life-replay",
+  "m-bridge",
+  "m-bridge-off",
+  "m-fg",
+  "m-fg-dsf15",
+  "m-fg-dsf2",
+  "m-fg-omit",
+  "m-fg-swap",
+  "m-geo-2560",
+  "m-geo-base",
+  "m-geo-dpr125",
+  "m-geo-frac-dpr15",
+  "m-geo-frac-dpr2",
+  "m-geo-frac-origin-chrome",
+  "m-geo-scale",
+  "m-preview-prod",
+  "m-preview-prod-forge-frac-assignment",
+  "m-preview-prod-forge-frac-getter",
+  "m-preview-prod-forge-snap-assignment",
+  "m-preview-prod-forge-snap-getter",
+  "m-raw-caption",
+  "m-raw-end",
+  "m-raw-modal",
+  "m-raw-nav-open",
+  "m-raw-prod",
+  "m-raw-prod-forge-frac-assignment",
+  "m-raw-prod-forge-frac-getter",
+  "m-raw-prod-forge-snap-assignment",
+  "m-raw-prod-forge-snap-getter",
+  "m-raw-prod-forge-snap-getter-kb",
+  "m-raw-script",
+  "m-raw-shadow-fixed",
+  "m-raw-shadow-modal",
+  "m-raw-svg",
+  "m-raw-svgclip",
+  "m-snap-dpr15",
+  "m-snap-dpr15-clipx",
+  "m-snap-dpr15-clipy",
+  "m-snap-dpr15-frac",
+  "m-snap-dpr15-lbfrac",
+  "m-snap-dpr15-lbfrac-clipx",
+  "m-snap-dpr15-lbfrac-clipy",
+  "m-snap-dpr15-shift",
+  "m-snap-dpr2",
+  "m-snap-dpr2-clipx",
+  "m-snap-dpr2-clipy",
+  "m-snap-dpr2-frac",
+  "m-snap-dpr2-lbfrac",
+  "m-snap-dpr2-lbfrac-clipx",
+  "m-snap-dpr2-lbfrac-clipy",
+  "m-snap-dpr2-shift",
+  "m-tone",
+  "m-tone-raw",
+  "off-dsk",
+  "on-d2",
+  "on-dsk",
+  "on-sw",
+  "opaque-on",
+  "perfect-shift",
+  "screen-off",
+  "screen-on",
+  "wrongrule-chrome"
+ ],
+ "profile": "DX-1",
+ "detail": {
+  "channel-predefined": {
+   "outcome": "MATCH",
+   "checks": {
+    "grant": {
+     "verdict": "FAIL",
+     "problems": [],
+     "detail": {}
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "grant-attach": {
+   "outcome": "MATCH",
+   "checks": {
+    "grant": {
+     "verdict": "FAIL",
+     "problems": [],
+     "detail": {
+      "holders": 0
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "grant-chrome": {
+   "outcome": "MATCH",
+   "checks": {
+    "grant": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "life-grant-reload": {
+   "outcome": "MATCH",
+   "checks": {
+    "grant": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "m-hold": {
+   "outcome": "MATCH",
+   "checks": {
+    "frozen_region": {
+     "verdict": "FAIL",
+     "problems": [],
+     "detail": {
+      "spreads": [
+       96.38648223876953,
+       77.08956146240234,
+       46.09381103515625,
+       1.52587890625e-05,
+       85.79898071289062,
+       230.40274047851562,
+       485.1226501464844
+      ]
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    1.2888374328613281,
+    1.2775115966796875,
+    1.2098846435546875,
+    1.1815032958984375,
+    1.2222061157226562,
+    1.150421142578125,
+    1.2221336364746094,
+    1.3900909423828125,
+    1.2642974853515625
+   ],
+   "fitted": [
+    [
+     0.0029612360522150993,
+     9
+    ],
+    [
+     0.011813336052000523,
+     10
+    ],
+    [
+     0.03536894544959068,
+     11
+    ],
+    [
+     0.07349913567304611,
+     12
+    ],
+    [
+     0.13420213758945465,
+     13
+    ],
+    [
+     0.21664226055145264,
+     14
+    ],
+    [
+     0.31380704045295715,
+     15
+    ],
+    [
+     0.44251880049705505,
+     16
+    ],
+    [
+     0.5764248371124268,
+     17
+    ],
+    [
+     0.7023594975471497,
+     18
+    ],
+    [
+     0.8121885061264038,
+     19
+    ],
+    [
+     0.8984403014183044,
+     20
+    ],
+    [
+     0.957816481590271,
+     21
+    ],
+    [
+     0.9917311072349548,
+     22
+    ],
+    [
+     1.0,
+     23
+    ],
+    [
+     1.0,
+     24
+    ],
+    [
+     1.0,
+     25
+    ],
+    [
+     1.0,
+     26
+    ]
+   ]
+  },
+  "m-off": {
+   "outcome": "MATCH",
+   "checks": {
+    "frozen_frame": {
+     "verdict": "FAIL",
+     "problems": [],
+     "detail": {
+      "holder": null,
+      "reference": 71,
+      "demixed": [
+       null,
+       null,
+       null,
+       null,
+       null,
+       null
+      ]
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    200.9753875732422,
+    193.05001831054688,
+    174.50070190429688,
+    141.6167449951172,
+    101.08894348144531,
+    59.98121643066406,
+    27.080352783203125
+   ],
+   "fitted": [
+    [
+     0.21186122298240662,
+     9
+    ],
+    [
+     0.24294109642505646,
+     10
+    ],
+    [
+     0.315683513879776,
+     11
+    ],
+    [
+     0.44464021921157837,
+     12
+    ],
+    [
+     0.6035727858543396,
+     13
+    ],
+    [
+     0.7647795677185059,
+     14
+    ],
+    [
+     0.8938025236129761,
+     15
+    ],
+    [
+     0.9723402261734009,
+     16
+    ],
+    [
+     1.0,
+     17
+    ],
+    [
+     1.0,
+     18
+    ],
+    [
+     1.0,
+     19
+    ]
+   ]
+  },
+  "m-on": {
+   "outcome": "MATCH",
+   "checks": {
+    "model": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "frozen_frame": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holder": 71,
+      "reference": 71,
+      "demixed": [
+       71,
+       71,
+       71,
+       71,
+       71
+      ]
+     }
+    },
+    "frozen_region": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "spreads": [
+       2.1955299377441406,
+       2.025604724884033,
+       2.416289806365967,
+       3.0110206604003906,
+       4.443206787109375
+      ]
+     }
+    },
+    "overlay": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "overlay": [],
+      "region": "PASS"
+     }
+    },
+    "cost": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "takeMs": [
+       13.400000005960464
+      ]
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    1.2907943725585938,
+    1.1763191223144531,
+    1.0494308471679688,
+    1.2032012939453125,
+    1.3608779907226562,
+    1.3337860107421875
+   ],
+   "fitted": [
+    [
+     0.0,
+     8
+    ],
+    [
+     0.008125364780426025,
+     9
+    ],
+    [
+     0.030900374054908752,
+     10
+    ],
+    [
+     0.08177068084478378,
+     11
+    ],
+    [
+     0.18786689639091492,
+     12
+    ],
+    [
+     0.34930944442749023,
+     13
+    ],
+    [
+     0.5371295809745789,
+     14
+    ],
+    [
+     0.7366747260093689,
+     15
+    ],
+    [
+     0.8866112232208252,
+     16
+    ],
+    [
+     0.9694195985794067,
+     17
+    ],
+    [
+     1.0,
+     18
+    ],
+    [
+     1.0,
+     19
+    ],
+    [
+     1.0,
+     20
+    ]
+   ]
+  },
+  "m-paused": {
+   "outcome": "MATCH",
+   "checks": {
+    "frozen_frame": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holder": 300,
+      "reference": 300,
+      "demixed": [
+       300,
+       300,
+       300,
+       300,
+       300
+      ]
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    1.2907943725585938,
+    1.1763191223144531,
+    1.0494308471679688,
+    1.2032012939453125,
+    1.38006591796875,
+    1.5032958984375
+   ],
+   "fitted": [
+    [
+     0.008125364780426025,
+     11
+    ],
+    [
+     0.030900374054908752,
+     12
+    ],
+    [
+     0.08177068084478378,
+     13
+    ],
+    [
+     0.18786689639091492,
+     14
+    ],
+    [
+     0.34930944442749023,
+     15
+    ],
+    [
+     0.5371295809745789,
+     16
+    ],
+    [
+     0.7207315564155579,
+     17
+    ],
+    [
+     0.8656706809997559,
+     18
+    ],
+    [
+     0.957816481590271,
+     19
+    ],
+    [
+     1.0,
+     20
+    ],
+    [
+     1.0,
+     21
+    ],
+    [
+     1.0,
+     22
+    ]
+   ]
+  },
+  "m-raw": {
+   "outcome": "MATCH",
+   "checks": {
+    "exterior": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    },
+    "frozen_frame": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holder": 74,
+      "reference": 74,
+      "demixed": [
+       74,
+       74,
+       74,
+       74,
+       74
+      ]
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    1.2907943725585938,
+    1.1763191223144531,
+    1.0494308471679688,
+    1.2032012939453125,
+    1.38006591796875,
+    1.5032958984375
+   ],
+   "fitted": [
+    [
+     0.0,
+     8
+    ],
+    [
+     0.008125364780426025,
+     9
+    ],
+    [
+     0.030900374054908752,
+     10
+    ],
+    [
+     0.08177068084478378,
+     11
+    ],
+    [
+     0.18786689639091492,
+     12
+    ],
+    [
+     0.34930944442749023,
+     13
+    ],
+    [
+     0.5371295809745789,
+     14
+    ],
+    [
+     0.7207315564155579,
+     15
+    ],
+    [
+     0.8656706809997559,
+     16
+    ],
+    [
+     0.9649022817611694,
+     17
+    ],
+    [
+     1.0,
+     18
+    ],
+    [
+     1.0,
+     19
+    ],
+    [
+     1.0,
+     20
+    ]
+   ]
+  },
+  "m-snap": {
+   "outcome": "INCONCLUSIVE",
+   "checks": {
+    "holder_pixels": {
+     "verdict": "INCONCLUSIVE",
+     "problems": [
+      "no L_path for the arm's compositing path"
+     ],
+     "detail": {}
+    },
+    "reference": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "interior": 0.0,
+      "edge": 0.0
+     }
+    },
+    "mask": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {}
+    },
+    "geometry": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    }
+   },
+   "mismatch": [
+    "holder_pixels"
+   ],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "m-snap-clipx": {
+   "outcome": "INCONCLUSIVE",
+   "checks": {
+    "holder_pixels": {
+     "verdict": "INCONCLUSIVE",
+     "problems": [
+      "no L_path for the arm's compositing path"
+     ],
+     "detail": {}
+    },
+    "reference": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "interior": 0.0,
+      "edge": 0.0
+     }
+    },
+    "mask": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {}
+    },
+    "geometry": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    }
+   },
+   "mismatch": [
+    "holder_pixels"
+   ],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "m-snap-clipy": {
+   "outcome": "INCONCLUSIVE",
+   "checks": {
+    "holder_pixels": {
+     "verdict": "INCONCLUSIVE",
+     "problems": [
+      "no L_path for the arm's compositing path"
+     ],
+     "detail": {}
+    },
+    "reference": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "interior": 0.0,
+      "edge": 0.0
+     }
+    },
+    "mask": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {}
+    },
+    "geometry": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    }
+   },
+   "mismatch": [
+    "holder_pixels"
+   ],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "m-snap-lbfrac": {
+   "outcome": "INCONCLUSIVE",
+   "checks": {
+    "holder_pixels": {
+     "verdict": "INCONCLUSIVE",
+     "problems": [
+      "no L_path for the arm's compositing path"
+     ],
+     "detail": {}
+    },
+    "reference": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "interior": 0.0,
+      "edge": 0.0
+     }
+    },
+    "mask": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {}
+    },
+    "geometry": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    }
+   },
+   "mismatch": [
+    "holder_pixels"
+   ],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "m-snap-lbfrac-clipx": {
+   "outcome": "INCONCLUSIVE",
+   "checks": {
+    "holder_pixels": {
+     "verdict": "INCONCLUSIVE",
+     "problems": [
+      "no L_path for the arm's compositing path"
+     ],
+     "detail": {}
+    },
+    "reference": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "interior": 0.0,
+      "edge": 0.0
+     }
+    },
+    "mask": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {}
+    },
+    "geometry": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    }
+   },
+   "mismatch": [
+    "holder_pixels"
+   ],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "m-snap-lbfrac-clipy": {
+   "outcome": "INCONCLUSIVE",
+   "checks": {
+    "holder_pixels": {
+     "verdict": "INCONCLUSIVE",
+     "problems": [
+      "no L_path for the arm's compositing path"
+     ],
+     "detail": {}
+    },
+    "reference": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "interior": 0.0,
+      "edge": 0.0
+     }
+    },
+    "mask": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {}
+    },
+    "geometry": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "holders": 1
+     }
+    }
+   },
+   "mismatch": [
+    "holder_pixels"
+   ],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "m-snap-shift": {
+   "outcome": "INCONCLUSIVE",
+   "checks": {
+    "holder_pixels": {
+     "verdict": "INCONCLUSIVE",
+     "problems": [
+      "no L_path for the arm's compositing path"
+     ],
+     "detail": {}
+    },
+    "reference": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "interior": 0.0,
+      "edge": 0.0
+     }
+    },
+    "mask": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {}
+    }
+   },
+   "mismatch": [
+    "holder_pixels"
+   ],
+   "problems": [],
+   "midResiduals": [],
+   "fitted": []
+  },
+  "noblend": {
+   "outcome": "MATCH",
+   "checks": {
+    "model": {
+     "verdict": "FAIL",
+     "problems": [],
+     "detail": {
+      "mid": 8
+     }
+    },
+    "complement": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 8
+     }
+    },
+    "no_dip": {
+     "verdict": "FAIL",
+     "problems": [],
+     "detail": {
+      "mid": 8
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    14.0,
+    23.980255126953125,
+    37.04493713378906,
+    53.42189025878906,
+    63.106414794921875,
+    58.09983825683594,
+    39.47288513183594,
+    18.0
+   ],
+   "fitted": [
+    [
+     0.0,
+     9
+    ],
+    [
+     0.008014772087335587,
+     10
+    ],
+    [
+     0.023437349125742912,
+     11
+    ],
+    [
+     0.05422056093811989,
+     12
+    ],
+    [
+     0.10025909543037415,
+     13
+    ],
+    [
+     0.17052924633026123,
+     14
+    ],
+    [
+     0.2943212687969208,
+     15
+    ],
+    [
+     0.458957314491272,
+     16
+    ],
+    [
+     0.6474201679229736,
+     17
+    ],
+    [
+     0.8098955750465393,
+     18
+    ],
+    [
+     0.9253261089324951,
+     19
+    ],
+    [
+     0.9883058071136475,
+     20
+    ],
+    [
+     1.0,
+     21
+    ],
+    [
+     1.0,
+     22
+    ]
+   ]
+  },
+  "off": {
+   "outcome": "MATCH",
+   "checks": {
+    "model": {
+     "verdict": "FAIL",
+     "problems": [],
+     "detail": {
+      "mid": 7
+     }
+    },
+    "complement": {
+     "verdict": "FAIL",
+     "problems": [],
+     "detail": {
+      "mid": 7
+     }
+    },
+    "handoff": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "H": 0.0
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    200.9753875732422,
+    193.05001831054688,
+    171.6928253173828,
+    138.30108642578125,
+    96.96571350097656,
+    56.31501770019531,
+    22.852279663085938
+   ],
+   "fitted": [
+    [
+     0.21186122298240662,
+     9
+    ],
+    [
+     0.24294109642505646,
+     10
+    ],
+    [
+     0.3266948163509369,
+     11
+    ],
+    [
+     0.4576428234577179,
+     12
+    ],
+    [
+     0.6197422742843628,
+     13
+    ],
+    [
+     0.7791568040847778,
+     14
+    ],
+    [
+     0.9103832244873047,
+     15
+    ],
+    [
+     0.9843131303787231,
+     16
+    ],
+    [
+     1.0,
+     17
+    ],
+    [
+     1.0,
+     18
+    ]
+   ]
+  },
+  "on": {
+   "outcome": "MATCH",
+   "checks": {
+    "model": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "complement": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "no_dip": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "curve": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "startTimes": [
+       8331.056000024546
+      ],
+      "maxSumErr": 9.999999999177334e-07,
+      "maxEaseErr": 5.22082187592865e-07,
+      "frames": 117
+     }
+    },
+    "monotone": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "worstStep": 0.0,
+      "last": 1.0
+     }
+    },
+    "handoff": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "H": 0.0
+     }
+    },
+    "no_flash": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "windowRafs": 3,
+      "windowAlpha": null
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    1.2907943725585938,
+    1.1763191223144531,
+    1.0494308471679688,
+    1.2032012939453125,
+    1.38006591796875,
+    1.5032958984375
+   ],
+   "fitted": [
+    [
+     0.0,
+     9
+    ],
+    [
+     0.008125364780426025,
+     10
+    ],
+    [
+     0.030900374054908752,
+     11
+    ],
+    [
+     0.08177068084478378,
+     12
+    ],
+    [
+     0.18786689639091492,
+     13
+    ],
+    [
+     0.34930944442749023,
+     14
+    ],
+    [
+     0.5371295809745789,
+     15
+    ],
+    [
+     0.7207315564155579,
+     16
+    ],
+    [
+     0.8656706809997559,
+     17
+    ],
+    [
+     0.957816481590271,
+     18
+    ],
+    [
+     0.9970312714576721,
+     19
+    ],
+    [
+     1.0,
+     20
+    ],
+    [
+     1.0,
+     21
+    ]
+   ]
+  },
+  "on2": {
+   "outcome": "MATCH",
+   "checks": {
+    "model": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "complement": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "no_dip": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "curve": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "startTimes": [
+       8381.090999988373
+      ],
+      "maxSumErr": 4.999999999588667e-07,
+      "maxEaseErr": 5.757059915456608e-07,
+      "frames": 117
+     }
+    },
+    "monotone": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "worstStep": 0.0,
+      "last": 1.0
+     }
+    },
+    "handoff": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "H": 0.0
+     }
+    },
+    "no_flash": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "windowRafs": 3,
+      "windowAlpha": null
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    1.2907943725585938,
+    1.1763191223144531,
+    1.0494308471679688,
+    1.2032012939453125,
+    1.38006591796875,
+    1.5032958984375
+   ],
+   "fitted": [
+    [
+     0.0,
+     9
+    ],
+    [
+     0.008125364780426025,
+     10
+    ],
+    [
+     0.030900374054908752,
+     11
+    ],
+    [
+     0.08177068084478378,
+     12
+    ],
+    [
+     0.18786689639091492,
+     13
+    ],
+    [
+     0.34930944442749023,
+     14
+    ],
+    [
+     0.5371295809745789,
+     15
+    ],
+    [
+     0.7207315564155579,
+     16
+    ],
+    [
+     0.8656706809997559,
+     17
+    ],
+    [
+     0.957816481590271,
+     18
+    ],
+    [
+     0.9970312714576721,
+     19
+    ],
+    [
+     1.0,
+     20
+    ],
+    [
+     1.0,
+     21
+    ]
+   ]
+  },
+  "opaque-off": {
+   "outcome": "MATCH",
+   "checks": {
+    "model": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "no_dip": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "mid": 6
+     }
+    },
+    "monotone": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "worstStep": 0.0,
+      "last": 1.0
+     }
+    },
+    "handoff": {
+     "verdict": "PASS",
+     "problems": [],
+     "detail": {
+      "H": 0.0
+     }
+    }
+   },
+   "mismatch": [],
+   "problems": [],
+   "midResiduals": [
+    0.523101806640625,
+    0.6655426025390625,
+    0.5325927734375,
+    0.512481689453125,
+    0.6416168212890625,
+    0.5746002197265625
+   ],
+   "fitted": [
+    [
+     0.0018451774958521128,
+     9
+    ],
+    [
+     0.029786890372633934,
+     10
+    ],
+    [
+     0.10124731808900833,
+     11
+    ],
+    [
+     0.21725688874721527,
+     12
+    ],
+    [
+     0.38649827241897583,
+     13
+    ],
+    [
+     0.5762891173362732,
+     14
+    ],
+    [
+     0.7532080411911011,
+     15
+    ],
+    [
+     0.8770161271095276,
+     16
+    ],
+    [
+     0.9651674628257751,
+     17
+    ],
+    [
+     0.9981546998023987,
+     18
+    ],
+    [
+     1.0,
+     19
+    ],
+    [
+     1.0,
+     20
+    ]
+   ]
+  }
+ }
+}

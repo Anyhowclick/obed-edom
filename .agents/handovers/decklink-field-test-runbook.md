@@ -291,7 +291,7 @@ EOF
 ## Known limits going in
 Venue is **1080p25** and the fixture movies are ~30 fps (cadence hiccup, §3) · a movie carried through a
 geometry-static Magic Move plays only under GL replay = managed engine only; the attach path refuses 1→2 (§3) · OBS's
-Chromium (127) ≠ the desktop Chrome the gates run on (154 since 2026-09-30): P2 results do not transfer automatically ·
+Chromium (127) ≠ the desktop Chrome the gates run on (155 since 2026-10-15): P2 results do not transfer automatically ·
 HEVC under OBS: flagged "may not play", likely blank (Qualify Keynote converts a deck's movies to H.264) · the managed engine
 shows only a Keynote-prepared deck (no fixture route, no test-card control) · continuity: any deck that derives
 (only the gate decks are measured; other decks' declined moves are named under the badge); the OBS Browser Source stays 1920×1080 · Loop movies carry only when every instance across the move loops (else that cut is declined); a Back and

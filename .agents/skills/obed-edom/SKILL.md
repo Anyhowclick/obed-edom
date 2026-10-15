@@ -897,13 +897,22 @@ for the parked `iwa-surgical-write-generator` feature.
   their current frame that fades with the slide; `off` restores the export's pop-in, double slide and jump to the baked
   opening frame. The freeze needs the host grant `window.__obedPlacement === "snap"` (plan §3.3, decision 15): only a
   `LiveOutputHost` that launched its Chrome (not attach mode), `Browser.getVersion` major in `QUALIFIED_SNAP_MAJORS`
-  (154) and `gpu_compositing: "enabled"`, through a first-run private channel, context-bound round trip, revoked at
-  `observe()` on fingerprint change. Managed OBS/CEF (attach), raw export and Build Preview (no host, decision 14) keep
-  today's jump; the CEF placement probe is a follow-up PR. The take is identity-tone (the GPU mid-tone step at the
+  (a new major refuses with `unqualified-version` until `scripts/chrome_requal.py --chrome <Stable or Beta binary> --out <dir outside output/>` prints PASS on it — 28 headless arms, ~8 min idle, exit 0/1/2 = PASS/FAIL/INCONCLUSIVE; then add the printed `QUALIFIED_SNAP_MAJORS` line in a PR with a short gate record; plan §13 2026-10-15) and `gpu_compositing: "enabled"`, through a first-run private channel, context-bound round trip, revoked at
+  `observe()` on fingerprint change (`method: knowledge`, no expiry; decision 16). Managed OBS/CEF gets `frac` only from the
+  placement probe (`keynote_live_cef_placement.plan.md`, §11 contracts): `placement_probe.py` (pinned clips + pure classifier),
+  `ManagedObs.calibration_adapter()` (hidden Studio Mode preview of `AK-Calibrate`; exact step-0 absent responses; verified
+  cleanup + restore; O5 persistence vs `STEP0_NULL_ALLOWLIST`), `LiveOutputHost` probe mode (fresh-nonce captures ≥300 ms
+  after paint, Program guard, 15 s page-clock lease renewed every 3 s on unchanged identity, launch-scoped suppression after
+  `program-disturbed`/`isolation-failed`, operator `recalibrate`). Raw export and Build Preview serve `patch_rendering`,
+  which has no freeze take or holder attachment (O1), so they keep today's jump. The take is identity-tone (the GPU mid-tone step at the
   freeze is a known limit; Q5 open pending W5) and geometry-guarded: DPR 1, 1.5 or 2, stage scale 1, translation-only
-  chains, integer `left`/`top`; scaled stages keep the jump (plan §3.2, §12). Report `output.placement = {grant, reason,
-  product, gpuCompositing, at}`, reason ∈ `granted`, `attached`, `unqualified-version`, `software-compositing`,
-  `version-unavailable`, `channel-compromised` (output stays hidden, `show` refused), `revoked-fingerprint`. G2 bytes are unchanged; with the patch on the
+  chains, integer `left`/`top`; scaled stages keep the jump (plan §3.2, §12). Report `output.placement = {state, grant, reason,
+  product, gpuCompositing, at, method, probeId, leaseMs, leaseExpiresAt, tone, automaticProbesDisabled}` (§11.3); knowledge reason ∈ `granted`, `attached`, `unqualified-version`, `software-compositing`,
+  `version-unavailable`, `channel-compromised` (output stays hidden, `show` refused), `revoked-fingerprint`. Probe reasons: §11.3 vocabulary.
+  Qualify Keyer placement with `managed_obs_qualify.py --arm placement` (CEF gates, persistence, program-wire integrity,
+  live freshness controls; recordings kept only for non-PASS sessions; DSK identity comes from the drawn VideoFrame and a sole
+  mid-frame shortfall reruns the DSK session up to 3 times, every attempt kept and scored; ~23 min per rate, both rates
+  hard-coded — a scratch wrapper setting `MMO_RATES` runs one rate). G2 bytes are unchanged; with the patch on the
   P2 fixture reports exactly `opacityUnproven = [{4, "size"}]` (no override: LIVE replays the player's own 0.2947) and
   `occludedBands` 0/128 (patch off: `[]`, 20/128). `frameLen` (settled-frame call count) reads 96 on / 88 off when the
   settle frame carries every uniform write, but the player's uniform cache makes it timing-dependent (headless 85/86 off):

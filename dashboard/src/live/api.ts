@@ -1,4 +1,4 @@
-export type LiveOperation = "advance" | "goTo" | "hide" | "show" | "stop";
+export type LiveOperation = "advance" | "goTo" | "hide" | "show" | "recalibrate" | "stop";
 export type LiveCapability = { supported: boolean; reason?: string };
 export type LiveSlide = { originalOrdinal: number; skipped: boolean; thumbnailUrl?: string; notes?: string };
 export type LiveSourceState = "current" | "changed" | "missing";
@@ -11,6 +11,20 @@ export type LiveCodec = { asset: string; codec: string | null; family: "h264" | 
 export type LiveNotCarried = { fromSlide: number; toSlide: number; asset: string; reason: string };
 export type LivePosterHold = { fromSlide: number | null; toSlide: number | null; movie: string; objectId: string | null; planned: "continuous" | "exact" | "baked"; mode: "exact" | "baked" | "unavailable"; reason?: string };
 export type LiveContinuity ={ mode: "qualified" | "unsupported" | "off" | "pending"; reason?: string; version?: number; sha256?: string; scale?: number; notCarried?: LiveNotCarried[]; posterHold?: LivePosterHold[]; mmFeed?: { mode: "off" | "injected" | "notApplicable" | "unavailable"; reason?: string; version: number; sha256: string | null } };
+export type Placement = {
+  state: "invalid" | "probing" | "valid";
+  grant: "snap" | "frac" | null;
+  reason: string | null;
+  at: number | null;
+  product: string | null;
+  gpuCompositing: string | null;
+  method: "knowledge" | "probe" | null;
+  probeId: string | null;
+  leaseMs: number | null;
+  leaseExpiresAt: number | null;
+  tone: { observed: "identity" | "gpu_analytic" | null; applied: "identity" };
+  automaticProbesDisabled: boolean;
+};
 export type LiveSnapshot = {
   sessionId: string;
   revision: number;
@@ -38,6 +52,7 @@ export type LiveSnapshot = {
     codecs?: LiveCodec[];
     codecWarnings?: string[];
     rateWarnings?: string[];
+    placement?: Placement;
   };
 };
 export type LiveCommand = { requestId: string; operation: LiveOperation; slide?: number };

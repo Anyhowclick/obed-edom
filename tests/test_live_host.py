@@ -7,6 +7,7 @@ import re
 import threading
 import time
 
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,7 +16,7 @@ from unittest.mock import ANY
 import pytest
 
 from fake_chrome import FakeChromeProcess, FakeTime
-from obed_edom import devtools_port, html_preview, live_gl_replay_js, live_host, live_mm_feed_js, live_runtime
+from obed_edom import devtools_port, html_preview, live_gl_replay_js, live_host, live_mm_feed_js, live_runtime, managed_obs, placement_probe
 from obed_edom.fixture_paths import fixture
 
 
@@ -50,6 +51,8 @@ class FakeCdp:
         self.sysinfo_fails = False
         self.predefined = False
         self.token: str | None = None
+        self.placement_mode = "knowledge"
+        self.target_id = "PROGRAM"
         self.documents = 0
         self.context: dict[str, Any] | None = None
         self.placement = "invalid"
@@ -80,6 +83,7 @@ class FakeCdp:
             match = re.search(r'var T="([0-9a-f]{32})"', params["source"])
             if match:
                 self.token = match.group(1)
+                self.placement_mode = re.search(r'M="(knowledge|probe)"', params["source"]).group(1)
             return {"identifier": "1"}
         if method == "Page.getFrameTree": return {"frameTree": {"frame": {"id": "MAIN"}}}
         return {}
@@ -96,13 +100,19 @@ class FakeCdp:
         if self.context is None or context != self.context["uniqueId"]:
             raise live_host.LiveHostError("CDP Runtime.evaluate failed: Cannot find context with specified id")
         token = self.token
-        if expression == live_host._placement_round_trip_expr(token):
+        if expression == "[navigator.userAgent,window.devicePixelRatio,window.innerWidth,window.innerHeight]":
+            return ["Fake/1", 1, 1920, 1080]
+        if expression == live_host._placement_round_trip_expr(token, mode=self.placement_mode):
             if self.predefined: return [None]
             return ["true", "snap", "true", "invalid"]
-        for value in ("snap", "invalid"):
-            if expression == live_host._placement_set_expr(token, value):
-                if self.predefined: return None
-                self.placement = value
+        for value in ("snap", "frac", "invalid"):
+            for lease in (None, live_host._PLACEMENT_LEASE_MS):
+                if expression == live_host._placement_set_expr(token, value, lease):
+                    if self.predefined: return None
+                    self.placement = value
+                    return value
+            if expression == live_host._placement_renew_expr(token, value, live_host._PLACEMENT_LEASE_MS):
+                if self.predefined or self.placement != value: return None
                 return value
         raise AssertionError(expression)
     def stop(self): self.stopped = True
@@ -124,7 +134,7 @@ class FakeCdp:
         self.clicks += 1
         self.revision += 1
         self.busy = self.busy_on_enter
-    def evaluate(self, expression):
+    def evaluate(self, expression, deadline_s=None):
         if "__OBED_CONTINUITY_INFO__" in expression:
             return {"ready": False, "present": False, "info": {"installed": True}, "stage": None}
         if "__obedLive" in expression:
@@ -238,8 +248,10 @@ def test_stop_only_stops_owned_resources_and_refuses_restart(tmp_path, monkeypat
     output = host(tmp_path, monkeypatch)
     output.observe()
     fake = FakeCdp.instances[0]
+    placement = dict(output.output["placement"])
     output.stop()
     assert fake.stopped
+    assert output.output["placement"] == placement
     with pytest.raises(live_host.LiveHostError, match="stopped"):
         output.observe()
 
@@ -763,13 +775,33 @@ def test_safe_export_file_rejects_traversal_and_symlink(tmp_path, monkeypatch):
     with pytest.raises(html_preview.PreviewError): html_preview.safe_export_file(root, "out/x")
 
 
-def test_program_html_injects_overlay_first_and_fit_once(tmp_path):
+def test_program_html_injects_overlay_first_and_fit_once(tmp_path, monkeypatch):
     (tmp_path / "index.html").write_text("<html><head></head><body><div id=\"stage\"></div></body></html>")
     server = live_host._AssetServer(tmp_path, b"", resolver=resolver_for(tmp_path))
     document = server._program_html().decode()
     body = document[document.index("<body"):]
     assert body.index('id="obed-output-black"') < body.index('id="stage"')
     assert document.count('id="obed-output-fit"') == 1
+    assets = placement_probe.ProbeAssets(
+        "a" * 64,
+        placement_probe.ProbeAsset("placement_probe.mp4", "b" * 64, b"pattern"),
+        placement_probe.ProbeAsset("placement_motion.mp4", "c" * 64, b"motion"),
+    )
+    monkeypatch.setattr(live_host, "load_probe_assets", lambda: assets)
+    monkeypatch.setattr(live_host, "render_probe_page", lambda spec: f"run={spec.run_id}".encode())
+    server.httpd = SimpleNamespace(server_port=1234)
+    spec = placement_probe.ProbeSpec("1" * 32, 1920, 1080, 50, 1.0)
+    probe_url = server.set_probe_run(spec)
+    assert probe_url == f"http://127.0.0.1:1234/__obed_probe/{spec.run_id}/index.html"
+    assert server._probe_asset(f"__obed_probe/{spec.run_id}/index.html") == (f"run={spec.run_id}".encode(), "text/html")
+    assert server._probe_asset(f"__obed_probe/{spec.run_id}/placement_probe.mp4") == (b"pattern", "video/mp4")
+    replacement = placement_probe.ProbeSpec("2" * 32, 1920, 1080, 50, 1.0)
+    server.set_probe_run(replacement)
+    server.set_probe_run(None, run_id=spec.run_id)
+    assert server._probe_asset(f"__obed_probe/{replacement.run_id}/index.html") == (f"run={replacement.run_id}".encode(), "text/html")
+    server.set_probe_run(None, run_id=replacement.run_id)
+    assert server._probe_asset(f"__obed_probe/{spec.run_id}/index.html") is None
+    server.httpd = None
 
 
 def test_program_html_requires_head_and_body(tmp_path):
@@ -792,12 +824,13 @@ class RecordingHandler:
         self.status = None
         self.error = None
         self.sent_headers = False
+        self.data = b""
 
     def send_response(self, status):
         self.status = status
 
-    def send_header(self, *_args):
-        pass
+    def send_header(self, name, value):
+        self.headers[name] = value
 
     def end_headers(self):
         self.sent_headers = True
@@ -809,9 +842,10 @@ class RecordingHandler:
         def __init__(self, outer):
             self.outer = outer
 
-        def write(self, _chunk):
+        def write(self, chunk):
             if self.outer.fail_after_headers:
                 raise OSError("socket gone")
+            self.outer.data += chunk
 
     @property
     def wfile(self):
@@ -839,6 +873,11 @@ def test_send_bytes_ends_response_silently_when_write_fails_after_headers():
     assert live_host._AssetServer._send_bytes(handler, b"data", "text/html") is True
     assert handler.sent_headers
     assert handler.error is None
+    ranged = RecordingHandler(fail_after_headers=False)
+    ranged.headers["Range"] = "bytes=1-2"
+    assert live_host._AssetServer._send_blob(ranged, b"data", "video/mp4") is True
+    assert ranged.status == 206 and ranged.data == b"at"
+    assert ranged.headers["Content-Range"] == "bytes 1-2/4"
 
 
 def test_key_events_omit_native_key_code(tmp_path):
@@ -2573,7 +2612,8 @@ def ready(monkeypatch) -> None:
     ("product", "user_agent", "renderer"),
     [
         ("Chrome/127.0.6533.120", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.120 OBS/32.2.2 Safari/537.36", "cef"),
-        ("Chrome/155.0.8059.40", "Mozilla/5.0 Chrome/155.0.8059.40 Safari/537.36", None),
+        ("Chrome/156.0.8100.10", "Mozilla/5.0 Chrome/156.0.8100.10 Safari/537.36", None),
+        ("Chrome/155.0.8059.40", "Mozilla/5.0 Chrome/155.0.8059.40 Safari/537.36", "chrome"),
         ("Chrome/154.0.8037.59", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36", "chrome"),
     ],
 )
@@ -3203,8 +3243,9 @@ def attach_host(tmp_path, monkeypatch, **kwargs):
     monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
     monkeypatch.delenv(live_host.MM_FEED_ENV, raising=False)
     FakeCdp.instances.clear()
+    server_factory = kwargs.pop("server_factory", FakeServer)
     return live_host.LiveOutputHost(
-        tmp_path, [], attach_endpoint="http://127.0.0.1:9222", transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, **kwargs,
+        tmp_path, [], attach_endpoint="http://127.0.0.1:9222", transport_factory=FakeCdp, server_factory=server_factory, resolver=resolver, **kwargs,
     )
 
 
@@ -3485,7 +3526,7 @@ def test_real_export_rate_warnings_come_from_probed_movie_fps(tmp_path, monkeypa
 
 
 # --- Dissolve cross-fade W6: the host placement grant (plan rev 17 §3.3) --------------------
-# The take freezes a movie with Chrome 154's snapped rule only when `window.__obedPlacement`
+# The take freezes a movie under a `QUALIFIED_SNAP_MAJORS` major's snapped rule only when `window.__obedPlacement`
 # reads "snap". The host grants it iff it launched Chrome itself, `Browser.getVersion` names a
 # qualified major and `SystemInfo.getInfo` reports GPU compositing; eligibility is decided before
 # anything exposes "snap" (r13 finding 2), the round trip and the commit are bound to the program
@@ -3510,12 +3551,705 @@ def commits(fake, value="snap"):
 
 
 @pytest.mark.parametrize(
+    ("telemetry", "expected"),
+    [
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 40.0, "media": []}, True),
+        ({"visibilityEvents": 1, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0, "media": []}, False),
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 40.1, "media": []}, False),
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": None, "maxRafGapMs": 20.0, "media": []}, None),
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
+          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 33.4, "frameMs": 33.3,
+                     "awaitingAdvance": False}]}, False),
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
+          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 0, "frameMs": None,
+                     "awaitingAdvance": True, "activeWithoutAdvanceMs": 60.0}]}, True),
+        ({"visibilityEvents": 0, "frames": 8, "baselineFrameMs": 20.0, "maxRafGapMs": 20.0,
+          "media": [{"id": "v", "playing": True, "monotonic": True, "maxStallMs": 0, "frameMs": None,
+                     "awaitingAdvance": True, "activeWithoutAdvanceMs": 60.1}]}, None),
+        (None, True),
+    ],
+)
+def test_program_guard_applies_program_liveness_thresholds(telemetry, expected, monkeypatch):
+    if telemetry is None:
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("Node is required to exercise Program guard media tracking")
+        probe = live_host._ProgramGuard(None, "program")
+        script = (
+            "const vm=require('vm');const BEGIN=" + json.dumps(probe._expr("begin"))
+            + ";const FINISH=" + json.dumps(probe._expr("finish")) + ";"
+            "function run(kind){let q=[],videos=[];"
+            "function video(paused,loop){return {id:'same',currentSrc:'asset.mp4',paused:paused,ended:false,loop:loop,readyState:4,currentTime:0}}"
+            "if(kind==='shared')videos=[video(false,false),video(true,false)];else videos=[video(false,kind==='loop')];"
+            "const c={};c.window=c;c.document={querySelectorAll:()=>videos,addEventListener:()=>{},removeEventListener:()=>{}};"
+            "c.requestAnimationFrame=f=>{q.push(f);return q.length};c.cancelAnimationFrame=()=>{};vm.createContext(c);vm.runInContext(BEGIN,c);"
+            "const seq=kind==='loop'?[.9,.92,.02,.04,.06]:[.1,.12,.14,.16,.18];"
+            "let count=(kind==='delayed'||kind==='late'||kind==='never')?8:seq.length;"
+            "for(let i=0;i<count;i++){if(kind==='delayed'){videos[0].paused=i<2;videos[0].currentTime=i<7?0:(i-6)*.04}"
+            "else if(kind==='late'){videos[0].paused=i<7;videos[0].currentTime=0}"
+            "else if(kind==='never'){videos[0].paused=i<2;videos[0].currentTime=0}"
+            "else{videos[0].currentTime=seq[i];if(kind==='end'&&i>=2)videos[0].ended=true}const f=q.shift();f(i*20)}"
+            "return vm.runInContext(FINISH,c)}"
+            "console.log(JSON.stringify({shared:run('shared'),loop:run('loop'),end:run('end'),delayed:run('delayed'),late:run('late'),never:run('never')}));"
+        )
+        rows = json.loads(subprocess.run([node, "-e", script], check=True, text=True, capture_output=True).stdout)
+        assert len(rows["shared"]["media"]) == 2
+        assert len({item["id"] for item in rows["shared"]["media"]}) == 2
+        assert rows["shared"]["media"][0]["monotonic"] is True
+        assert rows["shared"]["media"][1]["playing"] is False
+        assert rows["loop"]["media"][0]["monotonic"] is True
+        assert rows["end"]["media"][0]["monotonic"] is True
+        assert rows["delayed"]["media"][0]["maxStallMs"] == 0
+        assert rows["delayed"]["media"][0]["frameMs"] > 0
+        assert rows["late"]["media"][0]["frameMs"] is None
+        assert rows["late"]["media"][0]["activeWithoutAdvanceMs"] == 0
+        assert rows["never"]["media"][0]["activeWithoutAdvanceMs"] > 60
+
+        class NodeTransport:
+            def __init__(self, row): self.row = row
+            def evaluate_in(self, _context, _expression, deadline_s=None): return self.row
+
+        for kind, expected_ok in (("delayed", True), ("late", True), ("never", None)):
+            checked = live_host._ProgramGuard(NodeTransport(rows[kind]), "program")
+            checked._baseline_frame_ms = 20.0
+            assert checked.finish().ok is expected_ok
+        return
+
+    class Transport:
+        def __init__(self):
+            self.arms = 0
+
+        def evaluate_in(self, _context, expression, deadline_s=None):
+            if "guard exists" in expression:
+                return True
+            if "g.arm" in expression:
+                self.arms += 1
+                return True
+            row = dict(telemetry)
+            baseline = row["baselineFrameMs"]
+            row["gaps"] = (
+                [20.0, 33.4, 20.0, 33.4, 20.0, 33.4]
+                if baseline is None else [baseline] * live_host._PROGRAM_BASELINE_GAPS
+            )
+            return row
+
+    clock = [0.0]
+    monkeypatch.setattr(live_host.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(live_host.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    transport = Transport()
+    guard = live_host._ProgramGuard(transport, "program")
+    guard.begin()
+    guard.sample("installed")
+    result = guard.finish()
+    assert result.ok is expected
+    assert result.visibility_events == telemetry["visibilityEvents"]
+    assert transport.arms == 1
+
+    if telemetry["baselineFrameMs"] == 20.0 and telemetry["maxRafGapMs"] == 40.0:
+        class SettlingTransport:
+            def __init__(self, *, settles):
+                self.settles = settles
+                self.samples = 0
+                self.arms = 0
+
+            def evaluate_in(self, _context, expression, deadline_s=None):
+                if "guard exists" in expression:
+                    return True
+                if "g.arm" in expression:
+                    self.arms += 1
+                    return True
+                if "g.finish" in expression:
+                    return {
+                        "visibilityEvents": 0,
+                        "frames": 8,
+                        "baselineFrameMs": 33.4,
+                        "maxRafGapMs": 70.0,
+                        "media": [],
+                    }
+                self.samples += 1
+                gaps = (
+                    [20.0, 33.4, 20.0, 33.4, 20.0, 33.4]
+                    if not self.settles or self.samples < 3 else [33.4] * live_host._PROGRAM_BASELINE_GAPS
+                )
+                return {
+                    "visibilityEvents": 0,
+                    "frames": len(gaps) + 1,
+                    "gaps": gaps,
+                    "baselineFrameMs": 33.4,
+                    "maxRafGapMs": max(gaps),
+                    "media": [],
+                }
+
+        clock[0] = 0.0
+        settling = SettlingTransport(settles=True)
+        settled_guard = live_host._ProgramGuard(settling, "program", not_before_s=.05)
+        settled_guard.begin()
+        assert settled_guard._baseline_frame_ms == pytest.approx(33.4)
+        assert settling.samples >= 5 and settling.arms == 1
+        assert settled_guard.finish().ok is False
+
+        clock[0] = 0.0
+        unstable = SettlingTransport(settles=False)
+        unstable_guard = live_host._ProgramGuard(unstable, "program")
+        unstable_guard.begin()
+        inconclusive = unstable_guard.finish()
+        assert inconclusive.ok is None
+        assert inconclusive.reason == "program cadence baseline unstable"
+        assert unstable.arms == 1
+
+
+def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monkeypatch):
+    class ProbeServer(FakeServer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.run = None
+            self.runs = []
+
+        def set_probe_run(self, spec, *, run_id=None):
+            if spec is None and run_id is not None and (self.run is None or self.run.run_id != run_id):
+                return None
+            self.run = spec
+            self.runs.append(spec.run_id if spec else None)
+            return None if spec is None else f"http://127.0.0.1:9/__obed_probe/{spec.run_id}/index.html"
+
+    class Adapter:
+        def __init__(self):
+            self.engine = managed_obs.EngineIdentity(42, 100.0, 3)
+            self.starts = []
+            self.cancelled = []
+
+        def identity(self):
+            return self.engine
+
+        def start(self, request, *, measure, guard):
+            future = Future()
+            self.starts.append((request, measure, guard, future))
+            return future
+
+        def cancel(self, run_id, *, timeout_s=5.0):
+            self.cancelled.append((run_id, timeout_s))
+            for request, _measure, _guard, future in self.starts:
+                if request.spec.run_id == run_id and not future.done():
+                    future.set_result(result(request, program=True, errors=("cancelled",)))
+            return True
+
+    def evidence(request):
+        identity = placement_probe.ProbeIdentity(
+            request.spec.run_id, "source", "probe-target", "probe-context",
+            request.connection_generation, "Fake/1", 1.0,
+        )
+        return placement_probe.ClassifierInput(
+            request.spec, ("a" * 64, "b" * 64, "c" * 64), identity, 4, (1920, 540),
+            ("bt709", "bt709", "bt709", False), (), (), (),
+        )
+
+    def result(request, *, program=True, errors=(), persistence=None, with_evidence=True, isolation=True):
+        return managed_obs.CalibrationResult(
+            request, evidence(request) if with_evidence else None,
+            managed_obs.ProgramCheck(program, 0, 20.0, 40.0, (), None),
+            isolation, True, True, persistence, errors, 1.0, 2.0,
+        )
+
+    adapter = Adapter()
+    classified = placement_probe.ProbeResult(
+        placement_probe.ProbeVerdict.FRAC, placement_probe.ToneMap.GPU_ANALYTIC,
+        True, "classified", (),
+    )
+    monkeypatch.setattr(live_host, "classify_probe", lambda _data: classified)
+    output = attach_host(
+        tmp_path, monkeypatch, bridge="obs-managed", calibration=adapter,
+        server_factory=ProbeServer, output_rate=25,
+    )
+
+    observed = output.observe()
+    assert observed.output["placement"]["state"] == "probing"
+    assert observed.output["placement"]["reason"] == "calibrating"
+    first = adapter.starts[-1]
+    assert first[2]._not_before_s == output._program_guard_not_before_s > 0
+    first[3].set_result(result(first[0]))
+    output._probe_thread.join(2)
+    placement = output.output["placement"]
+    assert (placement["state"], placement["grant"], placement["method"]) == ("valid", "frac", "probe")
+    assert placement["leaseMs"] == 15000 and placement["tone"] == {"observed": "gpu_analytic", "applied": "identity"}
+    assert output._renew_probe_lease()
+
+    original = FakeCdp.instances[0]
+    original.busy = True
+    original.reload()
+    starts = len(adapter.starts)
+    deferred = output.observe()
+    deferred_id = deferred.output["placement"]["probeId"]
+    assert deferred.output["placement"]["reason"] == "waiting-for-transition"
+    assert len(adapter.starts) == starts
+    output._prepare_navigation_placement()
+    assert output.output["placement"]["reason"] == "cancelled"
+    assert output._probe_run_id is None and output._server.run is None
+    original.busy = False
+    output.observe()
+    assert len(adapter.starts) == starts + 1
+    output.observe()
+    assert len(adapter.starts) == starts + 1
+    fresh = adapter.starts[-1]
+    assert fresh[0].spec.run_id != deferred_id
+    fresh[3].set_result(result(fresh[0]))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["grant"] == "frac"
+
+    original_evaluate = original.evaluate
+    failed = False
+
+    def disconnect_once(expression, deadline_s=None):
+        nonlocal failed
+        if not failed and "__obedLive" in expression:
+            failed = True
+            raise live_host.LiveHostError("Program browser CDP connection failed.")
+        return original_evaluate(expression, deadline_s)
+
+    def reconnect_factory(*args, **kwargs):
+        replacement = FakeCdp(*args, **kwargs)
+        replacement.reload()
+        replacement.context["uniqueId"] = "doc-reconnected"
+        return replacement
+
+    original.evaluate = disconnect_once
+    output.transport_factory = reconnect_factory
+    reconnected = output.observe()
+    assert original.stopped and reconnected.output["placement"]["state"] == "probing"
+    reconnect_run = adapter.starts[-1]
+    assert reconnect_run[0].connection_generation == 2
+    reconnect_run[3].set_result(result(reconnect_run[0]))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["grant"] == "frac"
+
+    current = FakeCdp.instances[-1]
+    current_evaluate = current.evaluate
+    execute_disconnected = False
+
+    def disconnect_execute_once(expression, deadline_s=None):
+        nonlocal execute_disconnected
+        if not execute_disconnected and "__obedLive" in expression:
+            execute_disconnected = True
+            raise live_host.LiveHostError("Program browser CDP connection failed.")
+        return current_evaluate(expression, deadline_s)
+
+    current.evaluate = disconnect_execute_once
+    advanced = output.execute("advance")
+    replacement = FakeCdp.instances[-1]
+    assert advanced.scene_id == "0" and replacement is not current
+    assert replacement.keys == [" "]
+    assert adapter.cancelled and output.output["placement"]["reason"] == "cancelled"
+
+    output.observe()
+    after_advance = adapter.starts[-1]
+    after_advance[3].set_result(result(after_advance[0]))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["grant"] == "frac"
+
+    output._lease_deadline_s = time.monotonic() - 1
+    assert not output._renew_probe_lease()
+    assert output.output["placement"]["reason"] == "leaseLapsed"
+
+    fake = FakeCdp.instances[-1]
+    fake.reload()
+    output.observe()
+    stale = adapter.starts[-1]
+    classifier_entered = threading.Event()
+    classifier_release = threading.Event()
+
+    def blocking_classifier(_data):
+        classifier_entered.set()
+        classifier_release.wait(2)
+        return classified
+
+    monkeypatch.setattr(live_host, "classify_probe", blocking_classifier)
+    stale[3].set_result(result(stale[0]))
+    assert classifier_entered.wait(2)
+    fake.reload()
+    output.observe()
+    classifier_release.set()
+    output._probe_thread.join(2)
+    assert output.output["placement"]["grant"] is None
+    monkeypatch.setattr(live_host, "classify_probe", lambda _data: classified)
+    output.observe()
+    disturbed = adapter.starts[-1]
+    disturbed[3].set_result(result(disturbed[0], program=False, with_evidence=False))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["reason"] == "program-disturbed"
+    assert output.output["placement"]["automaticProbesDisabled"] is True
+    starts = len(adapter.starts)
+
+    same_engine = adapter.engine
+    adapter.engine = None
+    output.observe()
+    assert output.output["placement"]["automaticProbesDisabled"] is True
+    revokes = len(commits(fake, "invalid"))
+    output.observe()
+    assert len(commits(fake, "invalid")) == revokes
+    fake.reload()
+    adapter.engine = same_engine
+    output.observe()
+    assert len(adapter.starts) == starts
+    assert output.output["placement"]["automaticProbesDisabled"] is True
+
+    adapter.engine = managed_obs.EngineIdentity(43, 101.0, 4)
+    output.observe()
+    assert len(adapter.starts) == starts + 1
+    relaunched = adapter.starts[-1]
+    freshness_error = "Probe capture freshness could not be verified."
+    relaunched[3].set_result(result(
+        relaunched[0],
+        program=None,
+        errors=(freshness_error,),
+        with_evidence=False,
+    ))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["reason"] == "probe-failed"
+    assert output.output["placement"]["automaticProbesDisabled"] is False
+    relaunched_id = relaunched[0].spec.run_id
+
+    fake.reload()
+    output.observe()
+    isolation = adapter.starts[-1]
+    isolation[3].set_result(result(isolation[0], with_evidence=False, isolation=False))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["reason"] == "isolation-failed"
+    assert output.output["placement"]["automaticProbesDisabled"] is True
+
+    suppressed = FakeCdp.instances[-1]
+    suppressed_evaluate = suppressed.evaluate
+    suppressed_failed = False
+
+    def reconnect_while_suppressed(expression, deadline_s=None):
+        nonlocal suppressed_failed
+        if not suppressed_failed and "__obedLive" in expression:
+            suppressed_failed = True
+            raise live_host.LiveHostError("Program browser CDP connection failed.")
+        return suppressed_evaluate(expression, deadline_s)
+
+    suppressed.evaluate = reconnect_while_suppressed
+    timed_out = []
+
+    def timeout_factory(*args, **kwargs):
+        replacement = reconnect_factory(*args, **kwargs)
+        replacement.visible = True
+        evaluate_in = replacement.evaluate_in
+
+        def timeout_revoke(context, expression, deadline_s=None):
+            if expression == live_host._placement_set_expr(replacement.token, "invalid"):
+                raise live_host.LiveHostError("Program browser did not answer CDP Runtime.evaluate in time.")
+            return evaluate_in(context, expression, deadline_s)
+
+        replacement.evaluate_in = timeout_revoke
+        timed_out.append((replacement, evaluate_in))
+        return replacement
+
+    output.transport_factory = timeout_factory
+    disconnected = output.observe()
+    replacement, replacement_evaluate_in = timed_out[-1]
+    assert disconnected.output["placement"]["reason"] == "disconnected"
+    assert replacement.visible and output._reconnect_revoke_required
+    replacement.evaluate_in = replacement_evaluate_in
+    reconnected = output.observe()
+    assert reconnected.output["placement"]["reason"] == "not-calibrated"
+    assert reconnected.output["placement"]["automaticProbesDisabled"] is True
+    fake = FakeCdp.instances[-1]
+
+    absent_evaluate = fake.evaluate
+    absent_failed = False
+
+    def disconnect_before_absent_reconnect(expression, deadline_s=None):
+        nonlocal absent_failed
+        if not absent_failed and "__obedLive" in expression:
+            absent_failed = True
+            raise live_host.LiveHostError("Program browser CDP connection failed.")
+        return absent_evaluate(expression, deadline_s)
+
+    def absent_factory(*args, **kwargs):
+        replacement = reconnect_factory(*args, **kwargs)
+        replacement.visible = True
+        evaluate_in = replacement.evaluate_in
+
+        def absent_revoke(context, expression, deadline_s=None):
+            if context == "doc-reconnected" and expression == live_host._placement_set_expr(replacement.token, "invalid"):
+                return "absent"
+            return evaluate_in(context, expression, deadline_s)
+
+        replacement.evaluate_in = absent_revoke
+        return replacement
+
+    fake.evaluate = disconnect_before_absent_reconnect
+    output.transport_factory = absent_factory
+    output._placement["automaticProbesDisabled"] = False
+    starts = len(adapter.starts)
+    absent = output.observe()
+    fake = FakeCdp.instances[-1]
+    assert absent.output["placement"]["reason"] == "not-calibrated"
+    assert len(adapter.starts) == starts
+    assert fake.visible and not output._channel_compromised
+    output._placement["automaticProbesDisabled"] = True
+    fake.reload()
+    output.observe()
+
+    scheduled = output.execute("recalibrate")
+    assert scheduled.output["placement"]["state"] == "probing"
+    manual = adapter.starts[-1]
+    failed_persistence = managed_obs.PersistenceCheck("cleanup", True, False, ("/sources",), ())
+    manual[3].set_result(result(manual[0], persistence=failed_persistence))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["reason"] == "persistence-failed"
+
+    output._output_rate = 24
+    starts = len(adapter.starts)
+    unsupported = output.execute("recalibrate")
+    assert unsupported.output["placement"]["reason"] == "probe-failed"
+    assert len(adapter.starts) == starts
+    output._output_rate = 25
+
+    output.execute("recalibrate")
+    manual = adapter.starts[-1]
+    manual[3].set_result(result(manual[0]))
+    output._probe_thread.join(2)
+    assert output.output["placement"]["grant"] == "frac"
+    assert output.output["placement"]["automaticProbesDisabled"] is True
+    assert output._renew_thread.is_alive()
+    leased = live_host._placement_renew_expr(fake.token, "frac", live_host._PLACEMENT_LEASE_MS)
+    renewals = sum(expression == leased for expression, _context in fake.targeted)
+    output.execute("advance")
+    assert sum(expression == leased for expression, _context in fake.targeted) == renewals + 1
+
+    entered = threading.Event()
+    release = threading.Event()
+    evaluate_in = fake.evaluate_in
+
+    def blocked_renew(context, expression, deadline_s=None):
+        if expression == leased:
+            entered.set()
+            release.wait(2)
+        return evaluate_in(context, expression, deadline_s)
+
+    fake.evaluate_in = blocked_renew
+    renewal = threading.Thread(target=output._renew_probe_lease)
+    renewal.start()
+    assert entered.wait(2)
+    output.execute("recalibrate")
+    release.set()
+    renewal.join(2)
+    assert (output.output["placement"]["state"], output.output["placement"]["reason"]) == ("probing", "calibrating")
+    assert output.output["placement"]["grant"] is None
+    pending = adapter.starts[-1]
+    pending[3].set_result(result(pending[0], with_evidence=False))
+    output._probe_thread.join(2)
+
+    fake.evaluate_in = evaluate_in
+    starts = len(adapter.starts)
+
+    def revoke_timeout(context, expression, deadline_s=None):
+        if expression == live_host._placement_set_expr(fake.token, "invalid"):
+            raise live_host.LiveHostError("Program browser did not answer CDP Runtime.evaluate in time.")
+        return evaluate_in(context, expression, deadline_s)
+
+    fake.evaluate_in = revoke_timeout
+    with pytest.raises(live_host.PlayerCommandRejected, match="Waiting for connection"):
+        output.execute("recalibrate")
+    assert len(adapter.starts) == starts
+    assert output._reconnect_revoke_required
+    assert output.output["placement"]["reason"] == "disconnected"
+    fake.evaluate_in = evaluate_in
+
+    output.execute("recalibrate")
+    pending_id = output.output["placement"]["probeId"]
+    output.stop()
+    assert adapter.cancelled[-1][0] == pending_id and 0 < adapter.cancelled[-1][1] <= 5.0
+    assert output._probe_thread is None or not output._probe_thread.is_alive()
+    assert output._renew_thread is None or not output._renew_thread.is_alive()
+    assert output.output["placement"]["reason"] == "stopped"
+    records = [json.loads(line) for line in output._log_path.read_text().splitlines()]
+    rejection = next(
+        row for row in records
+        if row["kind"] == "placementProbeRejected" and row["probeId"] == relaunched_id
+    )
+    assert rejection["reason"] == "probe-failed"
+    assert rejection["suppressed"] is False
+    assert rejection["errors"] == [freshness_error]
+    renewal_thread = output._renew_thread
+    output._start_renewal_thread()
+    assert output._renew_thread is renewal_thread
+
+
+def test_stop_racing_probe_start_uses_cleanup_timeout(tmp_path, monkeypatch):
+    class ProbeServer(FakeServer):
+        def set_probe_run(self, spec, *, run_id=None):
+            return None if spec is None else f"http://127.0.0.1:9/__obed_probe/{spec.run_id}/index.html"
+
+    class Adapter:
+        def __init__(self):
+            self.engine = None
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.starts = []
+            self.cancelled = []
+
+        def identity(self): return self.engine
+
+        def start(self, request, *, measure, guard):
+            future = Future()
+            self.entered.set()
+            self.release.wait(2)
+            self.starts.append((request, future))
+            return future
+
+        def cancel(self, run_id, *, timeout_s=5.0):
+            self.cancelled.append((run_id, timeout_s))
+            for request, future in self.starts:
+                if request.spec.run_id == run_id and not future.done():
+                    future.set_result(None)
+            return True
+
+    adapter = Adapter()
+    output = attach_host(
+        tmp_path, monkeypatch, bridge="obs-managed", calibration=adapter,
+        server_factory=ProbeServer, output_rate=25,
+    )
+    output.observe()
+    adapter.engine = managed_obs.EngineIdentity(42, 100.0, 3)
+    context = output._program_context()
+    failures = []
+
+    def start_probe():
+        try:
+            output._schedule_probe(context, adapter.engine, manual=True)
+        except Exception as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=start_probe)
+    worker.start()
+    assert adapter.entered.wait(2)
+    run_id = output._probe_run_id
+    output.stop()
+    adapter.release.set()
+    worker.join(2)
+
+    assert not worker.is_alive() and not failures
+    assert adapter.cancelled[-1] == (run_id, 5.0)
+    assert adapter.starts[-1][1].done()
+
+
+def test_managed_probe_measure_builds_bound_fresh_serial_evidence(tmp_path, monkeypatch):
+    import io
+    from PIL import Image
+
+    run_id = "2" * 32
+    spec = placement_probe.ProbeSpec(run_id, 1920, 1080, 50, 1.0)
+    request = managed_obs.CalibrationRequest(
+        spec,
+        f"http://127.0.0.1:9/__obed_probe/{run_id}/index.html",
+        managed_obs.EngineIdentity(42, 100.0, 3),
+        "PROGRAM", "doc-1", 1,
+    )
+
+    class ProbeTransport:
+        def __init__(self, *_args, attach_match=None, **_kwargs):
+            self.target_id = "PROBE"
+            self.target_url = attach_match
+            self.command = None
+            self.stopped = False
+            self.detached = False
+
+        def start(self): pass
+
+        def call(self, method, deadline_s=None, **_params):
+            assert method == "Page.getFrameTree"
+            return {"frameTree": {"frame": {"id": "PROBE_FRAME"}}}
+
+        def main_context(self, frame):
+            assert frame == "PROBE_FRAME"
+            return {"uniqueId": "probe-context"}
+
+        def evaluate_in(self, context, expression, deadline_s=None):
+            assert context == "probe-context"
+            if ".command(" in expression:
+                self.command = json.loads(expression.split(".command(", 1)[1][:-1])
+                return True
+            geometry = None
+            if self.command["phase"] == "pattern":
+                pose = self.command["pose"]
+                rect = (10.352, 10.036, 480.53125, 135.140625) if pose == 0 else (10.73, 10.41, 480.53125, 135.140625)
+                geometry = {
+                    "pose": pose, "rect": list(rect),
+                    "contentBox": [rect[0] + 0.015625, rect[1], 480.5, 135.140625],
+                    "box": [10, 10, 482 if pose == 0 else 483, 137], "snapDy": 140, "fracDy": 280,
+                }
+            return {
+                "runId": run_id, "sequence": self.command["sequence"],
+                "paintedSequence": self.command["sequence"], "phase": self.command["phase"],
+                "pose": self.command["pose"], "readyState": 4, "videoSize": [1920, 540],
+                "colorTuple": ["bt709", "bt709", "bt709", False], "dpr": 1,
+                "ua": "CEF/127", "geometry": geometry, "error": None,
+            }
+
+        def detach(self): self.detached = True
+
+    class Channel:
+        def __init__(self):
+            self.request = request
+            self.source_uuid = "source"
+            self.cdp_endpoint = "http://127.0.0.1:9222"
+            self.cancel_event = threading.Event()
+            self.deadline_s = time.monotonic() + 30
+            self.transport = None
+
+        def check_current(self):
+            if self.cancel_event.is_set():
+                raise live_host.LiveHostError("Probe measurement was cancelled.")
+
+        def capture_png(self, *, timeout_s=2.0):
+            image = Image.new("RGBA", (1920, 1080), (64, 64, 64, 255))
+            bits = f"{int(self.transport.command['nonce'], 16):0128b}"
+            for index, bit in enumerate(bits):
+                x, y = 1600 + (index % 16) * 8, 16 + (index // 16) * 8
+                color = (255, 255, 255, 255) if bit == "1" else (0, 0, 0, 255)
+                for px in (x + 3, x + 4):
+                    for py in (y + 3, y + 4):
+                        image.putpixel((px, py), color)
+            output = io.BytesIO()
+            image.save(output, format="PNG")
+            return output.getvalue()
+
+    channel = Channel()
+
+    def factory(*args, **kwargs):
+        channel.transport = ProbeTransport(*args, **kwargs)
+        return channel.transport
+
+    output = attach_host(tmp_path, monkeypatch)
+    output.transport_factory = factory
+    monkeypatch.setattr(live_host, "_PROBE_CAPTURE_SETTLE_S", 0)
+    monkeypatch.setattr(live_host, "_PROBE_CAPTURE_INTERVAL_S", 0)
+    measured = output._measure_probe(channel)
+    assert measured.spec == spec and measured.identity.source_uuid == "source"
+    assert measured.identity.target_id == "PROBE" and measured.identity.context_id == "probe-context"
+    assert [capture.sequence for capture in (*measured.freshness, *measured.captures)] == list(range(1, 8))
+    assert len({capture.nonce for capture in (*measured.freshness, *measured.captures)}) == 7
+    assert tuple(item.pose for item in measured.poses) == (0, 1)
+    assert channel.transport.detached and not channel.transport.stopped
+
+    channel.cancel_event.set()
+    with pytest.raises(live_host.LiveHostError, match="cancelled"):
+        output._measure_probe(channel)
+
+
+@pytest.mark.parametrize(
     ("mode", "attrs", "grant", "reason", "gpu"),
     [
         ("launch", {}, "snap", "granted", "enabled"),
         ("launch", {"product": "Chrome/154.0.8037.59"}, "snap", "granted", "enabled"),
         ("launch", {"product": "Chrome/153.0.7999.1"}, None, "unqualified-version", None),
-        ("launch", {"product": "Chrome/155.0.1.2"}, None, "unqualified-version", None),
+        ("launch", {"product": f"Chrome/{max(live_host.QUALIFIED_SNAP_MAJORS)}.0.1.2"}, "snap", "granted", "enabled"),
+        ("launch", {"product": f"Chrome/{max(live_host.QUALIFIED_SNAP_MAJORS) + 1}.0.1.2"}, None, "unqualified-version", None),
         ("launch", {"product": "HeadlessChrome/1540.0.1.2"}, None, "unqualified-version", None),
         ("launch", {"product": "Chromium/154.0.8037.59"}, None, "unqualified-version", None),
         ("launch", {"product": None}, None, "version-unavailable", None),
@@ -3528,7 +4262,7 @@ def commits(fake, value="snap"):
     ],
 )
 def test_placement_grant_matrix(tmp_path, monkeypatch, mode, attrs, grant, reason, gpu):
-    """Only a host-launched Chrome/HeadlessChrome 154 with GPU compositing is granted, after a
+    """Only a host-launched Chrome/HeadlessChrome at a `QUALIFIED_SNAP_MAJORS` major with GPU compositing is granted, after a
     round trip and a commit both bound to the program document's unique context. Every other
     case is decided before the page could ever read "snap": no round trip is sent, the page
     stays `invalid` and the report carries the reason. Attach mode (incl. managed OBS) still
@@ -3538,13 +4272,22 @@ def test_placement_grant_matrix(tmp_path, monkeypatch, mode, attrs, grant, reaso
         output = host(tmp_path, monkeypatch)
     else:
         output = attach_host(tmp_path, monkeypatch, **({"bridge": "obs-managed"} if mode == "managed" else {}))
-    assert output.output["placement"] == {"grant": None, "reason": None, "product": None, "gpuCompositing": None, "at": None}
+    assert output.output["placement"] == {
+        "state": "invalid", "grant": None, "reason": None, "at": None,
+        "product": None, "gpuCompositing": None, "method": None, "probeId": None,
+        "leaseMs": None, "leaseExpiresAt": None,
+        "tone": {"observed": None, "applied": "identity"},
+        "automaticProbesDisabled": False,
+    }
 
     observed = output.observe()
     fake = FakeCdp.instances[0]
 
     placement = observed.output["placement"]
     assert (placement["grant"], placement["reason"], placement["gpuCompositing"]) == (grant, reason, gpu)
+    assert placement["state"] == ("valid" if grant else "invalid")
+    assert placement["method"] == "knowledge"
+    assert placement["leaseMs"] is None and placement["leaseExpiresAt"] is None
     assert placement["product"] == attrs.get("product", "HeadlessChrome/154.0.8037.59")
     assert isinstance(placement["at"], float)
     assert fake.channel_before_goto
@@ -3660,6 +4403,47 @@ def test_placement_channel_failure_keeps_output_hidden_and_refuses_show(tmp_path
     assert commits(fake, "invalid") == ([] if failure == "install" else ["doc-1"])
 
 
+def test_probe_renewal_compromise_stays_latched_and_refuses_show(tmp_path, monkeypatch):
+    engine = managed_obs.EngineIdentity(42, 100.0, 3)
+
+    class Adapter:
+        def identity(self): return engine
+        def start(self, request, *, measure, guard): return Future()
+        def cancel(self, run_id, *, timeout_s=5.0): return True
+
+    output = attach_host(
+        tmp_path, monkeypatch, bridge="obs-managed", calibration=Adapter(), output_rate=25,
+    )
+    output.observe()
+    fake = FakeCdp.instances[0]
+    output._engine_identity = engine
+    output._probe_fingerprint = ("Fake/1", 1.0, 1920, 1080)
+    output._set_placement("frac", "granted", tone="gpu_analytic", lease_ms=live_host._PLACEMENT_LEASE_MS)
+    fake.visible = True
+    evaluate_in = fake.evaluate_in
+
+    def changed_fingerprint_and_compromised_revoke(context, expression, deadline_s=None):
+        if expression == "[navigator.userAgent,window.devicePixelRatio,window.innerWidth,window.innerHeight]":
+            return ["Fake/2", 1, 1920, 1080]
+        if expression == live_host._placement_set_expr(fake.token, "invalid"):
+            return "wrong"
+        return evaluate_in(context, expression, deadline_s)
+
+    fake.evaluate_in = changed_fingerprint_and_compromised_revoke
+    assert not output._renew_probe_lease()
+    assert output.output["placement"]["reason"] == "channel-compromised"
+    assert not fake.visible and output._channel_compromised
+    assert output.capabilities()["recalibrate"] == {
+        "supported": False,
+        "reason": "Calibration unavailable. Movies use the standard transition.",
+    }
+    with pytest.raises(live_host.PlayerCommandRejected, match="stays hidden"):
+        output.execute("show")
+    with pytest.raises(live_host.PlayerCommandRejected, match="Calibration unavailable"):
+        output.execute("recalibrate")
+    assert output.output["placement"]["reason"] == "channel-compromised"
+
+
 def test_placement_init_script_resists_page_tampering_in_node():
     """§8.8 tamper rows on the real init script and the host's own round-trip and grant
     expressions: page code cannot set, keep or forge a grant; a fresh document starts
@@ -3678,7 +4462,11 @@ const vm=require('vm');const SRC={json.dumps(live_host.placement_init_script(tok
 const TRIP={json.dumps(live_host._placement_round_trip_expr(token))};
 const SNAP={json.dumps(live_host._placement_set_expr(token, "snap"))};
 const REVOKE={json.dumps(live_host._placement_set_expr(token, "invalid"))};
-function doc(pre){{const ctx={{}};ctx.window=ctx;vm.createContext(ctx);if(pre)vm.runInContext(pre,ctx);let err=null;try{{vm.runInContext(SRC,ctx)}}catch(e){{err=String(e)}}
+const PSRC={json.dumps(live_host.placement_init_script(token, mode="probe"))};
+const PTRIP={json.dumps(live_host._placement_round_trip_expr(token, mode="probe"))};
+const PFRAC={json.dumps(live_host._placement_set_expr(token, "frac", 15000))};
+const PRENEW={json.dumps(live_host._placement_renew_expr(token, "frac", 15000))};
+function doc(src=SRC,pre){{const ctx={{clock:0}};ctx.window=ctx;ctx.Performance=function(){{}};ctx.Performance.prototype.now=()=>ctx.clock;ctx.performance=new ctx.Performance();vm.createContext(ctx);if(pre)vm.runInContext(pre,ctx);let err=null;try{{vm.runInContext(src,ctx)}}catch(e){{err=String(e)}}
   return {{err,page:c=>{{try{{return vm.runInContext(c,ctx)}}catch(e){{return 'threw:'+e.constructor.name}}}},run:c=>vm.runInContext(c,ctx),get:()=>vm.runInContext('window.__obedPlacement',ctx)}}}}
 const R={{}};let d=doc();R.newDocument=d.get();R.roundTrip=d.run(TRIP);R.afterTrip=d.get();R.commit=d.run(SNAP);
 d.page('window.__obedPlacement="invalid"');R.assignment=d.get();d.page('"use strict";window.__obedPlacement="x"');R.strictAssignment=d.get();
@@ -3687,8 +4475,14 @@ R.revoke=d.run(REVOKE);R.forgeAssign=d.page('window.__obedPlacement="snap";windo
 R.updaterUnchangedAfterReplace=d.page('var f=window.__obedGrant;window.__obedGrant=function(){{return true}};window.__obedGrant===f');R.wrongToken=d.page('window.__obedGrant("ffffffffffffffffffffffffffffffff","snap")');R.afterWrongToken=d.get();
 R.tokenInSource=d.page('String(window.__obedGrant).includes("{token}")');d.page('window.__obedGrant("{token}","frac")');R.onlySnap=d.get();
 R.reloadedDocument=doc().get();
-let p=doc('Object.defineProperty(window,"__obedPlacement",{{get(){{return "snap"}},configurable:false}})');R.predefinedInitThrows=!!p.err;R.predefinedHasUpdater=p.page('typeof window.__obedGrant');
+let p=doc(SRC,'Object.defineProperty(window,"__obedPlacement",{{get(){{return "snap"}},configurable:false}})');R.predefinedInitThrows=!!p.err;R.predefinedHasUpdater=p.page('typeof window.__obedGrant');
 R.predefinedTrip=p.run(TRIP);R.predefinedCommit=p.run(SNAP);
+let q=doc(PSRC);R.probeRoundTrip=q.run(PTRIP);R.probeCommit=q.run(PFRAC);q.page('clock=14999');R.beforeExpiry=q.get();q.page('clock=15000');R.atExpiry=q.get();
+let q2=doc(PSRC);R.missingLease=q2.page('window.__obedGrant("{token}","frac")');R.afterMissing=q2.get();R.longLease=q2.page('window.__obedGrant("{token}","snap",15001)');R.afterLong=q2.get();
+q2.page('window.__obedPlacement="snap"');R.probeStillNeedsLease=q2.page('window.__obedGrant("{token}","snap")');R.afterProbeMutation=q2.get();
+R.knowledgeRejectsLeasedFrac=d.page('window.__obedGrant("{token}","frac",15000)');R.afterKnowledgeFrac=d.get();
+let q3=doc(PSRC);q3.run(PFRAC);q3.page('clock=15000');R.expiredRenew=q3.run(PRENEW);R.afterExpiredRenew=q3.get();
+let q4=doc(PSRC);q4.run(PFRAC);q4.page('performance.now=()=>0;Performance.prototype.now=()=>0;clock=15000');R.tamperedClockExpiry=q4.get();
 console.log(JSON.stringify(R));
 """
     result = json.loads(subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True).stdout)
@@ -3699,7 +4493,14 @@ console.log(JSON.stringify(R));
         "forgeRedefine": "threw:TypeError", "afterForge": "invalid", "updaterUnchangedAfterReplace": True,
         "wrongToken": False, "afterWrongToken": "invalid", "tokenInSource": False, "onlySnap": "invalid",
         "reloadedDocument": "invalid", "predefinedInitThrows": True, "predefinedHasUpdater": "undefined",
-        "predefinedTrip": [None], "predefinedCommit": None,
+            "predefinedTrip": [None], "predefinedCommit": "absent",
+        "probeRoundTrip": ["true", "snap", "true", "invalid"], "probeCommit": "frac",
+        "beforeExpiry": "frac", "atExpiry": "invalid", "missingLease": False,
+        "afterMissing": "invalid", "longLease": False, "afterLong": "invalid",
+        "probeStillNeedsLease": False, "afterProbeMutation": "invalid",
+        "knowledgeRejectsLeasedFrac": False, "afterKnowledgeFrac": "invalid",
+        "expiredRenew": None, "afterExpiredRenew": "invalid",
+        "tamperedClockExpiry": "invalid",
     }
     assert live_host._PLACEMENT_ROUND_TRIP == result["roundTrip"]
 
@@ -3775,6 +4576,18 @@ def test_chrome_cdp_tracks_contexts_from_interleaved_events_and_targets_evaluati
     with pytest.raises(live_host.LiveHostError, match="unique execution context"):
         transport.evaluate_in("", "1")
     assert len(ws.sent) == 6
+
+    blocked = live_host.ChromeCdp(Path("chrome"), tmp_path, display)
+    blocked.proc = None
+    blocked.ws = ScriptedWs()
+    blocked._lock.acquire()
+    started = time.monotonic()
+    try:
+        with pytest.raises(live_host.LiveHostError, match="in time"):
+            blocked.call("Runtime.evaluate", deadline_s=.01)
+    finally:
+        blocked._lock.release()
+    assert time.monotonic() - started < .2
 
 
 def test_chrome_cdp_browser_call_uses_the_launched_browser_target_and_fails_closed(tmp_path, monkeypatch):

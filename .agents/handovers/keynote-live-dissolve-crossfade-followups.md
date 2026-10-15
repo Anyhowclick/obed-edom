@@ -2,39 +2,28 @@
 
 **2026-10-12; landed in #262 (`c6f37e5e`) 2026-10-13.** Patch: `claude/keynote-live-dissolve-crossfade`, plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md`
 (rev 17, cited as §n). It ships D1–D4 under `mm_opacity` (§0, §4); the movie freeze only on the host-launched, qualified
-Chrome (`LiveOutputHost`, Chrome 154, GPU compositing; §3.3, decision 15). Everything below is deliberately **not** in that PR.
+Chrome (`LiveOutputHost`, Chrome 154/155, GPU compositing; §3.3, decision 15). Everything below is deliberately **not** in that PR.
 Evidence kept (main checkout, git-ignored, pruned 2026-10-13): `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` —
 `q0b-2026-10-11/runs/decision_record_q0b1.json` (the `--decision` input of every DX run), `dx1-2026-10-12/dx1_paced.py` (the
 load-paced DX-1 runner), `cef-frac-2026-10-12/` and `q0bbis-2026-10-12/` (README, results, probe scripts: CEF placement and
 W5), `hidpi-2026-10-12/` (README, scripts: scaled stages). Everything else was removed.
 
-## CEF/OBS placement — follow-up PR (decision 15; §13.1)
+## CEF/OBS placement — implemented on `claude/cef-obs-placement` (plan `keynote_live_cef_placement.plan.md`)
 
-Today managed OBS/CEF keeps the movie jump (`output.placement.reason = "attached"`): CEF 127 draws the video quad unsnapped
-(x 109.352), so the snapped holder misses by up to 183 LSB there (§8.6). Full design: rev 16's §3.3 and §9 (`41ef609b`).
-1. **First: the 5-minute OBS feasibility check.** Does `GetSourceScreenshot` render a browser source that is not on program
-   (a dedicated `AK-Calibrate` scene / `AK-Probe` source)? If not, re-plan the isolation gate before anything else.
-2. **Placement probe:** isolated probe target/source; program-capture gate with cleanup on every exit; the shipped clip
-   (`p2like.mp4`, sha256 `7b7d66b5…`); rev 16's classifier (tone maps {identity, GPU analytic}, inner mask, max over channels,
-   both poses, ≤ 2 % / ≥ 20 %); lease, keep-alive and invalid / probing / valid lifecycle; operator `recalibrate`
-   (`web/live.py`, `live_session.py`, presenter UI); reconnect re-probe.
-3. **The `frac` take draw:** snapped underlay plus CEF 127's unsnapped quad (`fdrawu`, +186 B), DPR 1 and integer stage origin
-   only; its grant value joins `snap` in this PR's channel.
-4. **CEF acceptance:** `m-snap-cef[clip]`, `nooffset[x|y]`, wrong-rule controls through the privileged channel, `iso-*`,
-   `probe-*`, `life-cal-*`, CEF DSK 7→8 cost with the extra draw, CEF `hevc10` / Keynote-HEVC tone.
-5. **W5's tone-path map** on the same probe (recorded first, applied only after its own qualification).
+Items 1–5 are covered there: the feasibility check (off-program sources do not render; hidden Studio Mode preview chosen),
+step 0, the probe, the `frac` take, CEF acceptance (`managed_obs_qualify.py --arm placement`) and W5 observation (tone stays
+identity). Owner decisions O1–O5 are in that plan's §8; its §12 has the status and remaining steps.
 
 ## Open review items not folded (GPT-6 Astra r13 on rev 17; owner: no rev 18, discover after implementation)
 
 Source: GPT-6 Astra r13 on rev 17 (plan §14). Both remain open in the merged bytes.
-- **r13 #1 — raw/preview forgery (major).** Raw export and Build Preview have no host channel, so page code assigning
-  `window.__obedPlacement = "snap"` (or a non-configurable getter returning it) on an unqualified engine (e.g. a manually
-  configured CEF source) enables the freeze with Chrome's snapped rule. Proposed fix: no executable freeze entry point outside
-  the host rendering variant; production raw/preview controls that forge `snap` both ways and require no holder.
+- **r13 #1 — raw/preview forgery (major).** Closed by the CEF placement PR (O1): `patch_rendering` has no freeze take or
+  holder attachment; forged `snap`/`frac` rows in `m-raw-prod`/`m-preview-prod` must bind no holder.
 - **r13 #3 — stale grant after an unobserved GPU fallback (medium).** Chrome falling back to software between `observe()`
   samples leaves `snap` granted until the next successful observation, **with CDP connected too** (not only disconnected, as
   §3.3 "Residual" states); tagged H.264 keeps the qualified tuple on both paths, so the tuple guard does not stop it. No
-  guaranteed bound. Owner decision 16 keeps the lease dropped; a lease would bound, not remove, the window.
+  guaranteed bound. Owner decision 16 keeps the lease dropped; a lease would bound, not remove, the window. Still open after the CEF placement PR (O2 = no Chrome
+  migration). The CEF `frac` lease has the same unchanged-fingerprint GPU-fallback residual, accepted by the owner (O4).
 
 ## Tone decision record (rev 12; unchanged in rev 17)
 

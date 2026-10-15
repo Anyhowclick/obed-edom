@@ -158,6 +158,13 @@ def test_closed_port_raises_websocket_error():
 def test_request_before_connect_raises():
     with pytest.raises(ObsWebsocketError):
         ObsWebsocket(1, "pw").request("GetVersion")
+    with pytest.raises(ValueError, match="positive"):
+        ObsWebsocket(1, "pw", max_message_bytes=0)
+    client = ObsWebsocket(1, "pw", max_message_bytes=16 * 1024 * 1024)
+    client._ws = object()
+    with pytest.raises(ObsWebsocketTimeout, match="deadline elapsed"):
+        client.request("GetSourceScreenshot", timeout=0)
+    assert client.max_message_bytes == 16 * 1024 * 1024
 
 
 def test_errors_never_carry_the_password(fake_obs):
