@@ -1,6 +1,6 @@
 # Alpha Keynote: live movies with real alpha
 
-**Rev 3 · 2026-10-15 · planned by Codex GPT-6 Astra high; critiqued by Opus 5.5 high (rounds 1–3); awaiting owner review**
+**Rev 3 · 2026-10-15 · planned by Codex GPT-6 Astra high; critiqued by Opus 5.5 high (rounds 1–3); owner decisions recorded (§9)**
 
 Reviewed base: `a70bbc0e358d6845fc36f526ac62d9a039e7a05f`.
 
@@ -24,7 +24,7 @@ Input: `~/Desktop/Convert wall to 16x9 CGs/F2.key`, SHA-256 `f99a68ef3dc53f5e46e
 
 **Completion:** current F2 completes full prepare and slide 8 passes every advertised product output. An isolated transparent video or successful encode is insufficient.
 
-**Independent blocker:** Stage T’s slide-4 per-character glyph refusal occurs before movie conversion (`html_preview.py:1088`, `:1101`; handover §3). An owner-made copy with slide 4 skipped can unblock interim eye checks; it cannot establish full-current-F2 completion.
+**Independent blocker:** Stage T’s slide-4 per-character glyph refusal occurs before movie conversion (`html_preview.py:1088`, `:1101`; handover §3). The owner is having it fixed in a separate session; AM-2 to AM-4 on current F2 wait for that fix.
 
 ## 2. Evidence and output semantics
 
@@ -98,7 +98,7 @@ References are under `src/obed_edom/` unless otherwise stated.
 | `live_codec.py:22`, `:311`, `:328`, `:351` — codec recognition | Add bounded WebM parsing; return `V_VP9`, mapped to `vp9`. Preserve BMFF `vp09` recognition. |
 | `live_codec.py:255`, `:287`, `:334`, `:340`, `:346` — timing/geometry | Keep BMFF structures. WebM helper exposes dimensions, duration and available DefaultDuration; `movie_fps` uses that rate when readable. Never invent BMFF sample counts/timescales or infer CFR. |
 | `live_continuity.py:2303`, `:2336` — codec census | Keep shared-reader propagation across referenced copies, independent of continuity; census remains best-effort diagnostics. |
-| `live_host.py:203`, `:1271` — support/warnings | Admit ordinary VP9 only in qualified modes; distinguish managed OBS from external attach. Preserve warnings; implement selected start policy, including unknown census results. |
+| `live_host.py:203`, `:1271` — support/warnings | Increment 1 admits ordinary VP9 in headful launch only (the HEVC pattern); managed OBS joins in the follow-up once its CEF passes, external attach never. Preserve warning-and-proceed for unqualified outputs (owner D4). |
 | `live_host.py:1305`, `:1323` — continuity/G2 | Explicitly refuse planned VP9 despite ordinary-playback admission; retain G2 cleanup. No deck-wide alpha shutdown. |
 | `live_host.py:1030`, `:1041` — rate/Program guard | Preserve rate warnings, including 25→30; no resampling or new cadence metric. |
 | `live_host.py:493`, `:556`, `:575`; `web/app.py:1211`, `:1235` — serving | Calibration MP4 unchanged; preserve Range handling and suffix MIME unless an output proves a MIME change necessary. |
@@ -119,7 +119,7 @@ Harness H.264 assumptions remain controls: `scripts/binary_counter_movie.py:103`
 
 Use one small probe and existing capture infrastructure. Retain inputs, argv, hashes, raw PNGs, frame timestamps and offline scores outside `output/`. No synthetic movie, browser framework or trail metric.
 
-Run sequentially on headless Chrome, host-launched headful Chrome and pinned OBS **32.2.2** CEF. Record actual engines, GPU/settings, player digest, viewport/DPR, `VideoFrame.colorSpace` and HTTP responses. Qualify OBS 25/30 separately when both rates are advertised.
+Increment 1 runs headless and host-launched headful Chrome; pinned OBS **32.2.2** CEF runs in the follow-up increment (owner D3). Record actual engines, GPU/settings, player digest, viewport/DPR, `VideoFrame.colorSpace` and HTTP responses. Qualify OBS 25/30 separately when both rates are advertised.
 
 The planning-session headless row is not AM-0 evidence: its raw captures were not retained and it used the coarse 16/239 classes. Step 0 repeats headless at **2/253** with frame-identity evidence.
 
@@ -163,13 +163,13 @@ In `preview_movies.py`, support real-alpha **ProRes 4444** using the existing re
 
 Add no size/duration/rate caps, CFR proof, square-pixel requirement, single-video-stream restriction or new colour/HDR refusal. Select the first video stream with `-map 0:v:0`; passthrough timing accommodates VFR timestamps. Refuse unreadable timing/geometry/transparency, unsupported alpha sources and audio by asset name.
 
-Candidate encoding: `libvpx-vp9`, `-pix_fmt yuva420p -crf 20 -b:v 0`, `-fps_mode passthrough`, video-only mapping and explicit `-f webm`. Drop timecode; do not synthesize audio or retag colour to BT.709.
+Encoding: `libvpx-vp9`, `-pix_fmt yuva420p -crf 20 -b:v 0 -row-mt 1`, `-fps_mode passthrough`, video-only mapping and explicit `-f webm`. Drop timecode; do not synthesize audio or retag colour to BT.709.
 
 For VP9 alpha inspection and verification, put **`-c:v libvpx-vp9` before `-i`**. Missing encoder/decoder or alpha loss refuses publication.
 
 Verify `V_VP9`, `AlphaMode=1`, dimensions, matching decoded frame count and duration within half a source frame, following existing `_verify` shape. F2 must retain **66 frames** and **2.64 s within 20 ms**. No per-frame timestamp matching or separate 1 ms quantization rule.
 
-Use one ffmpeg-filter comparison of corresponding source/result alpha planes, such as `alphaextract` followed by `psnr`; enforce **≥48 dB**. This guards against alpha loss, not edge damage, because transparent pixels dominate the clip. Edge quality remains owner eye/Q2. Keep percentile/mask scoring in qualification; no Python raw-frame streaming subsystem.
+Use one ffmpeg-filter comparison of corresponding source/result alpha planes, such as `alphaextract` followed by `psnr`; enforce **≥48 dB**. This guards against alpha loss, not edge damage, because transparent pixels dominate the clip. Edge quality remains owner eye. Keep percentile/mask scoring in qualification; no Python raw-frame streaming subsystem.
 
 Preserve preflight refusal collection, equivalent-source deduplication and verified per-file replacement. Do not promise whole-export rollback: `apply_preview` removes incomplete cached exports on failure (`html_preview.py:1105`).
 
@@ -187,11 +187,11 @@ Extend `movieConversion` with `converted[].targetCodec` and encoder descriptions
 
 ### Ordinary playback, continuity and freeze
 
-Extend `_codec_supported` for ordinary VP9 only in qualified modes; distinguish managed OBS and keep external attach unsupported. Retain census, `codecWarnings` and rate warnings. Record engine builds as evidence; preserve `PINNED_OBS`. Chrome upgrade policy is Q5; no exact-build/provenance admission table.
+Extend `_codec_supported` so `vp9` is supported in headful launch (increment 1), and in managed OBS only after its follow-up Step 0; the managed-OBS/external-attach distinction lands with that follow-up. Retain census, `codecWarnings` and rate warnings. Record engine builds as evidence; preserve `PINNED_OBS`. Mode-based support, no Chrome version gate (owner D5): a Chrome update keeps alpha playing; Step 0 evidence names the build it ran on. No exact-build/provenance admission table.
 
-The proposed release default is a named VP9 start refusal on unqualified outputs, as the brief requests. Q4 may explicitly select existing warning-only behaviour. **If blocking is selected**, also refuse when the census is empty despite referenced movies, or any referenced movie has an unreadable family on an unqualified output: `_resolve_codecs` currently catches exceptions and returns `[], []` (`live_host.py:1275`); unreadable codecs map to `other`. Keep warnings for diagnostics.
+Unqualified outputs warn and proceed through the existing `codecWarnings` path, as for other codecs today (owner D4). No start block, so the census's fail-open `[], []` on exceptions (`live_host.py:1275`) needs no change.
 
-Example refusals: “PIN DROP WAVE.mov has audio; alpha conversion currently supports silent movies”; “PIN DROP WAVE.mov lost transparency during conversion”; “VP9-alpha playback is not qualified for this output”; “Movie codec census unavailable; playback cannot be qualified for this output.”
+Example refusals: “PIN DROP WAVE.mov has audio; alpha conversion currently supports silent movies”; “PIN DROP WAVE.mov lost transparency during conversion”; and, as a warning, “VP9-alpha playback is not qualified for this output”.
 
 **No deck-wide continuity stand-down.** Retained F2 derivations, with G2 disabled and enabled, are `{"schema":2,"movies":{},"boundaries":[]}`. PIN DROP WAVE participates in no continuity boundary.
 
@@ -211,9 +211,9 @@ No changes to peer-owned continuity JS, MM feed or G2 hooks; no player patch pla
 |---|---|
 | **AM-0 decode** | Step 0 passes per advertised output, including strict re-scoring, frame identity, opaque controls and scorer null. |
 | **AM-1 offline F2 conversion** | Scratch export outside `output/`: baseline reproduces refusal; candidate converts only the alpha movie. Existing H.264 bytes, filenames, JSON/JSONP and player remain unchanged. Repeated conversion/cache checks accept it; forced alpha loss refuses. |
-| **AM-2 full prepare** | Real `apply_preview` without Keynote: `OBED_EDOM_OUTPUT_ROOT` set to a scratch root outside every `output/` (`paths.py:16`), and an `export_html_fn` (`html_preview.py:1048`) that copies a retained export. Run now on the export of the owner's slide-4-skipped copy (if Q6 approves), and on current F2 once texture repair passes. Acceptance: texture repair then conversion completes, `movieConversion` records the VP9 target, and a second apply reuses the cache. AM-1 carries the positive/negative controls. Never bypass repair to claim current-F2 success. |
-| **AM-3 product playback** | Prepared owner copy: automatic start, advance/go-to, restart/seek, end, hide/show; no opaque poster rectangle or stale image. Check 7→8. Check 8→9 against peer Revolve implementation/status and record the dependency. |
-| **AM-4 output eye** | Host-launched HDMI Chrome and managed-OBS physical fill/key beside native Keynote, at every advertised rate. Repeat Build Preview specifically in Chrome; another dashboard browser does not qualify Chrome. |
+| **AM-2 full prepare** | Real `apply_preview` without Keynote: `OBED_EDOM_OUTPUT_ROOT` set to a scratch root outside every `output/` (`paths.py:16`), and an `export_html_fn` (`html_preview.py:1048`) that copies a retained export. Run on current F2 once the separate slide-4 texture fix lands. Acceptance: texture repair then conversion completes, `movieConversion` records the VP9 target, and a second apply reuses the cache. AM-1 carries the positive/negative controls. Never bypass repair to claim current-F2 success. |
+| **AM-3 product playback** | Prepared current F2 (after the slide-4 fix): automatic start, advance/go-to, restart/seek, end, hide/show; no opaque poster rectangle or stale image. Check 7→8. Check 8→9 against peer Revolve implementation/status and record the dependency. |
+| **AM-4 output eye** | Increment 1: host-launched HDMI Chrome beside native Keynote. Follow-up increment: managed-OBS physical fill/key at every advertised rate (owner D3). Repeat Build Preview specifically in Chrome; another dashboard browser does not qualify Chrome. |
 | **AM-5 regressions** | Focused tests, then required full local suites on the composed base; diagnose failures before changing expectations. |
 
 Keep committed tests small:
@@ -221,12 +221,12 @@ Keep committed tests small:
 1. Move existing constant-0.5 `alpha_real` fixture (`tests/test_preview_movies.py:54`, refusal row `:157`) into the positive conversion case; cover mixed targets, deduplication, unchanged opaque bytes, manifest and idempotence.
 2. Add one alpha-loss refusal row by changing candidate argv to `yuv420p`; retain existing failure coverage.
 3. Add one parametrized `test_live_codec.py` case for WebM under `.mov`, alpha/opaque metadata and truncated input; retain BMFF tests.
-4. Extend host mode rows for VP9, external attach, planned-VP9 continuity/G2 refusal and the selected blocking policy’s empty/unreadable census cases.
+4. Extend host mode rows for VP9 (headful launch supported; headless/attach warn), external attach, and planned-VP9 continuity/G2 refusal.
 5. Update existing API/UI mixed/legacy conversion-summary expectations; reuse freeze alpha/tuple tests.
 
 No tamper, exact-version or bypass framework. Add a focused serving assertion only if serving code changes.
 
-Delivery: **W0** evidence → **W1** codec/conversion/cache metadata → **W2** host support and conversion UI → **W3** prepared-copy eye, peer composition and full-current-F2 completion.
+Delivery: **W0** Chrome evidence (headless + headful) → **W1** codec/conversion/cache metadata → **W2** host support and conversion UI → **W3** HDMI Chrome eye on current F2, peer composition. **Follow-up increment:** OBS CEF Step 0, `_codec_supported` for managed OBS, managed-OBS fill/key eye (owner D3).
 
 Before any code PR: full Python suites in the worktree **3.13 venv** and **3.10 floor**, plus dashboard `npm run test:ui` and `npm run test:maps`. Dashboard source changes require `npm install`, `npm run build` and restart before eye checks. No CI substitute; minimal comments and local patterns.
 
@@ -261,11 +261,11 @@ Out of scope: HEVC-alpha, packed-matte implementation, alpha audio, nonidentity 
 - **R2 owner questions folded:** merge conversion/envelope decisions; state both Chrome-upgrade policy costs. No round-2 findings refuted.
 - **R3 (coordinator-applied, critic verdict "ready for owner review"):** AM-2 row rewritten (scratch `OBED_EDOM_OUTPUT_ROOT`, `export_html_fn` seam, runnable on the slide-4-skipped copy; controls stay in AM-1); Chrome-155 freeze wording pinned to the knowledge-mode `snap` grant.
 
-## OWNER QUESTIONS
+## 9. Owner decisions (2026-10-15)
 
-1. **Conversion policy:** auto-convert any structurally verified, silent ProRes 4444 with real alpha, without size/duration caps, matching opaque conversion today—or ask the operator first?
-2. **Quality/budget:** accept CRF 20 subject to eye review, or specify different quality, size or preparation-time limits? Measured: **246,543 B versus 6,524,302 B**, alpha MAE **0.0697/255**, p99 **2**, partial-band p99 **12**. Preparation time and colour/halo acceptance remain unmeasured.
-3. **Output priority:** allow a Chrome-only initial release if CEF fails, or require managed-OBS physical fill/key before release? Neither product path is qualified yet.
-4. **Unqualified outputs:** adopt the proposed fail-closed VP9 start policy, including empty/unreadable census cases, or explicitly retain warning-and-proceed behaviour?
-5. **Chrome upgrades:** mode-based support means alpha can play on an unqualified engine after a silent update; a qualified Chrome-major list blocks alpha until requalification. Which policy? Placement already uses the latter, so Chrome **155.0.8059.79** lacks the **154** freeze grant. OBS remains pinned **32.2.2**.
-6. **Interim eye copy:** use an owner-made Desktop copy with slide 4 skipped for AM-3/AM-4, or defer those gates until text-identity repair? The copy would not satisfy full-current-F2 completion.
+1. **D1 conversion:** convert silently, like opaque conversion today: any structurally verified, silent ProRes 4444 with real alpha, no size or duration caps.
+2. **D2 quality:** "the equivalent of H.264 CRF 14". Measured on F2's clip (SSIM of colour premultiplied over black, against the ProRes source): libx264 CRF 14 (`ENCODER`, flattened) **0.9950**, 157,860 B. VP9-alpha: CRF 10 0.9977 / 394,503 B; CRF 14 0.9976 / 315,473 B; **CRF 20 0.9975 / 246,543 B** (alpha PSNR 53.5 dB); CRF 25 0.9974 / 202,605 B; CRF 30 0.9972 / 159,678 B (alpha PSNR 49.7 dB). Every VP9 CRF from 10 to 30 matches or beats H.264 CRF 14, so **CRF 20** stays; edge and halo quality go to the owner's eye.
+3. **D3 outputs:** Chrome (HDMI) ships first; managed-OBS CEF fill/key is a follow-up increment. Both is the goal.
+4. **D4 unqualified outputs:** warn and proceed (existing `codecWarnings`), no start block.
+5. **D5 Chrome updates:** keep playing (mode-based support, no Chrome-major gate).
+6. **D6 slide 4:** the text-identity refusal is being fixed in another session; current-F2 AM-2 to AM-4 wait for it. No slide-4-skipped copy.
