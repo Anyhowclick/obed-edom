@@ -38,7 +38,11 @@ The b3to4 verdict and the owner's jitter are two different effects. Neither one 
    | old 51ead0a8 feed on ×2 | 2.9 / 2.5 ms | 33/17/33 ms |
    | new scripts + old src / old scripts + new src | 110 / 2.5 ms | collapsed / normal |
    | new scripts with old `INSTRUMENT_JS` | 2.6 ms | normal |
-   | `INSTRUMENT_JS` at 1df31c33 / ca39b819 / dd16db52 | 128 / 127 / 125 ms | collapsed |
+   | `INSTRUMENT_JS` at 1df31c33 / ca39b819 / dd16db52 | 128 / 127* / 125* ms | collapsed |
+
+   \* Ran while a peer's full suites were loading the machine (from 17:50); timings suspect. Not needed for the conclusion:
+   1df31c33 (clean, finished 17:49:51) is slow, its parent's instrument equals 51ead0a8's (fast), and 03a35b28 is slow in
+   clean runs.
 
    - So the cause sits in the instrument JS from `1df31c33` on (`24b1c91d` = old cost). It does not come from the core, the
      feed product or `live_continuity_probe.py`.
