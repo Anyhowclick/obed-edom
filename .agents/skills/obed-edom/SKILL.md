@@ -748,7 +748,9 @@ for the parked `iwa-surgical-write-generator` feature.
 * **Prepare-time texture repair (Stage T).** `apply_preview` runs `preview_textures.repair_textures` right after
   `manifest_from_export`, before `convert_movies`, on the cached export only (never the `.key`). It fixes Keynote's
   per-slide texture-id mis-mapping (a leaf pointing at another object's page: R1/R1b JSON size checks, R4/R6 pixel
-  checks over 50% grey): D1 same-slide text re-point (equal accessibility text), D3 poster re-point by `objectID`,
+  checks over 50% grey): D1 same-slide text re-point (equal accessibility text), D1g per-letter build glyph re-point
+  to its same-`objectID` base/effect twin (refused when both twins share the bad id; Keynote recycles the previous
+  slide's ids onto base glyphs, and export is nondeterministic), D3 poster re-point by `objectID`,
   D2 graft of the previous slide's MM `contents.to` page into the slide PDF; donors verified (V1 structure, V3 OCR or
   correlation), V4 postcondition after the write; `.json`/`.jsonp`/`.pdf`/`.pdfp` rewritten together. Recorded as
   `manifest.textureRepair` (`version`, `playerDigest`, `repaired[]`, `pdfs[]`; `skipped` for an unsupported player),
