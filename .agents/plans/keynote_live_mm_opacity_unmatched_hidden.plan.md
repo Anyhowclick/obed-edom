@@ -1,6 +1,6 @@
 # Magic Move: keep zero-ancestor source leaves invisible through the held endpoint
 
-**rev 2 after Opus 5.5 high critique r1**
+**rev 2 after Opus 5.5 high critique r1; r2 (Opus 5.5 high): ready to implement, two lows folded — critique closed**
 
 2026-10-15 · GPT-6 Astra · Implementation plan. Source review and an in-memory extracted-method probe completed. No product code changed; full suites and rendered gates have not run. Read-only repository: `/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/inspiring-feynman-06914e`. Evidence: its `.agents/reviews/mm-opacity-unmatched-hidden/investigation.md` and `offline_evidence.json`; exports: `~/Desktop/Convert wall to 16x9 CGs/F2-evidence-2026-10-14/` (`TEX` below).
 
@@ -39,7 +39,7 @@ Extend existing extraction/census tests, with minimal comments and no new framew
 - One compact sanitized real F2 subtree fixture retaining original slots 7, 8 and 10, with its own fingerprint and local slot mapping. On both real players, use `_real_player()`, `_hook_only`, current patched outputs, and existing `PERCENTS`. Original 7/8 change 1→0; original 10 retains its nonzero baseline. Check preview/live agreement and the Python mirror against extracted methods.
 - One `SYNTHETIC_TREES` entry: proved-zero wrapper → unknown middle → static leaf and unequal-endpoint fading leaf, both 0 at every sample. This covers zero propagation, R4 and R3 precedence without a mutation matrix. Existing unknown-ancestor, matched and Alpha_DSK fade cases retain their expectations.
 - Reuse existing uniqueness, syntax, unsupported-input, and on/off/rendering pin checks for both players. Committed census expectations refer to the new subtree's own fingerprint/local slots, never the full F2 fingerprint.
-- Separately run the current-base and candidate mirrors over the corpus plus read-only old F2. Record exactly two changed full-effect leaves, `(f2350147…,7)` and `(f2350147…,8)`, and zero changes in the existing 26-effect/122-leaf corpus. Keep F2 out of `output/`; do not commit the whole deck.
+- Separately run the current-base and candidate mirrors over the corpus plus read-only old F2. Record exactly two changed full-effect leaves, `(f2350147…,7)` and `(f2350147…,8)`, and zero changes in the existing 26-effect/122-leaf corpus. Keep F2 out of `output/`; do not commit the whole deck. The base mirror is the implementation base commit's `_chain_opacity` (without the zero line); the one-off must report exactly the two F2 leaves changed, and 0 changed is INCONCLUSIVE.
 
 Known-bad arms are stock and the **current implementation base's pre-change** `patch_player`/`patch_rendering` outputs on identical data. The inspected B base rendering pin is `c0faaa3c…`; regenerate/record baselines at implementation time. `TEX/F2-html-old-repaired-patched/assets/player/main.js` (`7d9eb308…`) is an immutable one-off provenance check, not the regression baseline. The investigation's `offline_scan.py` hardcodes vanished paths: retain its report as provenance and use current evidence paths for the new one-off scan.
 
@@ -96,3 +96,6 @@ Ship only after UH-0…UH-4 and the **full suites (3.13 + 3.10 floor + dashboard
 | 9 · samples | **Folded.** Existing PERCENTS only; no timing predicate or endpoint-adjacent sample matrix. |
 | 10 · fixture census | **Folded.** Commit subtree fingerprint/local slots; record full F2 changed set in one-off offline evidence, outside `output/`. |
 | 11 · evidence paths | **Folded.** Use persisted TEX path; stale scan is provenance, not a runnable instruction. |
+
+| r2 low 1 · investigation wording | **Folded** (coordinator): investigation §4 notes the supersession. |
+| r2 low 2 · base mirror | **Folded** (coordinator): §3 names the base commit's mirror; 0 changed ⇒ INCONCLUSIVE. |

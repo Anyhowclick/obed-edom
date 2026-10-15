@@ -117,7 +117,7 @@ R1/R2 correctly pass effective ancestor product `X=0` to each duplicate. Then:
 - `__obedFade` rejects equal endpoints (`a===I`), and `forwards` with a model opacity different from `from` also fails. Therefore `obedParentOpacity` is null.
 - R3 sees neither a proved constant `obedOpacity` nor a proved fade multiplier and keeps stock T=1. R4 is irrelevant because these leaves have animations.
 
-This is a deliberate fail-closed coverage gap, not missing ancestor annotation. Widening every unknown subtree under an initial-zero wrapper would violate the existing admission contract and hide the legitimate matched objects described above.
+This is a deliberate fail-closed coverage gap, not missing ancestor annotation. Widening every unknown subtree under an initial-zero wrapper would violate the existing admission contract and hide the legitimate matched objects described above. *Superseded by plan rev 2: a **proved** effective zero absorbs; raw initial-zero still does not (F2 slots 10/11 prove 1).*
 
 R5 addresses a different first-frame DOM+GL double image. The duplicate source DOM is already under a zero wrapper; making its hide earlier cannot fix erroneous GL pixels. R6 cannot engage for either duplicate: its animation whitelist rejects `hidden`, and the leaf has no scaling (identity sx/sy is explicitly rejected). Thus it neither uploads a destination texture nor causes their appearance. R7 blending and R8 preloading are not the source of the bad opacity; R8 can affect how promptly the destination is ready. R9–R12 handle Dissolve/cut/freeze, outside this MM. The fade extension's R13 supplies duration but does not admit this constant-hidden pair. CSS cleanup removes the artifact; it does not create it.
 
