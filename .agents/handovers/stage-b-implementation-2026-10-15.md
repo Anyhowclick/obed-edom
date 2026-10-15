@@ -4,22 +4,27 @@ Read with `stage-b-implementation-2026-10-14.md` (history, Q7 fix round) and the
 `.agents/plans/keynote_live_continuity_stage_b_q7_handback.plan.md` (owner-approved option A).
 
 ## Resume here
-1. **Two Codex Sol implementers were still running at handover** in this worktree (uncommitted edits will appear):
-   - **R-departure** (move-start snap, below): brief/report `output/evidence/stage-b-2026-10-13/q7-round2/impl/R-departure.md`
-     → report lands at the session scratchpad `…/scratchpad/q7dbg/impl/R-departure-report.md` (copy it into `q7-round2/impl/`).
-     Owned: `live_continuity_js.py`, its tests, `continuity_core_variants.py` (+ test). Adds core variant `departure-early-hide`.
-   - **G-gaps** (pre-existing instrument gaps, below): brief `q7-round2/impl/G-gaps.md`, report `…/impl/G-gaps-report.md`.
-     Owned: `mm_feed_instrument.py`, `live_continuity_probe.py`, `managed_obs_qualify.py`, `live_evidence_contract.py`, `run_gates.sh` + tests.
-   Check `git status`; if their edits are partial, finish or redo from the briefs. Then: pins (core sha in
-   `tests/test_live_continuity_js.py`, `scripts/detach_experiment.py`, `tests/test_live_host.py`), targeted tests with the
-   worktree venv (`.venv/bin/python -m pytest -n 2 …`; the main `.venv` imports the MAIN checkout's src), Opus 5.5 high review
-   (rounds 1–3 fold all severities), headless controls, then owner Q7 attempt 4.
-2. **Add the departure-exposure verdict** (stream G, after G-gaps lands): the paint census already sees it ("2 unpainted frames
-   (checkVisibility)" just before glInterval.start) but only reports inconclusive; promote it to a readable fail, red control =
-   R's `departure-early-hide`.
-3. **Alpha 3→4 stall — follow up in a NEW session (owner 2026-10-15).** See Open.
-4. Then Q7 attempt 4 on all three decks + step 3 (dashboard: D1, Alpha to the end + press past end — not done this round),
-   then Q2–Q6, full suites (3.12 + 3.10 lockfile venv + dashboard ui/maps), PR.
+This worktree (`s2-followups-dsk-deck-902af1`) is RETIRED (owner 2026-10-15); continue on branch `claude/stage-b-implementation`
+in a fresh worktree (sync all extras + `npm ci`; run tests with that worktree's `.venv`). Reports/briefs: `output/evidence/stage-b-2026-10-13/q7-round2/impl/`.
+1. **`af3edf73` move-start snap fix — UNREVIEWED.** Core keeps the carried decoder painting until the first GL callback that
+   advances the feed (owner saw "a very brief snap to frame 0 just before the MM transitions"); red control core variant
+   `departure-early-hide`. Report `impl/R-departure-report.md`. Next: Opus 5.5 high review r1–r3, then a departure-exposure
+   verdict in the instrument (the paint census already sees "2 unpainted frames (checkVisibility)" before glInterval.start).
+2. **`47bc3698` instrument gaps — UNREVIEWED, DO NOT MERGE AS IS.** Report `impl/G-gaps-report.md` (D7 feed-off 6/6 green after
+   lifecycle/hold/dropped-callback fixes; Alpha b5to6 readable). **Disputed by the Alpha-stall session:** (a) slow settled pre/post-GL
+   cadence made report-only — the owner's Alpha jitter matches 67–233 ms browser frames on slides 6–8, likely caused by the
+   instrument's own per-frame `capture()` (21 drawImage + getImageData per video frame while hash == atScene-1; callbackCostP95Ms
+   41 OBS / 114 headless) → observer effect must invalidate/fail, not be excused; (b) "paint starts at the decoded source scene"
+   correctly moves the b3to4 not-decoded frames out of the carry, but leaves the slide-4 ENTRY cold start (Untitled-H264 readyState 1
+   for ~340 ms after mount) unscored — keep it a readable finding. Revise before use.
+3. **Alpha product issues** (pre-existing): b6to7 and both b7to8 fed carries read artworkAbove false on every read, and the second
+   presented hand-back frame has the decoder on `#body` (`inStage=false`) before it returns to the stage. Plus the b3to4 entry cold
+   start. The Alpha-stall session (`Investigate Alpha 3→4 decoder stall (feed on)`, notes `alpha-b3to4-stall-notes.md`) owns the
+   stall; coordinate before fixing.
+4. Then Q7 attempt 4 on all three decks + step 3 (dashboard: D1, Alpha to the end + press past end — not done), Q2–Q6, full suites
+   (3.12 + 3.10 lockfile venv + dashboard ui/maps), PR. Core sha now `71d8ead2…` (pins updated); targeted suites 3463 passed.
+5. Stage T gate exports moved to `~/Desktop/Convert wall to 16x9 CGs/Continuity/stage-t-exports/` (`aa6c74d2` repoints
+   `scripts/texture_repair_check.py`); main's copy still points at this retired worktree until Stage B merges.
 
 ## What this round did (commits on `claude/stage-b-implementation`)
 | Commit | What |
