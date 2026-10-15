@@ -128,6 +128,19 @@ VERDICTS = ("PASS", "FAIL", "INCONCLUSIVE", "REPORTED", "N/A")
 MOVIE_SUFFIXES = (".mov", ".mp4", ".m4v")
 PLACEMENT_SCHEMA_VERSION = 1
 PLACEMENT_BACKENDS = ("cef", "chrome-harness")
+PREPARATION_CACHE_VERSION = 1
+
+_PREPARATION_CACHE: Path | None = None
+_TOOLCHAIN_INPUTS: dict[str, Any] | None = None
+
+
+class ReadinessTimeout(RuntimeError):
+    pass
+
+
+def set_preparation_cache(path: Path | None) -> None:
+    global _PREPARATION_CACHE
+    _PREPARATION_CACHE = None if path is None else Path(path).resolve()
 
 
 @dataclass(frozen=True)
@@ -696,7 +709,7 @@ HOOK_JS = r"""
       });
       return {layers: layers, rules: rules, holders: G ? Array.prototype.filter.call(G.querySelectorAll('div'), holder).length : 0};
     },
-    foreground: function () {
+    foreground: function (withPng) {
       var G = stage(), out = {}, all = Array.prototype.slice.call(document.getElementsByTagName('*'));
       if (!G) return out;
       els.forEach(function (v) {
@@ -708,10 +721,23 @@ HOOK_JS = r"""
           return (v.compareDocumentPosition(c) & 4) && c.checkVisibility({opacityProperty: true, visibilityProperty: true}) &&
             o.right > R[0] && o.left < R[0] + R[2] && o.bottom > R[1] && o.top < R[1] + R[3];
         }).map(function (c) {
-          return {id: c.id, rect: box(c.getBoundingClientRect()), alpha: eff(c, null), order: all.indexOf(c), png: png(c)};
+          return {id: c.id, rect: box(c.getBoundingClientRect()), alpha: eff(c, null), order: all.indexOf(c),
+                  png: withPng === false ? null : png(c)};
         });
       });
       return out;
+    },
+    presentation: function () {
+      scan();
+      var G = stage();
+      return els.map(function (v) {
+        var r = recs.get(v), q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : {}, rv = r.rv[r.rv.length - 1];
+        return {hookId:r.id, elementId:v.id || null, src:v.getAttribute('src') || '', currentSrc:v.currentSrc || '',
+                currentTime:v.currentTime, paused:v.paused, readyState:v.readyState,
+                videoWidth:v.videoWidth, videoHeight:v.videoHeight,
+                totalFrames:q.totalVideoFrames == null ? null : q.totalVideoFrames,
+                presentedFrames:rv ? rv[2] : null, connected:v.isConnected && (!G || G.contains(v))};
+      }).filter(function (v) { return v.connected; });
     },
     ready: function () { return !!X.first; },
     inventory: function () {
@@ -807,6 +833,28 @@ SNAPSHOT_JS = ("(function(){var s=null;try{s=window.__obedLive.snapshot()}catch(
                "next:s.nextSceneId,state:s.playerState,ready:s.ready}:null})()")
 STAGE_JS = mmo.STAGE_JS
 PLACEMENT_JS = "('__obedPlacement' in window)?String(window.__obedPlacement):null"
+POSITIONING_JS = r"""
+(function(){
+  var s = null, core = null, G = document.getElementById('stage'), videos = [];
+  try { s = window.__obedLive.snapshot(); } catch (e) {}
+  try { core = window.__OBED_P2_PRESERVE__ && window.__OBED_P2_PRESERVE__.snapshot(); } catch (e) {}
+  try { videos = window.__obedDx.presentation(); } catch (e) {}
+  var canvases = G ? Array.prototype.map.call(G.querySelectorAll('canvas'), function(c) { return c.id || ''; }) : [];
+  var holders = G ? Array.prototype.filter.call(G.querySelectorAll('div'), function(d) {
+    var c=d.firstElementChild; return !d.id && d.children.length===1 && c && c.tagName==='CANVAS' && !c.id && d.style.overflow==='hidden';
+  }).length : null;
+  var foreground = null;
+  try {
+    var raw = window.__obedDx.foreground(false); foreground = {};
+    Object.keys(raw || {}).forEach(function(k) { foreground[k] = (raw[k] || []).map(function(c) {
+      return {id:c.id, rect:c.rect, alpha:c.alpha, order:c.order};
+    }); });
+  } catch (e) {}
+  return {runtime:s, hash:String(location.hash || ''), videos:videos, continuity:core,
+          preservedStage:G ? G.querySelectorAll('video[data-obed-preserved="1"]').length : null,
+          canvases:canvases, holders:holders, foreground:foreground, stage:!!G};
+})()
+"""
 PREDEFINE_JS = ("Object.defineProperty(window,'__obedPlacement',{get:function(){return 'snap'},enumerable:false,"
                 "configurable:false})")
 """`channel-predefined`: a forged `snap` getter defined before the host's first-run script, which then throws."""
@@ -1183,6 +1231,126 @@ def tone_frames(n: int, layout: dict[str, Any] | None = None) -> Iterator[bytes]
         yield frame.tobytes() + chroma
 
 
+def _preparation_key(kind: str, inputs: dict[str, Any]) -> str:
+    payload = {"version": PREPARATION_CACHE_VERSION, "kind": kind, "inputs": inputs}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _immutable(path: Path) -> None:
+    path.chmod(0o444)
+
+
+def _atomic_file(dest: Path, write: Callable[[Path], Any]) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        write(tmp)
+        _immutable(tmp)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _atomic_tree(source: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        shutil.copytree(source, tmp)
+        for path in (p for p in tmp.rglob("*") if p.is_file()):
+            _immutable(path)
+        if dest.exists():
+            shutil.rmtree(dest)
+        os.replace(tmp, dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _valid_cached_entry(entry: Path, key: str) -> tuple[Path, dict[str, Any]] | None:
+    try:
+        manifest = json.loads((entry / "manifest.json").read_text())
+        tree = entry / "tree"
+        outputs = manifest.get("outputs")
+        if manifest.get("key") != key or not isinstance(outputs, list) or not outputs:
+            return None
+        for output in outputs:
+            relative = Path(output["path"])
+            if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
+                return None
+            path = tree / relative
+            if not path.is_file() or sha256_file(path) != output["sha256"]:
+                return None
+        info = manifest.get("info")
+        asset = next((output for output in outputs if output["path"] == "asset"), None)
+        if not isinstance(info, dict) or asset is not None and info.get("sha256") != asset["sha256"]:
+            return None
+        return tree, info
+    except (KeyError, OSError, ValueError, TypeError):
+        return None
+
+
+def _cached_preparation_file(kind: str, inputs: dict[str, Any], dest: Path,
+                             build: Callable[[Path], dict[str, Any]], *, directory: bool = False) -> dict[str, Any]:
+    assert _PREPARATION_CACHE is not None
+    key = _preparation_key(kind, inputs)
+    parent = _PREPARATION_CACHE / kind
+    entry = parent / key
+    cached = _valid_cached_entry(entry, key)
+    if cached is None:
+        if entry.exists():
+            shutil.rmtree(entry)
+        parent.mkdir(parents=True, exist_ok=True)
+        temp: Path | None = Path(tempfile.mkdtemp(prefix=f".{key}-", dir=parent))
+        try:
+            tree = temp / "tree"
+            tree.mkdir()
+            info = {k: v for k, v in build(tree).items() if k != "path"}
+            outputs = [{"path": path.relative_to(tree).as_posix(), "sha256": sha256_file(path)}
+                       for path in sorted(tree.rglob("*")) if path.is_file()]
+            asset = next((output for output in outputs if output["path"] == "asset"), None)
+            if not directory and asset is None:
+                raise RuntimeError(f"preparation cache build produced no asset for {kind}")
+            if asset is not None:
+                info["sha256"] = asset["sha256"]
+            manifest = {"version": PREPARATION_CACHE_VERSION, "key": key, "inputs": inputs,
+                        "outputs": outputs, "info": info}
+            (temp / "manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+            for path in (p for p in tree.rglob("*") if p.is_file()):
+                _immutable(path)
+            _immutable(temp / "manifest.json")
+            try:
+                os.replace(temp, entry)
+            except OSError:
+                cached = _valid_cached_entry(entry, key)
+                if cached is None:
+                    raise
+            else:
+                temp = None
+                cached = _valid_cached_entry(entry, key)
+        finally:
+            if temp is not None:
+                shutil.rmtree(temp, ignore_errors=True)
+    if cached is None:
+        raise RuntimeError(f"preparation cache fill failed for {kind} {key}")
+    tree, info = cached
+    if directory:
+        _atomic_tree(tree, dest)
+        return info
+    _atomic_file(dest, lambda path: shutil.copyfile(tree / "asset", path))
+    result = {**info, "path": str(dest)}
+    _atomic_file(dest.with_suffix(".json"), lambda path: path.write_text(json.dumps(result, sort_keys=True)))
+    return result
+
+
+def _toolchain_inputs() -> dict[str, Any]:
+    import imageio_ffmpeg
+
+    global _TOOLCHAIN_INPUTS
+    if _TOOLCHAIN_INPUTS is None:
+        _TOOLCHAIN_INPUTS = {"ffmpegSha256": sha256_file(Path(imageio_ffmpeg.get_ffmpeg_exe())),
+                             "pillowVersion": Image.__version__, "numpyVersion": np.__version__}
+    return dict(_TOOLCHAIN_INPUTS)
+
+
 def encode_movie(dest: Path, frames: Iterable[bytes], *, encoding: str, size: tuple[int, int] = (binary.WIDTH, binary.HEIGHT),
                  fps: int = FPS) -> dict[str, Any]:
     """Raw yuv420p frames through `ENCODINGS[encoding]` into `dest` (Keynote's .mov name, MP4 bytes)."""
@@ -1214,6 +1382,20 @@ def scratch_movie(scratch: Path, kind: str, encoding: str, seconds: float) -> di
     if dest.is_file() and meta.is_file():
         return json.loads(meta.read_text())
     n = binary.frame_count(seconds)
+    if _PREPARATION_CACHE is not None:
+        layout = binary.layout() if kind == "counter" else tone_layout()
+        inputs = {"kind": kind, "encoding": encoding, "encodingArgs": ENCODINGS[encoding],
+                  "dimensions": [binary.WIDTH, binary.HEIGHT], "mediaFps": FPS,
+                  "frameCount": n, "durationS": seconds, "layout": layout,
+                  "generatorSha256": sha256_file(Path(binary.__file__)),
+                  "driverSha256": sha256_file(Path(__file__)), **_toolchain_inputs()}
+
+        def build(tree: Path) -> dict[str, Any]:
+            info = encode_movie(tree / "asset", counter_frames(n) if kind == "counter" else tone_frames(n), encoding=encoding)
+            info.update(kind=kind, seconds=seconds, layout=layout)
+            return info
+
+        return _cached_preparation_file("generated-movies", inputs, dest, build)
     info = encode_movie(dest, counter_frames(n) if kind == "counter" else tone_frames(n), encoding=encoding)
     info.update(kind=kind, seconds=seconds, layout=binary.layout() if kind == "counter" else tone_layout())
     meta.write_text(json.dumps(info))
@@ -1232,6 +1414,23 @@ def h264_copy(scratch: Path, source: Path) -> dict[str, Any] | None:
     meta = dest.with_suffix(".json")
     if dest.is_file() and meta.is_file():
         return json.loads(meta.read_text())
+    if _PREPARATION_CACHE is not None:
+        inputs = {"sourceSha256": digest, "encoding": DEFAULT_ENCODING,
+                  "encodingArgs": ENCODINGS[DEFAULT_ENCODING], **_toolchain_inputs()}
+
+        def build(tree: Path) -> dict[str, Any]:
+            path = tree / "asset"
+            tmp = path.with_suffix(".tmp.mp4")
+            cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(source),
+                   *ENCODINGS[DEFAULT_ENCODING], "-an", "-movflags", "+faststart", str(tmp)]
+            done = subprocess.run(cmd, capture_output=True, text=True)
+            if done.returncode != 0 or not tmp.is_file():
+                raise RuntimeError(f"ffmpeg transcode failed: {done.stderr[-800:]}")
+            tmp.replace(path)
+            return {"path": str(path), "sha256": binary.sha256_file(path), "encoding": DEFAULT_ENCODING,
+                    "source": digest, "kind": "h264"}
+
+        return _cached_preparation_file("transcodes", inputs, dest, build)
     tmp = dest.with_suffix(".tmp.mp4")
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(source), *ENCODINGS[DEFAULT_ENCODING], "-an",
@@ -1250,9 +1449,34 @@ def scratch_strip(scratch: Path, deck: str) -> tuple[Path, dict[str, Any]]:
 
     root = scratch / f"strip-{deck}"
     report = root / "strip.json"
+    source = DECKS[deck].unmodified
+    if not source.is_dir():
+        raise RuntimeError(f"fixture missing: {source}")
     if report.is_file():
         return root, json.loads(report.read_text())
-    source = DECKS[deck].unmodified
+    if _PREPARATION_CACHE is not None:
+        import obed_edom.html_alpha_probe as alpha_probe
+
+        paths = sorted(p for p in source.rglob("*") if p.suffix.lower() in (".pdf", ".pdfp") and p.is_file())
+        inputs = {"sources": [{"path": p.relative_to(source).as_posix(), "sha256": sha256_file(p)} for p in paths],
+                  "transformSha256": sha256_file(Path(alpha_probe.__file__))}
+
+        def build(tree: Path) -> dict[str, Any]:
+            for path in paths:
+                dest = tree / path.relative_to(source)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, dest)
+            raw = strip_export_pdf_bg_fills(tree)
+            summary = {"pdfCount": raw["pdfCount"],
+                       "rewritten": [{"pdf": r["pdf"], "pages": r["strippedPages"], "sha256": r["sha256"]}
+                                     for r in raw["rewritten"]]}
+            if not summary["rewritten"]:
+                raise RuntimeError(f"strip of {deck} removed no background fill")
+            (tree / "strip.json").write_text(json.dumps(summary))
+            return summary
+
+        summary = _cached_preparation_file("stripped-assets", inputs, root, build, directory=True)
+        return root, summary
     for path in sorted(p for p in source.rglob("*") if p.suffix.lower() in (".pdf", ".pdfp") and p.is_file()):
         dest = root / path.relative_to(source)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1548,6 +1772,8 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
     decision = decision or {}
     deck = DECKS[arm.deck]
     unmod = deck.unmodified
+    if not unmod.is_dir():
+        raise RuntimeError(f"fixture missing: {unmod}")
     strip_root, strip_report = scratch_strip(scratch, arm.deck) if arm.strip else (None, None)
     files: dict[str, Path] = {}
     movies: dict[str, dict[str, Any]] = {}
@@ -1560,7 +1786,9 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
                 filename = Path(rel).name
                 target_prefix = f"assets/{header['slideList'][arm.slide - 1]}/assets/"
                 if filename in DSK_COUNTER_OFFSETS and rel.startswith(target_prefix):
-                    digest = binary.sha256_file(DSK_COUNTER_MOVIE) if DSK_COUNTER_MOVIE.is_file() else None
+                    if not DSK_COUNTER_MOVIE.is_file():
+                        raise RuntimeError(f"fixture missing: {DSK_COUNTER_MOVIE}")
+                    digest = binary.sha256_file(DSK_COUNTER_MOVIE)
                     if digest != DSK_COUNTER_SHA256:
                         raise ValueError(f"DSK counter movie digest {digest!r} does not match its release pin")
                     fps = dsk_counter_fps()
@@ -1588,6 +1816,8 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
             if arm.movies == "player" or (arm.movies == "counter" and decision.get("counterEncoding") == "h264-untagged"):
                 if deck.player is None:
                     raise FileNotFoundError(rel)
+                if not deck.player.is_dir():
+                    raise RuntimeError(f"fixture missing: {deck.player}")
                 return deck.player / rel
             seconds = binary.movie_seconds(Path(rel))
             info = scratch_movie(scratch, arm.movies, decision.get(f"{arm.movies}Encoding", DEFAULT_ENCODING), seconds)
@@ -2700,6 +2930,7 @@ class Profile:
     overrides: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = ()
     mid_frames: int = MIN_MID_FRAMES
     placement: str | None = None
+    not_run: tuple[str, ...] = ()
 
     def arm(self, name: str, identity: bool | None = None) -> Arm:
         arm = ARMS[name]
@@ -2759,6 +2990,59 @@ CEF_PLACEMENT = Profile(
     ),
     mid_frames=5,
 )
+
+_DEV_RENDERER_ARMS = (
+    "opaque-off", "off", "noblend", "on2", "on", "m-snap-cef", "m-snap-cef-twin",
+    "wrongrule-cef", "wrongrule-cef-twin", "perfect-shift", "m-tone-cef", "m-tone-cef-twin",
+    "m-geo-scale", "m-paused-cef", "m-off-cef", "m-fg-cef", "m-hold-cef", "m-fg-omit-cef",
+    "m-fg-swap-cef", "m-snap-cef-underlay-omit",
+)
+_DEV_HARNESS_ARMS = (
+    *_DEV_RENDERER_ARMS,
+    "m-snap-cef-nooffset-x", "m-snap-cef-nooffset-x-twin",
+    "m-snap-cef-nooffset-y", "m-snap-cef-nooffset-y-twin", "m-geo-base", "m-snap-cef-dsk",
+)
+
+
+def _dev_overrides(arms: tuple[str, ...]) -> tuple[tuple[str, tuple[tuple[str, ...], ...]], ...]:
+    selected = set(arms)
+    return tuple(
+        (check, tuple(tuple(name for name in names if name.startswith("case:") or name in selected) for names in controls))
+        for check, controls in dict(CEF_PLACEMENT.overrides).items()
+    )
+
+
+CEF_PLACEMENT_DEV_RENDERER = Profile(
+    "CEF-placement-DEV-renderer", _DEV_RENDERER_ARMS,
+    reported=(*CEF_PLACEMENT.reported, "cost"), headless=False, lifecycle=False, placement="frac",
+    overrides=_dev_overrides(_DEV_RENDERER_ARMS), mid_frames=5, not_run=("cost",),
+)
+CEF_PLACEMENT_DEV_HARNESS = Profile(
+    "CEF-placement-DEV-harness", _DEV_HARNESS_ARMS,
+    reported=CEF_PLACEMENT.reported, headless=False, lifecycle=False, placement="frac",
+    overrides=_dev_overrides(_DEV_HARNESS_ARMS), mid_frames=5,
+)
+CEF_PLACEMENT_DEV_PROFILES = {
+    "renderer": CEF_PLACEMENT_DEV_RENDERER,
+    "harness": CEF_PLACEMENT_DEV_HARNESS,
+}
+
+
+def profile_coverage_problems(profile: Profile) -> list[str]:
+    problems = []
+    if not set(profile.not_run) <= set(profile.reported):
+        problems.append(f"not_run outside reported: {sorted(set(profile.not_run) - set(profile.reported))}")
+    for check, controls in profile.controls().items():
+        live_controls = [name for names in controls for name in names if not name.startswith("case:")]
+        missing = [name for name in live_controls if name not in profile.arms]
+        candidates = [name for name in profile.arms if profile.arm(name, False).expect.get(check) == "PASS"]
+        if missing:
+            problems.append(f"{check}: live controls outside profile: {missing}")
+        if not candidates:
+            problems.append(f"{check}: no live PASS candidate")
+    if not {"on", "on2"} <= set(profile.arms):
+        problems.append("cvc: on/on2 candidates missing")
+    return problems
 
 
 ANIM_STATES = ("idle", "running", "paused", "finished")
@@ -4109,6 +4393,8 @@ def score_round(scored: dict[str, dict[str, Any]], cal: Calibration = Calibratio
         verdict = "INCONCLUSIVE" if reasons or any(v not in ("PASS", "FAIL") for v in candidates.values()) else (
             "FAIL" if "FAIL" in candidates.values() else "PASS")
         gates[check] = {"verdict": verdict, "reasons": reasons, "candidates": candidates}
+    for check in profile.not_run:
+        gates[check] = {"verdict": "NOT RUN", "reasons": [f"{profile.name} does not run this family"], "candidates": {}}
     blocking = {"cvc": {"cvc": (extra.get("cvc") or {}).get("verdict")}}
     if profile.lifecycle:
         blocking["lifecycle"] = {n: {"MATCH": "PASS", "MISMATCH": "FAIL"}.get(s["outcome"], "INCONCLUSIVE")
@@ -4126,8 +4412,12 @@ def score_round(scored: dict[str, dict[str, Any]], cal: Calibration = Calibratio
     verdicts += ["FAIL" if o == "MISMATCH" else "INCONCLUSIVE" for o in arms.values() if o != "MATCH"]
     if missing:
         verdicts.append("INCONCLUSIVE")
+    coverage = profile_coverage_problems(profile) if profile in CEF_PLACEMENT_DEV_PROFILES.values() else []
+    if coverage:
+        verdicts.append("INCONCLUSIVE")
     overall = next((v for v in ("FAIL", "INCONCLUSIVE") if v in verdicts), "PASS" if verdicts else "INCONCLUSIVE")
-    return {"overall": overall, "gates": gates, "arms": arms, "missing": sorted(set(missing)), "profile": profile.name}
+    return {"overall": overall, "gates": gates, "arms": arms, "missing": sorted(set(missing)),
+            "profile": profile.name, "coverageProblems": coverage}
 
 
 def decode_rgba(data: str | bytes) -> np.ndarray:
@@ -4277,14 +4567,17 @@ def wait_ready(evaluate: Callable[[str], Any], timeout_s: float = 30.0, snapshot
     raise RuntimeError("player never became ready")
 
 
-def navigate(host: Any, scene: int, limit: int) -> None:
+def navigate(host: Any, scene: int, limit: int, *, deadline: float | None = None) -> int:
     """Advance until the next advance plays `scene`."""
     evaluate = host._require_transport().evaluate
+    advances = 0
     for _ in range(limit + 1):
-        snap = wait_ready(evaluate, snapshot_js=getattr(host, "snapshot_js", SNAPSHOT_JS))
+        timeout = 30.0 if deadline is None else max(0.0, deadline - time.monotonic())
+        snap = wait_ready(evaluate, timeout_s=timeout, snapshot_js=getattr(host, "snapshot_js", SNAPSHOT_JS))
         if pending_scene(snap) == scene:
-            return
+            return advances
         host.execute("advance")
+        advances += 1
         if hasattr(host, "await_advance"):
             host.await_advance(snap)
     raise RuntimeError(f"scene {scene} not reached in {limit} advances")
@@ -4455,8 +4748,8 @@ def settle(host: Any, timeout_s: float = 30.0) -> None:
     time.sleep(0.5)
 
 
-def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.ndarray], *,
-          screencast: Callable[[], Any] | None = None) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+def _drive_legacy(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.ndarray], *,
+                  screencast: Callable[[], Any] | None = None) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """The one parametrized driver for every arm and lifecycle row on a started host (headless here, CEF in DX-2)."""
     transport = host._require_transport()
     evaluate = transport.evaluate
@@ -4520,6 +4813,353 @@ def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.
         settle(host)
         record["residueAfterGoto"] = evaluate(f"window.__obedDx.residue({json.dumps(ids)})") if ids else None
     return record, images
+
+
+def _position_snapshot(evaluate: Callable[[str], Any]) -> dict[str, Any]:
+    value = evaluate(POSITIONING_JS)
+    return value if isinstance(value, dict) else {}
+
+
+def _predicate(passed: bool, observed: Any = None) -> dict[str, Any]:
+    return {"passed": bool(passed), "observed": observed}
+
+
+def _pending_from_runtime(runtime: Any) -> int | None:
+    if not isinstance(runtime, dict):
+        return None
+    return pending_scene({"scene": runtime.get("sceneId"), "next": runtime.get("nextSceneId"),
+                          "state": runtime.get("playerState"), "ready": runtime.get("ready")})
+
+
+def _dsk_urls(videos: list[dict[str, Any]]) -> tuple[list[str], list[float | None]]:
+    urls = [str(video.get("src") or video.get("currentSrc") or "") for video in videos]
+    offsets = []
+    for url in urls:
+        match = re.search(r"(?:#|%23)t=([0-9]+(?:\.[0-9]+)?)", url)
+        offsets.append(float(match.group(1)) if match else 0.0 if url else None)
+    return urls, offsets
+
+
+def _position_predicates(snapshot: dict[str, Any], arm: Arm, target: dict[str, Any], goal: int) -> dict[str, dict[str, Any]]:
+    runtime = snapshot.get("runtime")
+    videos = snapshot.get("videos") if isinstance(snapshot.get("videos"), list) else []
+    expected_decoders = arm.decoders if arm.movies else 0
+    identities = [str(v.get("src") or v.get("currentSrc") or "") for v in videos if isinstance(v, dict)]
+    decoded = [v for v in videos if isinstance(v, dict) and isinstance(v.get("readyState"), int)
+               and v["readyState"] >= 2 and number(v.get("currentTime"))
+               and number(v.get("videoWidth")) and v["videoWidth"] > 0
+               and number(v.get("videoHeight")) and v["videoHeight"] > 0]
+    urls, offsets = _dsk_urls(videos)
+    dsk_ok = True
+    if arm.movies == "dsk-counter":
+        dsk_ok = (len(urls) == 2 and sorted(Path(url.split("#", 1)[0]).name for url in urls) == sorted(DSK_COUNTER_OFFSETS)
+                  and sorted(offset for offset in offsets if offset is not None) == sorted(DSK_COUNTER_OFFSETS.values()))
+    foreground = snapshot.get("foreground")
+    foreground_required = bool(set(arm.overrides) & {"fg", "edgefg"})
+    foreground_ok = isinstance(foreground, dict) and any(bool(value) for value in foreground.values())
+    return {
+        "pendingSceneBuild": _predicate(_pending_from_runtime(runtime) == goal,
+                                         {"expected": goal, "runtime": runtime}),
+        "automaticPlayback": _predicate(isinstance(runtime, dict) and runtime.get("ready") is True
+                                          and str(runtime.get("playerState") or "").startswith("Idle"), runtime),
+        "slideNumberControl": _predicate(isinstance(runtime, dict) and runtime.get("slideNumberShowing") is not True,
+                                           runtime.get("slideNumberShowing") if isinstance(runtime, dict) else None),
+        "decoderIdentity": _predicate(len(videos) == expected_decoders and all(identities) if expected_decoders else not videos,
+                                        {"expected": expected_decoders, "sources": identities}),
+        "presentedFrame": _predicate(len(decoded) == expected_decoders if expected_decoders else True,
+                                      [{k: v.get(k) for k in ("src", "elementId", "currentTime", "readyState", "totalFrames",
+                                                               "presentedFrames")}
+                                       for v in videos if isinstance(v, dict)]),
+        "urlFragment": _predicate(dsk_ok, {"urls": urls, "offsets": offsets}),
+        "continuityState": _predicate(
+            snapshot.get("continuity") in (None, []) and snapshot.get("preservedStage") == 0
+            if arm.continuity != "off" else True,
+            {"pool": snapshot.get("continuity"), "preservedStage": snapshot.get("preservedStage")}),
+        "foreground": _predicate(foreground_ok if foreground_required else True,
+                                   foreground),
+        "textureInventory": _predicate(snapshot.get("stage") is True and isinstance(snapshot.get("canvases"), list)
+                                        and bool(snapshot["canvases"]), snapshot.get("canvases")),
+        "holderAdmission": _predicate(snapshot.get("holders") == 0, snapshot.get("holders")),
+        "destinationReadiness": _predicate(snapshot.get("hash") == target["hashBefore"],
+                                            {"expected": target["hashBefore"], "hash": snapshot.get("hash")}),
+    }
+
+
+def _predicates_pass(predicates: Mapping[str, Mapping[str, Any]]) -> bool:
+    return bool(predicates) and all(value.get("passed") is True for value in predicates.values())
+
+
+def _await_position(evaluate: Callable[[str], Any], arm: Arm, target: dict[str, Any], goal: int,
+                    deadline: float) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    predicates: dict[str, dict[str, Any]] = {}
+    snapshot: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        snapshot = _position_snapshot(evaluate)
+        predicates = _position_predicates(snapshot, arm, target, goal)
+        if _predicates_pass(predicates):
+            break
+        time.sleep(0.05)
+    return predicates, snapshot
+
+
+def _goto_autoplay(host: Any) -> dict[str, Any] | None:
+    value = getattr(host, "_last_goto_autoplay", None)
+    if value is None:
+        return None
+    return {"runLength": getattr(value, "run_length", None), "runKinds": getattr(value, "run_kinds", None),
+            "fired": getattr(value, "fired", None), "deferredReason": getattr(value, "deferred_reason", None)}
+
+
+def _adjacent_continuity_carries(host: Any, target: dict[str, Any]) -> list[dict[str, Any]] | None:
+    report = (getattr(host, "output", {}) or {}).get("continuity")
+    if not isinstance(report, dict):
+        return None
+    if report.get("mode") != "qualified":
+        return []
+    plan = getattr(host, "_continuity_runtime_plan", None)
+    entries = plan.get("boundaries") if isinstance(plan, dict) else None
+    if not isinstance(entries, list):
+        return None
+    adjacent = {target["scene"] - target.get("event", 0), target["scene"] + 1}
+    return [entry for entry in entries if isinstance(entry, dict) and entry.get("atScene") in adjacent
+            and entry.get("action") in ("pin", "bridge", "glReplay")]
+
+
+def _goto_fallback_reasons(host: Any, arm: Arm, target: dict[str, Any]) -> list[str]:
+    reasons = []
+    if arm.row is not None:
+        reasons.append("lifecycle-row")
+    if arm.bridge:
+        reasons.append("bridge")
+    if arm.page != "alpha":
+        reasons.append(f"page-{arm.page}")
+    if target["automatic"]:
+        reasons.append("automatic-target")
+    if arm.continuity != "off":
+        carries = _adjacent_continuity_carries(host, target)
+        if carries is None:
+            reasons.append("continuity-report-unavailable")
+        elif carries:
+            reasons.append("continuity-carried")
+    return reasons
+
+
+def _position(host: Any, arm: Arm, target: dict[str, Any]) -> dict[str, Any]:
+    started = time.monotonic()
+    evaluate = host._require_transport().evaluate
+    goal = target["scene"] - 1 if target["automatic"] else target["scene"]
+    fallback = _goto_fallback_reasons(host, arm, target)
+    if fallback:
+        try:
+            ordinary_advances = navigate(host, goal, target["sceneCount"])
+        except Exception as exc:  # noqa: BLE001
+            raise ReadinessTimeout(f"sequential positioning failed: {type(exc).__name__}: {exc}") from exc
+        predicates = _position_predicates(_position_snapshot(evaluate), arm, target, goal)
+        return {"path": "sequential", "fromSlide": 1, "ordinaryAdvances": ordinary_advances,
+                "durationMs": round((time.monotonic() - started) * 1000.0, 1),
+                "fallbackReasons": fallback, "gotoAutoplay": _goto_autoplay(host), "predicates": predicates}
+    deadline = started + 15.0
+    try:
+        host.execute("goTo", arm.slide)
+        autoplay = _goto_autoplay(host)
+        if autoplay is not None and autoplay["deferredReason"]:
+            raise ReadinessTimeout(f"go-to autoplay deferred: {autoplay['deferredReason']}")
+        ordinary_advances = navigate(host, goal, target["sceneCount"], deadline=deadline)
+    except ReadinessTimeout:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ReadinessTimeout(f"go-to positioning failed: {type(exc).__name__}: {exc}") from exc
+    predicates, _ = _await_position(evaluate, arm, target, goal, deadline)
+    if not _predicates_pass(predicates):
+        failed = [name for name, value in predicates.items() if value.get("passed") is not True]
+        raise ReadinessTimeout(f"positioning readiness timed out for {failed}")
+    return {"path": "goTo-slide+ordinary-builds", "fromSlide": arm.slide, "ordinaryAdvances": ordinary_advances,
+            "durationMs": round((time.monotonic() - started) * 1000.0, 1),
+            "fallbackReasons": [], "gotoAutoplay": autoplay, "predicates": predicates}
+
+
+def _painted(image: np.ndarray, arm: Arm) -> bool:
+    expected = device_shape(arm)
+    return (isinstance(image, np.ndarray) and image.shape == (expected[0], expected[1], 4)
+            and bool(np.any(image)))
+
+
+def _video_key(video: dict[str, Any]) -> tuple[str, Any]:
+    return (str(video.get("src") or video.get("currentSrc") or ""),
+            video.get("elementId") if video.get("elementId") is not None else video.get("hookId"))
+
+
+def _advanced(before: list[dict[str, Any]], after: list[dict[str, Any]], count: int) -> tuple[bool, list[dict[str, Any]]]:
+    before_by_key = {_video_key(video): video for video in before if isinstance(video, dict)}
+    after_by_key = {_video_key(video): video for video in after if isinstance(video, dict)}
+    rows = []
+    for key in sorted(set(before_by_key) & set(after_by_key), key=str):
+        first, second = before_by_key[key], after_by_key[key]
+        frames = (first.get("totalFrames"), second.get("totalFrames"))
+        presented = (first.get("presentedFrames"), second.get("presentedFrames"))
+        moved = ((all(number(value) for value in frames) and frames[1] > frames[0])
+                 or (all(number(value) for value in presented) and presented[1] > presented[0]))
+        enough = number(presented[1]) and presented[1] >= MIN_PRESENTED
+        rows.append({"source": key[0], "elementId": key[1], "frames": frames, "presentedFrames": presented,
+                     "currentTime": (first.get("currentTime"), second.get("currentTime")),
+                     "advanced": moved, "enoughPresented": enough})
+    complete = len(before_by_key) == len(after_by_key) == len(rows) == count
+    return complete and all(row["advanced"] and row["enoughPresented"] for row in rows), rows
+
+
+def _capture_base(snapshot: dict[str, Any], arm: Arm, target: dict[str, Any], goal: int) -> dict[str, dict[str, Any]]:
+    predicates = _position_predicates(snapshot, arm, target, goal)
+    names = ("pendingSceneBuild", "automaticPlayback", "slideNumberControl", "decoderIdentity", "presentedFrame",
+             "urlFragment", "destinationReadiness")
+    return {name: predicates[name] for name in names}
+
+
+def _capture_readiness(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.ndarray], *,
+                       paused: bool, pause_id: Any = None,
+                       timeout_s: float = 15.0) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
+    started = time.monotonic()
+    evaluate = host._require_transport().evaluate
+    goal = target["scene"] - 1 if target["automatic"] else target["scene"]
+    deadline = time.monotonic() + timeout_s
+    predicates: dict[str, dict[str, Any]] = {}
+    attempts: list[dict[str, Any]] = []
+    first_passed_at: float | None = None
+    first_image = second_image = np.empty((0, 0, 4), np.uint8)
+    while time.monotonic() < deadline:
+        first = _position_snapshot(evaluate)
+        base = _capture_base(first, arm, target, goal)
+        pause = evaluate("window.__obedDx.paused()") if paused else None
+        if paused:
+            base["presentedFrame"] = _predicate(isinstance(pause, dict) and pause.get("state") == "presented"
+                                                 and pause.get("id") == pause_id, pause)
+        if not _predicates_pass(base):
+            time.sleep(0.05)
+            continue
+        if first_passed_at is None:
+            first_passed_at = time.monotonic()
+        wait = 0.3 - (time.monotonic() - first_passed_at)
+        if wait > 0:
+            time.sleep(min(0.05, wait))
+            continue
+        first_image = capture()
+        time.sleep(LIVE_GAP_S)
+        second = _position_snapshot(evaluate)
+        second_image = capture()
+        predicates = _capture_base(second, arm, target, goal)
+        predicates["obsPainted"] = _predicate(_painted(first_image, arm) and _painted(second_image, arm),
+                                               {"first": list(first_image.shape), "second": list(second_image.shape)})
+        if paused:
+            predicates["presentedFrame"] = base["presentedFrame"]
+            predicates["stableCapturedPixels"] = _predicate(first_image.shape == second_image.shape
+                                                              and np.array_equal(first_image, second_image))
+        else:
+            predicates["advancingObs"] = _predicate(first_image.shape == second_image.shape
+                                                       and not np.array_equal(first_image, second_image))
+            if arm.movies:
+                before_videos = first.get("videos") if isinstance(first.get("videos"), list) else []
+                after_videos = second.get("videos") if isinstance(second.get("videos"), list) else []
+                advanced, rows = _advanced(before_videos, after_videos, arm.decoders)
+                predicates["advancingPresentation"] = _predicate(advanced, rows)
+        failed = [name for name, value in predicates.items() if value.get("passed") is not True]
+        attempts.append({"atMs": round((time.monotonic() - started) * 1000.0, 1), "failedPredicates": failed})
+        if paused or not failed:
+            return ({"durationMs": round((time.monotonic() - started) * 1000.0, 1), "predicates": predicates,
+                     "attempts": attempts},
+                    first_image, second_image)
+        if len(attempts) >= 10:
+            raise ReadinessTimeout(f"capture readiness timed out after 10 pixel attempts for {failed}")
+        time.sleep(0.05)
+    failed = [name for name, value in predicates.items() if value.get("passed") is not True]
+    raise ReadinessTimeout(f"capture readiness timed out for {failed}")
+
+
+def _final_readiness(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.ndarray],
+                     timeout_s: float = 15.0) -> tuple[dict[str, Any], np.ndarray]:
+    started = time.monotonic()
+    evaluate = host._require_transport().evaluate
+    deadline = time.monotonic() + timeout_s
+    predicates: dict[str, dict[str, Any]] = {}
+    image = np.empty((0, 0, 4), np.uint8)
+    while time.monotonic() < deadline:
+        busy = host.observe().busy
+        snapshot = _position_snapshot(evaluate)
+        if not busy and snapshot.get("hash") == target["hashAfter"]:
+            image = capture()
+            runtime = snapshot.get("runtime")
+            expected = int(str(target["hashAfter"]).lstrip("#"))
+            predicates = {
+                "correctScene": _predicate(_pending_from_runtime(runtime) == expected,
+                                             {"expected": expected, "runtime": runtime}),
+                "playerIdle": _predicate(not busy, busy),
+                "destinationReadiness": _predicate(snapshot.get("hash") == target["hashAfter"],
+                                                    {"expected": target["hashAfter"], "hash": snapshot.get("hash")}),
+                "obsPainted": _predicate(_painted(image, arm), list(image.shape)),
+            }
+            if _predicates_pass(predicates):
+                return {"durationMs": round((time.monotonic() - started) * 1000.0, 1), "predicates": predicates}, image
+        time.sleep(0.05)
+    failed = [name for name, value in predicates.items() if value.get("passed") is not True]
+    raise ReadinessTimeout(f"final readiness timed out for {failed or ['playerIdle', 'destinationReadiness']}")
+
+
+def _drive_placement(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.ndarray], *,
+                     screencast: Callable[[], Any] | None = None,
+                     placement_read: Callable[[Any], None] | None = None,
+                     ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    if arm.row is not None or arm.inject or arm.bridge:
+        raise ValueError("placement driver does not support lifecycle, injection or bridge arms")
+    transport = host._require_transport()
+    evaluate = transport.evaluate
+    host.execute("show")
+    record: dict[str, Any] = {"positioning": _position(host, arm, target)}
+    images: dict[str, np.ndarray] = {}
+    if arm.capture in PAUSED:
+        record["pauseId"] = evaluate(f"window.__obedDx.pause({PAUSE_FRAME}, {FPS})")
+    record["stage"] = evaluate(STAGE_JS)
+    record["placement"] = evaluate(PLACEMENT_JS)
+    if placement_read is not None:
+        placement_read(record["placement"])
+    record["dsf"] = evaluate("devicePixelRatio")
+    record["viewport"] = evaluate("[innerWidth, innerHeight]")
+    foreground = evaluate("window.__obedDx.foreground()") or {}
+    for vid, canvases in foreground.items() if isinstance(foreground, dict) else ():
+        for k, canvas in enumerate(canvases if isinstance(canvases, list) else ()):
+            png = canvas.pop("png", None) if isinstance(canvas, dict) else None
+            if png:
+                images[f"fg-{vid}-{k}"] = decode_rgba(png)
+                canvas["image"] = f"fg-{vid}-{k}"
+    record["foreground"] = foreground
+    ready, images["live-0"], images["live-1"] = _capture_readiness(
+        host, arm, target, capture, paused=arm.capture in PAUSED, pause_id=record.get("pauseId"))
+    if arm.capture in PAUSED:
+        record["paused"] = evaluate("window.__obedDx.paused()")
+    record["hashBefore"] = evaluate("String(location.hash||'')")
+    lead = target["previousS"] + target["beginS"] if target["automatic"] else 0.0
+    if arm.capture == "reference":
+        shots, shot_images = reference_burst(host, target, capture, images["live-0"], arm.shift)
+    else:
+        shots, shot_images = burst(host, target, capture, actions=(), screencast=screencast, lead_s=lead,
+                                   handoff="handoff" in arm.expect, drop=arm.drop)
+    record.update(shots)
+    record_dsk_counter_timing(record, arm)
+    images.update(shot_images)
+    final, images["settled"] = _final_readiness(host, arm, target, capture)
+    record["readiness"] = {"durationMs": round(ready["durationMs"] + final["durationMs"], 1),
+                           "beforeCapture": ready, "afterTransition": final}
+    record["hashAfter"] = evaluate("String(location.hash||'')")
+    ids = ((record.get("dump") or {}).get("first") or {}).get("layerIds") or []
+    record["residue"] = evaluate(f"window.__obedDx.residue({json.dumps(ids)})") if ids else None
+    return record, images
+
+
+def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.ndarray], *,
+          screencast: Callable[[], Any] | None = None, placement: bool = False,
+          placement_read: Callable[[Any], None] | None = None,
+          ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    if placement:
+        return _drive_placement(
+            host, arm, target, capture, screencast=screencast, placement_read=placement_read)
+    return _drive_legacy(host, arm, target, capture, screencast=screencast)
 
 
 @contextlib.contextmanager
@@ -4802,13 +5442,31 @@ def save_run(out: Path, name: str, record: dict[str, Any], images: Mapping[str, 
 
 
 class RunImages(Mapping):
-    """A saved run's PNGs, decoded on access (a round does not fit in memory at once)."""
+    """A saved run's PNGs with an arm-scoped immutable decode cache."""
 
     def __init__(self, folder: Path) -> None:
         self.paths = {p.stem: p for p in folder.glob("*.png")}
+        self._cache: dict[str, np.ndarray] = {}
+        self.decode_s = 0.0
+        self.decode_bytes = 0
+        self.decode_count = 0
 
     def __getitem__(self, key: str) -> np.ndarray:
-        return np.asarray(Image.open(self.paths[key]).convert("RGBA"))
+        if key in self._cache:
+            return self._cache[key]
+        started = time.monotonic()
+        path = self.paths[key]
+        with Image.open(path) as opened:
+            image = np.asarray(opened.convert("RGBA"))
+        image.setflags(write=False)
+        self.decode_s += time.monotonic() - started
+        self.decode_bytes += path.stat().st_size
+        self.decode_count += 1
+        self._cache[key] = image
+        return image
+
+    def release(self) -> None:
+        self._cache.clear()
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.paths)
@@ -4875,9 +5533,18 @@ def score_runs(runs: dict[str, tuple[dict[str, Any], Mapping[str, np.ndarray]]],
                cal: Calibration = Calibration(), *, profile: Profile = DX1, lut: np.ndarray | None = None) -> dict[str, Any]:
     """Score every run the profile names (DX-1 here; DX-2 passes `CEF` and `launch_lut`'s map) and the round. DX-1 reads
     `L_path` from the decision record; DX-2 never falls back to it (no launch map -> holder pixels INCONCLUSIVE)."""
+    started = time.monotonic()
     identity = None if not decision or "L" not in decision else decision["L"] == "identity"
     required = set(profile.required(identity))
     scored = {}
+
+    def release(name: str | None) -> None:
+        if name not in runs:
+            return
+        images = runs[name][1]
+        if isinstance(images, RunImages):
+            images.release()
+
     for name, (record, images) in runs.items():
         if name not in required:
             continue
@@ -4890,6 +5557,9 @@ def score_runs(runs: dict[str, tuple[dict[str, Any], Mapping[str, np.ndarray]]],
             scored[name] = score_arm(record, images, arm, cal, identity=identity, profile=profile,
                                      twin=runs.get(arm.twin) if arm.twin else None,
                                      lut=lut if lut is not None else path_lut(decision, arm.gpu) if profile.headless else None)
+        release(name)
+        if arm.twin in runs:
+            release(arm.twin)
     extra = {}
     if "on" in scored and "on2" in scored:
         extra["cvc"] = score_cvc(scored["on"]["midResiduals"], scored["on2"]["midResiduals"])
@@ -4899,8 +5569,19 @@ def score_runs(runs: dict[str, tuple[dict[str, Any], Mapping[str, np.ndarray]]],
             shots = [images[s["name"]] for s in record.get("shots") or []]
             return [(e, premul(shots[i])) for e, i in scored[name]["fitted"] if number(e) and 0.03 < e < 0.97 and i < len(shots)]
         extra["matched"] = matched_report(frames("opaque-on"), frames("opaque-off"))
+        release("opaque-on")
+        release("opaque-off")
     verdict = score_round(scored, cal, identity=identity, extra=extra, profile=profile)
     verdict["detail"] = scored
+    verdict["timingS"] = {
+        "pixelScoring": round(time.monotonic() - started, 6),
+        "pngDecode": round(sum(getattr(images, "decode_s", 0.0) for _, images in runs.values()), 6),
+        "pngDecodeCount": sum(getattr(images, "decode_count", 0) for _, images in runs.values()),
+        "pngBytes": sum(getattr(images, "decode_bytes", 0) for _, images in runs.values()),
+    }
+    for _, images in runs.values():
+        if isinstance(images, RunImages):
+            images.release()
     return verdict
 
 

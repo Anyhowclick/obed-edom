@@ -366,6 +366,27 @@ not a claimed output-rate capture.
 Owner visual check: current movie frame freezes/fades with foreground intact, no flash/leak during recalibration; compare
 `mm_opacity=off`, explicitly show the retained identity-tone step. DeckLink/physical keyer integrity is not proven by recording.
 
+### 5.1 Amendment (owner-approved 2026-10-15): run restructure
+
+Supersedes §5's repetition and per-context calibration composition where they conflict; source and rationale:
+`.agents/plans/keynote_live_obs_run_restructure.plan.md` rev 3 §2B. Approved text:
+
+> **Placement qualification evidence composition and repetition.** Qualification defaults to one take at each of 25 and 30 output fps (`--takes 1`), with the existing prescribed source rates: two fresh managed-OBS launches, one per rate. Each launch retains all 38 renderer captures, including nine twins, the seven existing startup/failed-recalibration/freshness control sessions, and one fresh Chrome classifier session for each GPU setting. This supplies two fresh CEF launches and two fresh Chrome launches per GPU setting. Explicit additional takes repeat the complete pair. Preserve all numerical thresholds, arm expectations and capture coverage. `cut`, `tone` and incomplete W5 observations remain REPORTED.
+>
+> One pair replaces the historical two-takes-per-rate repetition. It retains cross-rate fresh-launch coverage but does not establish same-rate repeat-launch reproducibility.
+>
+> Each launch collects three genuine product-calibration anchors in existing arm order: `opaque-off` with off-canvas/full sampled-alpha calibration; `off` with preview/full sampled-alpha calibration; and `m-snap-cef` with preview/product-timing calibration. Every anchor retains complete preflight controls, product transaction, context-bound commit, recording and cleanup/persistence evidence. The product-timing anchor must demonstrate that its genuine product grant enables the measured next take.
+>
+> Other renderer rows use explicitly recorded harness-injected grants in their own fresh contexts. The injected value is the arm’s explicit `placement_value`, or the CEF placement profile value when unset. Injection begins before positioning and is renewed through final capture within the existing 15-second lease and three-second renewal cadence. These rows prove renderer behavior under the selected rule; they do not prove fresh product calibration, renewal or isolation in their contexts.
+>
+> Product gates derive only from genuine anchors and existing control sessions. Every dependent renderer row requires all three same-launch anchors to pass their applicable enforced product gates and classify `frac`. Renderer pixel, geometry, foreground, reference, mask, fidelity and cost gates retain their own captures, twins and thresholds. Detector controls remain local to each anchor.
+>
+> Program-wire coverage is unchanged from #278: candidate recordings cover successful anchor transactions in both placements; failure/cancellation coverage remains the live controls’ existing checks and `CALIBRATION_FAULT_TESTS`. This does not establish continuous failure/cancellation recording coverage; the discrepancy with §5’s broader recording requirement is a separate follow-up outside this plan.
+>
+> Product §2.5, §11.3 and O4 remain unchanged. An injected grant never counts as fresh product evidence or transfers an anchor’s grant/request identity. Missing, malformed, stale or incompatible evidence is INCONCLUSIVE and cannot satisfy an expected FAIL. Qualification requires complete launch/session/attempt coverage and all applicable enforced gates.
+>
+> A separately marked DEV tier may select one rate and a named dependency-complete subset and may use anchor/injection evidence. It always reports DEV, never qualification PASS, and contributes no evidence toward qualification.
+
 ## 6. Tests
 
 Prefer table rows in existing functions; **at most three new test functions**: one pure probe/fixture table, one OBS
@@ -905,6 +926,47 @@ Gate names are §5 names; each stores null/positive/candidate IDs in detail. Mis
 FAIL. Feed gate results into existing verdict.json/DX-2 summary; offline rescore calls the same classifier/persistence API.
 No new acceptance scope. Unpinned release data: W2's three asset digests and W1's new patched digests await generation;
 configured-device preview-output behavior remains an explicit field-test qualification, not a guessed contract.
+
+#### 11.6.1 Amendment (owner-approved 2026-10-15): tier and factored records
+
+Source: `.agents/plans/keynote_live_obs_run_restructure.plan.md` rev 3 §2B. Approved text:
+
+> **Tier and factored placement records.** New run, summary and child records carry acquisition `tier` and `devProfile` when DEV. Evidence mode is derived from record content. Live and offline scoring preserve acquisition scope: any launch containing a DEV record is DEV, and a bundle containing DEV can never exit 0 or produce qualification PASS.
+>
+> Anchor rows `opaque-off`, `off` and `m-snap-cef` retain schema-1 `placementCalibration` unchanged, including local preflight controls and FileRefs. Each other factored CEF renderer row omits `placementCalibration` and records:
+>
+> ```text
+> placementInjection = {
+>   schemaVersion: 1,
+>   value: "frac" | "snap",
+>   leaseMs: integer,
+>   engine: EngineIdentity,
+>   targetId: string,
+>   uniqueContextId: string,
+>   commits: [{at: number, committed: boolean, read: string}],
+>   takeRead: {at: number, value: string},
+>   revoke: {at: number, read: string}
+> }
+> ```
+>
+> No token is recorded. `at` follows the existing Unix-seconds convention; lease enforcement uses the bound document clock and actual getter readbacks. Acquisition accepts commits only in the originally verified connection/context/engine/fingerprint. Changed binding, expired renewal or unverified revocation makes the attempt INCONCLUSIVE.
+>
+> A launch is its existing `shots/placement-<timestamp>/` directory. Anchor roles and expected full/DEV session sets are code constants; no manifest or new cross-record reference format is introduced.
+>
+> Live and `--score` scoring validate each launch independently:
+>
+> 1. Require its tier/profile’s complete expected session set and acquisition scope. Emit explicit INCONCLUSIVE rows for missing/unreadable sessions and listed-but-missing DSK attempts. Reject empty/aborted launches.
+> 2. Score anchors and controls with existing product checks and reverify FileRefs. Never source missing evidence from another launch.
+> 3. An injected row is eligible only when its value matches the arm/profile rule; the lease is valid; all commits succeed with matching reads; `takeRead` agrees with the existing pre-advance placement read under an uninterrupted valid lease; revocation reads `invalid`; its engine matches every anchor; and all three anchors pass applicable enforced product gates and classify `frac`.
+> 4. Missing, contradictory, expired or incompatible evidence is INCONCLUSIVE. Renderer algorithms and expected outcomes remain unchanged; integrity failure cannot satisfy expected FAIL.
+>
+> Existing run records supply rate, take, acquisition identity and lifecycle checks; these must agree with child records. A shared launch-set check serves live placement summaries and `--score`. Full qualification additionally requires both rates and the prescribed distinct fresh launches. A complete legacy launch whose renderer rows all carry `placementCalibration` retains its scoring semantics after complete legacy validation.
+>
+> Offline qualification-bundle rescoring retains its current product/control scope and adds tier, launch completeness and injection/anchor validation. Resolve retained evidence relative to the bundle without acquisition caches or live applications. Reports identify this scope and must not label a product-only rescore as fresh full renderer qualification.
+>
+> DEV-only `--score` additionally reruns the selected profile’s renderer-pixel scoring from retained records and images, including its LUT, twins and attempts. It remains DEV and exits 10 at best; missing required evidence is INCONCLUSIVE.
+>
+> Preserve recording retention and framemd5/telemetry rules. Keep non-PASS recordings. An injected row receives no product-calibration PASS of its own.
 
 ## 12. Implementation status (paused by the owner 2026-10-13 ~18:35)
 

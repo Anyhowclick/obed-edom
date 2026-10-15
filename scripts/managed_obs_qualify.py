@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import Counter
 import contextlib
 import hashlib
 import io
@@ -67,6 +68,7 @@ import json
 import math
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -90,7 +92,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 from obed_edom.fixture_paths import fixture  # noqa: E402
-from obed_edom import live_gl_replay_js, live_runtime, managed_obs, mm_handback_score, obs_websocket, placement_probe  # noqa: E402
+from obed_edom import live_gl_replay_js, live_host, live_runtime, managed_obs, mm_handback_score, obs_websocket, placement_probe  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import Unsupported, plan_signature  # noqa: E402
 from obed_edom.live_host import GL_REPLAY_ENV, MM_OPACITY_ENV, ChromeCdp, LiveOutputHost, _ProgramGuard  # noqa: E402
@@ -133,6 +135,8 @@ WS_CONFIG = "plugin_config/obs-websocket/config.json"
 KEYER = "off"
 READY_TIMEOUT_S = 40.0
 QUIT_TIMEOUT_S = 20.0
+RECORD_STOP_TIMEOUT_S = 10.0
+RECORD_TAIL_FRAMES = 3
 
 NATIVE_PHASES = ("slide1-native",)
 NULL_PHASE = "slide1-paused"
@@ -201,6 +205,8 @@ _PLACEMENT_CONTROL_ARMS = tuple(dict.fromkeys(
 ))
 PLACEMENT_ARMS = (*_PLACEMENT_CONTROL_ARMS,
                   *(name for name in dissolve_probe.CEF_PLACEMENT.arms if name not in _PLACEMENT_CONTROL_ARMS))
+PLACEMENT_ANCHORS = ("opaque-off", "off", "m-snap-cef")
+PLACEMENT_DEV_PROFILES = dissolve_probe.CEF_PLACEMENT_DEV_PROFILES
 PLACEMENT_CONTROL_SESSIONS = (
     "startup-preview-on", "startup-offcanvas-on", "failed-preview-off", "failed-offcanvas-on",
     "probe-replay", "probe-transparent", "probe-frozen-video",
@@ -215,6 +221,9 @@ PLACEMENT_CONTROL_SPECS = {
     "probe-frozen-video": ("preview", False, "frozen-video"),
 }
 PLACEMENT_RECORDING_ESTIMATE_BYTES = 500 * 1024 * 1024
+PLACEMENT_INJECTION_LEASE_MS = 15_000
+PLACEMENT_INJECTION_RENEW_S = 2.5
+PLACEMENT_INJECTION_MAX_INTERVAL_S = 3.0
 DX2_TAU_MAX = 8.0
 DX2_COMPLEMENT_MAX = 6.0
 DX2_NO_DIP_MIN = 248.0
@@ -235,6 +244,41 @@ CALIBRATION_FAULT_TESTS = (
     "tests/test_managed_obs.py::test_crash_after_launch_before_record_is_quit_before_seeding",
     "tests/test_live_host.py::test_managed_probe_state_machine_renews_suppresses_and_stops",
 )
+
+
+def placement_profile(tier: str, dev_profile: str | None) -> dissolve_probe.Profile:
+    if tier == "full":
+        return dissolve_probe.CEF_PLACEMENT
+    if tier == "dev" and dev_profile in PLACEMENT_DEV_PROFILES:
+        return PLACEMENT_DEV_PROFILES[dev_profile]
+    raise ValueError(f"unknown placement tier/profile {tier!r}/{dev_profile!r}")
+
+
+def placement_scope(tier: str, dev_profile: str | None) -> dict[str, Any]:
+    return {"tier": tier, **({"devProfile": dev_profile} if tier == "dev" else {})}
+
+
+def placement_acquisition(ctx: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "launchId": ctx.get("placementLaunchId"), "rate": ctx.get("rate"), "take": ctx.get("take"),
+        **placement_scope(ctx.get("tier", "full"), ctx.get("devProfile")),
+    }
+
+
+def placement_record_scope(metadata: dict[str, Any], scopes: list[tuple[Any, Any]]) -> tuple[
+        str, str | None, dissolve_probe.Profile, bool]:
+    explicit_tiers = {scope[0] for scope in scopes if scope[0] is not None}
+    tier = "dev" if metadata.get("tier") == "dev" or "dev" in explicit_tiers else (
+        metadata.get("tier") or (next(iter(explicit_tiers)) if len(explicit_tiers) == 1 else "full"))
+    explicit_profiles = {scope[1] for scope in scopes if scope[1] is not None}
+    dev_profile = metadata.get("devProfile") if tier == "dev" else None
+    if tier == "dev" and dev_profile is None and len(explicit_profiles) == 1:
+        dev_profile = next(iter(explicit_profiles))
+    if tier == "dev" and dev_profile is None and not explicit_profiles:
+        dev_profile = "renderer"
+    profile = placement_profile(tier, dev_profile)
+    legacy = tier == "full" and not explicit_tiers
+    return tier, dev_profile, profile, legacy
 
 G2_SHA = "10a5b36a1f6008a3213bd90729915f6c15284448406f2a62dbc74ae884fe5288"
 KB_SHAS = {"frozen": "413a00ba4e36dd5edf9c07425ab3c92589eb23d51c60914448621b7a456b8b67",
@@ -307,14 +351,213 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+class PlacementInjection:
+    """A launch-bound leased placement grant used only by the qualification harness."""
+
+    def __init__(
+            self, host: LiveOutputHost, engine_identity: Callable[[], managed_obs.EngineIdentity | None],
+            target_id: str, value: str, *, lease_ms: int = PLACEMENT_INJECTION_LEASE_MS,
+            renew_s: float = PLACEMENT_INJECTION_RENEW_S,
+            monotonic: Callable[[], float] = time.monotonic,
+            unix_time: Callable[[], float] = time.time,
+            ) -> None:
+        if value not in ("snap", "frac"):
+            raise ValueError(f"unsupported placement injection {value!r}")
+        if not isinstance(lease_ms, int) or isinstance(lease_ms, bool) or not 0 < lease_ms <= PLACEMENT_INJECTION_LEASE_MS:
+            raise ValueError(f"invalid placement injection lease {lease_ms!r}")
+        if not 0 < renew_s <= PLACEMENT_INJECTION_MAX_INTERVAL_S:
+            raise ValueError(f"invalid placement injection cadence {renew_s!r}")
+        self.host = host
+        self.engine_identity = engine_identity
+        self.target_id = target_id
+        self.value = value
+        self.lease_ms = lease_ms
+        self.renew_s = renew_s
+        self.monotonic = monotonic
+        self.unix_time = unix_time
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.lock = threading.RLock()
+        self.transport: Any = None
+        self.connection_generation: int | None = None
+        self.context: str | None = None
+        self.engine: managed_obs.EngineIdentity | None = None
+        self.fingerprint: tuple[str, float, int, int] | None = None
+        self.deadline: float | None = None
+        self.last_commit: float | None = None
+        self.failure: str | None = None
+        self.record: dict[str, Any] = {
+            "schemaVersion": 1, "value": value, "leaseMs": lease_ms, "engine": None,
+            "targetId": target_id, "uniqueContextId": None, "commits": [],
+            "takeRead": None, "revoke": None,
+        }
+
+    def _evaluate(self, expression: str) -> Any:
+        if self.transport is None or self.context is None:
+            raise RuntimeError("placement injection binding is unavailable")
+        return self.transport.evaluate_in(self.context, expression, deadline_s=1.0)
+
+    def _current_binding(self) -> tuple[Any, int, str | None, Any, Any]:
+        transport = self.host._require_transport()
+        context = self.host._program_context()
+        engine = self.engine_identity()
+        fingerprint = self.host._probe_fingerprint_read(context) if context is not None else None
+        return transport, self.host._connection_generation, context, engine, fingerprint
+
+    def _binding_matches(self) -> bool | None:
+        transport, generation, context, engine, fingerprint = self._current_binding()
+        if (
+            transport is not self.transport or generation != self.connection_generation
+            or context != self.context or engine != self.engine
+        ):
+            return False
+        if fingerprint is None:
+            return None
+        return fingerprint == self.fingerprint
+
+    def _revoke_original(self) -> str:
+        try:
+            return str(dissolve_probe.commit_grant(self._evaluate, self.host._placement_token, "invalid")["read"])
+        except Exception:
+            return "unreadable"
+
+    def _fail(self, reason: str) -> None:
+        if self.failure is None:
+            self.failure = reason
+        self.stop_event.set()
+        self._revoke_original()
+
+    def _check(self, phase: str) -> bool:
+        now = self.monotonic()
+        try:
+            binding_matches = self._binding_matches()
+        except Exception:
+            binding_matches = False
+        if binding_matches is False:
+            self._fail(f"placement injection binding changed{phase}")
+        elif self.deadline is None or now >= self.deadline:
+            self._fail(f"placement injection lease expired{phase}")
+        elif self.last_commit is None or now - self.last_commit > PLACEMENT_INJECTION_MAX_INTERVAL_S:
+            self._fail(f"placement injection renewal was late{phase}")
+        return binding_matches is True and self.failure is None
+
+    def _commit(self) -> bool | None:
+        with self.lock:
+            now = self.monotonic()
+            if self.failure is not None:
+                return False
+            first = self.last_commit is None
+            if first:
+                try:
+                    binding_matches = self._binding_matches()
+                except Exception:
+                    binding_matches = False
+                if binding_matches is not True:
+                    self._fail("placement injection binding changed" if binding_matches is False
+                               else "placement injection binding could not be verified")
+                    return False
+            elif not self._check(""):
+                return None if self.failure is None else False
+            at = self.unix_time()
+            try:
+                if first:
+                    result = dissolve_probe.commit_grant(
+                        self._evaluate, self.host._placement_token, self.value, self.lease_ms)
+                else:
+                    read = self._evaluate(live_host._placement_renew_expr(
+                        self.host._placement_token, self.value, self.lease_ms))
+                    result = {"committed": read == self.value, "read": read}
+            except Exception:
+                result = {"committed": False, "read": "unreadable"}
+            self.record["commits"].append({"at": at, "committed": result["committed"], "read": result["read"]})
+            if result["committed"] is not True or result["read"] != self.value:
+                self._fail("placement injection commit or readback failed")
+                return False
+            self.last_commit = now
+            self.deadline = now + self.lease_ms / 1000.0
+            return True
+
+    def start(self, *, renewal: bool = True) -> None:
+        with self.lock:
+            transport, generation, context, engine, fingerprint = self._current_binding()
+            if context is None or engine is None or fingerprint is None:
+                raise RuntimeError("placement injection binding is incomplete")
+            self.transport = transport
+            self.connection_generation = generation
+            self.context = context
+            self.engine = engine
+            self.fingerprint = fingerprint
+            self.record["engine"] = _jsonable(engine)
+            self.record["uniqueContextId"] = context
+        if self._commit() is not True:
+            raise RuntimeError(self.failure or "placement injection commit failed")
+        if renewal:
+            self.thread = threading.Thread(
+                target=self._renew_loop, name="obed-qualification-placement-renewal", daemon=True)
+            self.thread.start()
+
+    def _renew_loop(self) -> None:
+        while not self.stop_event.wait(max(0.0, (
+                self.last_commit if self.last_commit is not None else self.monotonic()
+                ) + self.renew_s - self.monotonic())):
+            renewed = self._commit()
+            if renewed is False:
+                return
+            if renewed is None and self.stop_event.wait(0.1):
+                return
+
+    def renew_once(self) -> bool:
+        return self._commit() is True
+
+    def take_read(self, value: Any) -> None:
+        with self.lock:
+            if not self._check(" at take") and self.failure is None:
+                self._fail("placement injection binding could not be verified at take")
+            if self.failure is None and value != self.value:
+                self._fail("placement injection take readback failed")
+            self.record["takeRead"] = {"at": self.unix_time(), "value": value}
+            if self.failure is not None:
+                raise RuntimeError(self.failure)
+
+    def ensure_valid(self) -> None:
+        with self.lock:
+            if not self._check(" before final capture completed") and self.failure is None:
+                self._fail("placement injection binding could not be verified before final capture completed")
+            if self.failure is None:
+                try:
+                    read = self._evaluate(dissolve_probe.PLACEMENT_JS)
+                except Exception:
+                    read = "unreadable"
+                if read != self.value:
+                    self._fail("placement injection readback failed before final capture completed")
+            if self.failure is not None:
+                raise RuntimeError(self.failure)
+
+    def stop_and_revoke(self) -> dict[str, Any]:
+        self.stop_event.set()
+        if self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join()
+        with self.lock:
+            self.record["revoke"] = {"at": self.unix_time(), "read": self._revoke_original()}
+            if self.record["revoke"]["read"] != "invalid" and self.failure is None:
+                self.failure = "placement injection revocation was not verified"
+            return json.loads(json.dumps(self.record))
+
+
 def _read_ref_json(ref: Any, run_dir: Path, *, collection: bool = False) -> Any:
     return json.loads(dissolve_probe._placement_ref_bytes(ref, run_dir, collection=collection))
 
 
-def _snapshot(ref: Any, run_dir: Path) -> managed_obs.CollectionSnapshot:
+def _snapshot(ref: Any, run_dir: Path,
+              pure_scores: dict[tuple[Any, ...], Any] | None = None) -> managed_obs.CollectionSnapshot:
     _read_ref_json(ref, run_dir, collection=True)
+    cache_key = ("collection-state", ref["sha256"])
+    if pure_scores is not None and cache_key in pure_scores:
+        return managed_obs.CollectionSnapshot(pure_scores[cache_key], ref["mtimeNs"], ref["savedByObs"])
     path = run_dir / ref["path"]
     snapshot = managed_obs.read_collection(path, saved_by_obs=ref["savedByObs"])
+    if pure_scores is not None:
+        pure_scores[cache_key] = snapshot.state
     return managed_obs.CollectionSnapshot(snapshot.state, ref["mtimeNs"], ref["savedByObs"])
 
 
@@ -370,7 +613,8 @@ def _telemetry(calibration: dict[str, Any], run_dir: Path) -> dict[str, Any] | N
         return None
 
 
-def _persistence_gates(calibration: dict[str, Any], run_dir: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _persistence_gates(calibration: dict[str, Any], run_dir: Path, *,
+                       pure_scores: dict[tuple[Any, ...], Any] | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     evidence = calibration.get("persistence")
     if not isinstance(evidence, dict):
         return calibration_gate("INCONCLUSIVE", ["persistence evidence missing"]), []
@@ -378,16 +622,16 @@ def _persistence_gates(calibration: dict[str, Any], run_dir: Path) -> tuple[dict
     if any(evidence.get(name) is None for name in required) or not isinstance(evidence.get("lastRemovalMtimeNs"), int):
         return calibration_gate("INCONCLUSIVE", ["persistence baseline/null/quit/last-removal evidence incomplete"]), []
     try:
-        baseline = _snapshot(evidence["baseline"], run_dir)
+        baseline = _snapshot(evidence["baseline"], run_dir, pure_scores)
         null_before = dissolve_probe._placement_ref_bytes(evidence["nullBefore"], run_dir, collection=True)
         null_after = dissolve_probe._placement_ref_bytes(evidence["nullAfter"], run_dir, collection=True)
         null_stable = null_before == null_after
         allowlist = managed_obs.STEP0_NULL_ALLOWLIST
         checks = []
         if evidence.get("cleanup") is not None:
-            checks.append(managed_obs.check_persistence(baseline, _snapshot(evidence["cleanup"], run_dir), null_allowlist=allowlist,
+            checks.append(managed_obs.check_persistence(baseline, _snapshot(evidence["cleanup"], run_dir, pure_scores), null_allowlist=allowlist,
                                                         phase="cleanup", last_removal_mtime_ns=evidence["lastRemovalMtimeNs"]))
-        checks.append(managed_obs.check_persistence(baseline, _snapshot(evidence["quit"], run_dir), null_allowlist=allowlist,
+        checks.append(managed_obs.check_persistence(baseline, _snapshot(evidence["quit"], run_dir, pure_scores), null_allowlist=allowlist,
                                                     phase="quit", last_removal_mtime_ns=evidence["lastRemovalMtimeNs"]))
     except (OSError, ValueError, KeyError, json.JSONDecodeError, NotImplementedError) as exc:
         return calibration_gate("INCONCLUSIVE", [f"persistence rescore failed: {type(exc).__name__}: {exc}"]), []
@@ -406,38 +650,66 @@ def _persistence_gates(calibration: dict[str, Any], run_dir: Path) -> tuple[dict
     ), [_jsonable(c) for c in checks]
 
 
+def _cached_pure_score(cache: dict[tuple[Any, ...], Any] | None, key: tuple[Any, ...],
+                       compute: Callable[[], Any]) -> Any:
+    if cache is None:
+        return compute()
+    if key not in cache:
+        cache[key] = compute()
+    return cache[key]
+
+
 def score_placement_calibration(calibration: Any, run_dir: Path, *,
-                                live_probe_controls: dict[str, Any] | None = None) -> dict[str, Any]:
+                                live_probe_controls: dict[str, Any] | None = None,
+                                pure_scores: dict[tuple[Any, ...], Any] | None = None) -> dict[str, Any]:
     """Keynote/OBS-free §5 rescore. The classifier and persistence decisions call the product APIs used live."""
+    started = time.monotonic()
+
+    def finished(value: dict[str, Any]) -> dict[str, Any]:
+        value["timingS"] = {**value.get("timingS", {}), "total": round(time.monotonic() - started, 6)}
+        return value
+
     schema = dissolve_probe.placement_schema_problems(calibration, run_dir)
     if schema:
         gates = {name: calibration_gate("INCONCLUSIVE", schema) for name in PLACEMENT_GATE_NAMES}
-        return {"overall": "INCONCLUSIVE", "classification": None, "gates": gates, "problems": schema}
+        return finished({"overall": "INCONCLUSIVE", "classification": None, "gates": gates, "problems": schema})
     try:
         decoded = dissolve_probe.deserialize_placement_calibration(calibration, run_dir)
     except (TypeError, ValueError, KeyError) as exc:
         problems = [f"placement decode failed: {type(exc).__name__}: {exc}"]
         gates = {name: calibration_gate("INCONCLUSIVE", problems) for name in PLACEMENT_GATE_NAMES}
-        return {"overall": "INCONCLUSIVE", "classification": None, "gates": gates, "problems": problems}
+        return finished({"overall": "INCONCLUSIVE", "classification": None, "gates": gates, "problems": problems})
 
     gates: dict[str, Any] = {}
     classified = None
     classify_problems = []
+    classification_started = time.monotonic()
     if decoded.get("input") is None:
         classify_problems.append("ClassifierInput missing")
     else:
         try:
-            classified = placement_probe.classify_probe(decoded["input"])
+            input_key = hashlib.sha256(json.dumps(
+                calibration.get("input"), sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+            classified = _cached_pure_score(
+                pure_scores, ("classification", input_key),
+                lambda: placement_probe.classify_probe(decoded["input"]))
         except (TypeError, ValueError, NotImplementedError) as exc:
             classify_problems.append(f"classifier failed: {type(exc).__name__}: {exc}")
     recorded = decoded.get("classification")
     if classified is not None and recorded is not None and _jsonable(classified) != _jsonable(recorded):
         classify_problems.append("recorded classification differs from offline classifier")
+    classification_s = time.monotonic() - classification_started
     backend = calibration["backend"]
     telemetry = _telemetry(calibration, run_dir)
+    classifier_controls_s = 0.0
     if backend == "cef":
-        controls = (classifier_controls(decoded["input"], classified, placement_probe.ProbeVerdict.FRAC)
-                    if decoded.get("input") is not None and classified is not None else None)
+        controls_started = time.monotonic()
+        controls = (_cached_pure_score(
+            pure_scores, ("classifier-controls", input_key, "frac", False),
+            lambda: classifier_controls(decoded["input"], classified, placement_probe.ProbeVerdict.FRAC))
+            if decoded.get("input") is not None and classified is not None else None)
+        classifier_controls_s = time.monotonic() - controls_started
         if not isinstance(controls, dict):
             classify_problems.append("classifier controls missing")
         elif controls.get("passed") is not True:
@@ -470,9 +742,13 @@ def score_placement_calibration(calibration: Any, run_dir: Path, *,
             classify_problems.append("Chrome GPU/software launch identity missing")
         verdict = "INCONCLUSIVE" if classify_problems or classified is None else "PASS" if ok else "FAIL"
         gates["probe-chrome-harness"] = calibration_gate(verdict, classify_problems, result=_jsonable(classified))
-        controls = (classifier_controls(decoded["input"], classified, placement_probe.ProbeVerdict.SNAP,
-                                        software=software)
-                    if decoded.get("input") is not None and classified is not None else None)
+        controls_started = time.monotonic()
+        controls = (_cached_pure_score(
+            pure_scores, ("classifier-controls", input_key, "snap", software),
+            lambda: classifier_controls(
+                decoded["input"], classified, placement_probe.ProbeVerdict.SNAP, software=software))
+            if decoded.get("input") is not None and classified is not None else None)
+        classifier_controls_s = time.monotonic() - controls_started
         gates["harness-classifier-control"] = calibration_gate(
             "INCONCLUSIVE" if not isinstance(controls, dict) else "PASS" if controls.get("passed") is True else "FAIL",
             ["classifier controls missing"] if not isinstance(controls, dict) else list(controls.get("problems") or []), controls=controls)
@@ -539,8 +815,13 @@ def score_placement_calibration(calibration: Any, run_dir: Path, *,
             "INCONCLUSIVE" if control_failed else "FAIL" if not candidate_ok else "PASS", guard_problems, **guard)
 
     recording = telemetry.get("programRecording") if isinstance(telemetry, dict) else None
+    recording_error = telemetry.get("recordingError") if isinstance(telemetry, dict) else None
+    recording_stop = telemetry.get("recordingStop") if isinstance(telemetry, dict) else None
     if not isinstance(recording, dict):
-        recording_gate = calibration_gate("INCONCLUSIVE", ["continuous program recording analysis missing"])
+        problems = ["continuous program recording analysis missing"]
+        if recording_error:
+            problems.append(f"recording stop verification failed: {recording_error}")
+        recording_gate = calibration_gate("INCONCLUSIVE", problems)
     else:
         required = ("lossless", "continuous", "decodedFrames", "identicalFrames", "frameCountComplete",
                     "skippedFramesZero", "statsBefore", "statsAfter", "startedAt", "stoppedAt",
@@ -580,6 +861,11 @@ def score_placement_calibration(calibration: Any, run_dir: Path, *,
                 dissolve_probe._placement_ref_bytes(recording.get("framemd5"), run_dir)
             except (OSError, TypeError, ValueError) as exc:
                 missing.append(f"retained framemd5 ({type(exc).__name__}: {exc})")
+        if recording_error:
+            missing.append(f"recording stop verification ({recording_error})")
+        if isinstance(recording_stop, dict) and not all(recording_stop.get(name) is True for name in (
+                "postRestorationFramesComplete", "inactive", "readable")):
+            missing.append("recording stop predicates")
         incomplete = (missing or recording.get("lossless") is not True or not continuous
                       or not frame_count_complete or recording.get("audioPresent") is not True or not skipped_zero
                       or not isinstance(recording.get("decodedFrames"), int) or recording.get("decodedFrames", 0) <= 0)
@@ -665,7 +951,10 @@ def score_placement_calibration(calibration: Any, run_dir: Path, *,
             coverage="live subset", unitTests=list(CALIBRATION_FAULT_TESTS),
         )
 
-    gates["persistence-worker"], persistence_checks = _persistence_gates(calibration, run_dir)
+    persistence_started = time.monotonic()
+    gates["persistence-worker"], persistence_checks = _persistence_gates(
+        calibration, run_dir, pure_scores=pure_scores)
+    persistence_s = time.monotonic() - persistence_started
     tone_rows = telemetry.get("toneRows") if isinstance(telemetry, dict) else None
     if not isinstance(tone_rows, dict):
         gates["W5"] = calibration_gate("INCONCLUSIVE", ["W5 tone rows missing"])
@@ -682,8 +971,207 @@ def score_placement_calibration(calibration: Any, run_dir: Path, *,
 
     blocking = [g["verdict"] for name, g in gates.items() if name != "W5" and g["verdict"] != "REPORTED"]
     overall = "FAIL" if "FAIL" in blocking else "INCONCLUSIVE" if "INCONCLUSIVE" in blocking or not blocking else "PASS"
-    return {"overall": overall, "classification": _jsonable(classified), "gates": gates,
-            "persistenceChecks": persistence_checks, "problems": classify_problems}
+    return finished({"overall": overall, "classification": _jsonable(classified), "gates": gates,
+                     "persistenceChecks": persistence_checks, "problems": classify_problems,
+                     "timingS": {"classification": round(classification_s, 6),
+                                 "classifierControls": round(classifier_controls_s, 6),
+                                 "persistence": round(persistence_s, 6)}})
+
+
+def placement_evidence_mode(records: list[tuple[str, dict[str, Any]]],
+                            profile: dissolve_probe.Profile) -> tuple[str, list[str]]:
+    modes = []
+    for name, record in records:
+        if name not in profile.arms:
+            continue
+        calibration = isinstance(record.get("placementCalibration"), dict)
+        injection = isinstance(record.get("placementInjection"), dict)
+        if calibration or injection:
+            modes.append((name, "both" if calibration and injection else
+                          "calibration" if calibration else "injection"))
+    if modes and all(mode == "calibration" for _name, mode in modes):
+        return "legacy", []
+    mismatches = list(dict.fromkeys(
+        name for name, mode in modes
+        if mode != ("calibration" if name in PLACEMENT_ANCHORS else "injection")))
+    if not mismatches:
+        return "anchors+injection", []
+    return "mixed", [f"mixed placement evidence modes: {mismatches}"]
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def placement_anchor_problems(
+        anchor_records: dict[str, dict[str, Any]], anchor_scores: dict[str, dict[str, Any]],
+        ) -> tuple[list[str], list[dict[str, Any]], dict[str, str]]:
+    problems = []
+    engines = []
+    contexts = {}
+    for name in PLACEMENT_ANCHORS:
+        record = anchor_records.get(name)
+        calibration = record.get("placementCalibration") if isinstance(record, dict) else None
+        score = anchor_scores.get(name)
+        if not isinstance(calibration, dict) or not isinstance(score, dict):
+            problems.append(f"anchor {name} calibration is missing")
+            continue
+        engine = calibration.get("engine")
+        if not isinstance(engine, dict):
+            problems.append(f"anchor {name} engine is missing")
+        else:
+            engines.append(engine)
+        request = calibration.get("request")
+        context = request.get("program_context_id") if isinstance(request, dict) else None
+        if not isinstance(context, str) or not context:
+            problems.append(f"anchor {name} unique context is missing")
+        else:
+            contexts[name] = context
+        classification = score.get("classification")
+        if score.get("overall") != "PASS":
+            problems.append(f"anchor {name} product gates did not pass")
+        if not isinstance(classification, dict) or classification.get("verdict") != "frac":
+            problems.append(f"anchor {name} did not classify frac")
+    return problems, engines, contexts
+
+
+def placement_launch_evidence(
+        records: list[tuple[str, Path, dict[str, Any]]], profile: dissolve_probe.Profile, *,
+        live_probe_controls: dict[str, Any] | None,
+        product_scores: dict[Path, dict[str, Any]] | None = None,
+        pure_scores: dict[tuple[Any, ...], Any] | None = None,
+        ) -> tuple[str, list[str], list[str], list[dict[str, Any]], dict[Path, dict[str, Any]]]:
+    evidence_mode, mode_problems = placement_evidence_mode(
+        [(name, record) for name, _path, record in records], profile)
+    anchor_scores = {}
+    anchor_records = {}
+    scores_by_path = {}
+    for name, path, record in records:
+        if name not in PLACEMENT_ANCHORS:
+            continue
+        anchor_records[name] = record
+        calibration = record.get("placementCalibration")
+        if not isinstance(calibration, dict):
+            continue
+        rescored = (product_scores or {}).get(path)
+        if rescored is None:
+            rescored = score_placement_calibration(
+                calibration, path.parent, live_probe_controls=live_probe_controls, pure_scores=pure_scores)
+            if product_scores is not None:
+                product_scores[path] = rescored
+        anchor_scores[name] = rescored
+        scores_by_path[path] = rescored
+    launch_problems, anchor_engines, anchor_contexts = placement_anchor_problems(
+        anchor_records, anchor_scores)
+    contexts: dict[str, list[str]] = {}
+    for name, context in anchor_contexts.items():
+        contexts.setdefault(context, []).append(name)
+    for name, path, record in records:
+        if name in PLACEMENT_ANCHORS:
+            continue
+        injection = record.get("placementInjection")
+        context = injection.get("uniqueContextId") if isinstance(injection, dict) else None
+        if isinstance(context, str) and context:
+            contexts.setdefault(context, []).append(f"{name} ({path.parent.name})")
+    launch_problems.extend(
+        f"placement unique context is shared by {', '.join(names)}"
+        for names in contexts.values() if len(names) > 1)
+    return evidence_mode, mode_problems, launch_problems, anchor_engines, scores_by_path
+
+
+def score_placement_injection(
+        injection: Any, record: dict[str, Any], arm: dissolve_probe.Arm,
+        profile: dissolve_probe.Profile, anchor_problems: list[str], anchor_engines: list[dict[str, Any]],
+        ) -> dict[str, Any]:
+    problems = list(anchor_problems)
+    required = {
+        "schemaVersion", "value", "leaseMs", "engine", "targetId", "uniqueContextId",
+        "commits", "takeRead", "revoke",
+    }
+    if not isinstance(injection, dict):
+        problems.append("placementInjection is missing")
+        return {"overall": "INCONCLUSIVE", "gates": {
+            "placement-injection": calibration_gate("INCONCLUSIVE", problems)}, "problems": problems}
+    missing = sorted(required - set(injection))
+    unsupported = sorted(set(injection) - required)
+    problems.extend(f"placementInjection missing {name}" for name in missing)
+    problems.extend(f"placementInjection has unsupported {name}" for name in unsupported)
+    expected = arm.placement_value or profile.placement
+    value = injection.get("value")
+    if injection.get("schemaVersion") != 1:
+        problems.append("placementInjection schemaVersion is not 1")
+    if value != expected or value not in ("snap", "frac"):
+        problems.append(f"placementInjection value {value!r} != {expected!r}")
+    lease_ms = injection.get("leaseMs")
+    if (not isinstance(lease_ms, int) or isinstance(lease_ms, bool)
+            or not 0 < lease_ms <= PLACEMENT_INJECTION_LEASE_MS):
+        problems.append("placementInjection leaseMs is invalid")
+        lease_s = None
+    else:
+        lease_s = lease_ms / 1000.0
+    if not isinstance(injection.get("targetId"), str) or not injection.get("targetId"):
+        problems.append("placementInjection targetId is invalid")
+    if not isinstance(injection.get("uniqueContextId"), str) or not injection.get("uniqueContextId"):
+        problems.append("placementInjection uniqueContextId is invalid")
+    engine = injection.get("engine")
+    if len(anchor_engines) != len(PLACEMENT_ANCHORS) or any(engine != anchor for anchor in anchor_engines):
+        problems.append("placementInjection engine does not match every anchor")
+    commits = injection.get("commits")
+    commit_times = []
+    if not isinstance(commits, list) or not commits:
+        problems.append("placementInjection commits are missing")
+    else:
+        previous = None
+        for index, commit in enumerate(commits, 1):
+            if not isinstance(commit, dict) or set(commit) != {"at", "committed", "read"}:
+                problems.append(f"placementInjection commit {index} is malformed")
+                continue
+            at = commit.get("at")
+            if not _finite_number(at):
+                problems.append(f"placementInjection commit {index} time is invalid")
+                continue
+            commit_times.append(float(at))
+            if commit.get("committed") is not True or commit.get("read") != value:
+                problems.append(f"placementInjection commit {index} failed or read back a different value")
+            if previous is not None:
+                gap = float(at) - previous
+                if gap < 0 or gap > PLACEMENT_INJECTION_MAX_INTERVAL_S:
+                    problems.append(f"placementInjection renewal {index} was late")
+                if lease_s is not None and gap >= lease_s:
+                    problems.append(f"placementInjection lease expired before renewal {index}")
+            previous = float(at)
+    take = injection.get("takeRead")
+    take_at = None
+    if not isinstance(take, dict) or set(take) != {"at", "value"} or not _finite_number(take.get("at")):
+        problems.append("placementInjection takeRead is malformed")
+    else:
+        take_at = float(take["at"])
+        if take.get("value") != value or record.get("placement") != take.get("value"):
+            problems.append("placementInjection takeRead does not match the pre-advance placement read")
+        preceding = [at for at in commit_times if at <= take_at]
+        if not preceding:
+            problems.append("placementInjection takeRead is outside the committed lease")
+        elif take_at - preceding[-1] > PLACEMENT_INJECTION_MAX_INTERVAL_S:
+            problems.append("placementInjection renewal was missing at take")
+        if preceding and lease_s is not None and take_at >= preceding[-1] + lease_s:
+            problems.append("placementInjection lease expired before takeRead")
+    revoke = injection.get("revoke")
+    if not isinstance(revoke, dict) or set(revoke) != {"at", "read"} or not _finite_number(revoke.get("at")):
+        problems.append("placementInjection revoke is malformed")
+    else:
+        if revoke.get("read") != "invalid":
+            problems.append("placementInjection revocation was not verified")
+        if take_at is not None and float(revoke["at"]) < take_at:
+            problems.append("placementInjection was revoked before takeRead")
+        if commit_times and float(revoke["at"]) - commit_times[-1] > PLACEMENT_INJECTION_MAX_INTERVAL_S:
+            problems.append("placementInjection renewal did not continue through final capture")
+        if commit_times and lease_s is not None and float(revoke["at"]) >= commit_times[-1] + lease_s:
+            problems.append("placementInjection lease expired before revocation")
+    if record.get("integrityFailure") is not None:
+        problems.append(f"placement injection integrity failure: {record['integrityFailure']}")
+    verdict = "PASS" if not problems else "INCONCLUSIVE"
+    return {"overall": verdict, "gates": {
+        "placement-injection": calibration_gate(verdict, problems)}, "problems": problems}
 
 
 def write_placement_json(run_dir: Path, name: str, value: Any) -> dict[str, Any]:
@@ -867,6 +1355,8 @@ def analyze_program_recording(path: Path, *, started_s: float | None, stopped_s:
                               transaction_started_s: float | None, transaction_finished_s: float | None,
                               fps: float, stats_before: dict[str, Any] | None = None,
                               stats_after: dict[str, Any] | None = None) -> dict[str, Any]:
+    timing_started = time.monotonic()
+    child_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     covered = (started_s is not None and stopped_s is not None and transaction_started_s is not None
                and transaction_finished_s is not None and started_s <= transaction_started_s
                and stopped_s >= transaction_finished_s)
@@ -935,6 +1425,14 @@ def analyze_program_recording(path: Path, *, started_s: float | None, stopped_s:
             result["error"] = f"CalledProcessError: {detail}"
     except (OSError, ValueError, subprocess.SubprocessError, obs_cadence_decode.NotLossless) as exc:
         result["error"] = f"{type(exc).__name__}: {exc}"
+    child_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    result["timingS"] = {
+        "wall": round(time.monotonic() - timing_started, 6),
+        "subprocessCpu": round((child_after.ru_utime + child_after.ru_stime)
+                                - (child_before.ru_utime + child_before.ru_stime), 6),
+        "inputBytes": path.stat().st_size if path.is_file() else None,
+        "audioBytes": result.get("audioBytes"),
+    }
     return result
 
 
@@ -1291,13 +1789,10 @@ def recording_positive_controls(creds: tuple[int, str], run_dir: Path, fps: floa
     started_s = time.monotonic()
     start_record(*creds)
     recording = None
+    stop_detail: dict[str, Any] | None = None
+    controls_cleaned = False
     try:
         time.sleep(0.2)
-        with ObsWebsocket(*creds) as ws:
-            _color_control(ws, "AK-Control-Flash", 0xFFFFFFFF, behind=False)
-        time.sleep(2 / fps)
-        with contextlib.suppress(Exception), ObsWebsocket(*creds) as ws:
-            ws.request("RemoveInput", {"inputName": "AK-Control-Flash"})
         if audio_reason is None:
             with ObsWebsocket(*creds) as ws:
                 ws.request(
@@ -1309,11 +1804,20 @@ def recording_positive_controls(creds: tuple[int, str], run_dir: Path, fps: floa
             time.sleep(0.5)
         else:
             time.sleep(0.5)
+        with contextlib.suppress(Exception), ObsWebsocket(*creds) as ws:
+            ws.request("RemoveInput", {"inputName": "AK-Control-Audio"})
+        with ObsWebsocket(*creds) as ws:
+            _color_control(ws, "AK-Control-Flash", 0xFFFFFFFF, behind=False)
+        time.sleep(2 / fps)
+        with ObsWebsocket(*creds) as ws:
+            ws.request("RemoveInput", {"inputName": "AK-Control-Flash"})
+        controls_cleaned = True
     finally:
-        for input_name in ("AK-Control-Flash", "AK-Control-Audio"):
-            with contextlib.suppress(Exception), ObsWebsocket(*creds) as ws:
-                ws.request("RemoveInput", {"inputName": input_name})
-        recording = stop_record(*creds)
+        if not controls_cleaned:
+            for input_name in ("AK-Control-Audio", "AK-Control-Flash"):
+                with contextlib.suppress(Exception), ObsWebsocket(*creds) as ws:
+                    ws.request("RemoveInput", {"inputName": input_name})
+        recording, stop_detail = stop_record(*creds, fps=fps)
     stopped_s = time.monotonic()
     path = Path(recording)
     retained = run_dir / "placement" / "program" / f"control-{path.name}"
@@ -1330,7 +1834,7 @@ def recording_positive_controls(creds: tuple[int, str], run_dir: Path, fps: floa
         audio = {"verdict": "REPORTED", "reason": "seeded Program has reroute_audio=false; page audio bypasses the OBS mix"}
     else:
         audio = {"verdict": "FAIL" if analysis.get("audioSilent") is False else "PASS"}
-    return {"flash": flash, "audio": audio, "analysis": analysis}
+    return {"flash": flash, "audio": audio, "analysis": analysis, "recordingStop": stop_detail}
 
 
 def apply_kb(kind: str) -> dict[str, Any]:
@@ -1440,6 +1944,7 @@ class Session:
 
     def __init__(self, name: str, host: LiveOutputHost, ctx: dict[str, Any]) -> None:
         self.name, self.host, self.creds, self.shots, self.engine_state = name, host, ctx["creds"], ctx["shots"], ctx["engineState"]
+        self.canvas_fps = float(ctx["canvasFps"])
         self.out: dict[str, Any] = {"session": name, "phases": [], "reads": {}, "shots": {}}
 
     def ev(self, js: str) -> Any:
@@ -1519,7 +2024,8 @@ def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any
                 out["seedSplice"] = stack.enter_context(forced_fail_seed(seed))
             if record:
                 start_record(*ctx["creds"])
-                stack.callback(lambda: out.update(recording=stop_record(*ctx["creds"])))
+                stack.callback(lambda: out.update(recording=stop_record(
+                    *ctx["creds"], fps=ctx["canvasFps"])[0]))
                 time.sleep(2)
             host = LiveOutputHost(dest, slides, attach_endpoint=ctx["endpoint"], attach_match=ctx["target"], bridge="obs-managed",
                                   output_rate=ctx["rate"], **kwargs)
@@ -1555,10 +2061,95 @@ def start_record(port: int, password: str) -> None:
             time.sleep(0.1)
 
 
-def stop_record(port: int, password: str) -> str | None:
-    time.sleep(1)
-    with ObsWebsocket(port, password, timeout=10.0) as ws:
-        return ws.request("StopRecord").get("outputPath")
+def _recording_duration_ms(status: dict[str, Any]) -> float:
+    value = status.get("outputDuration")
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+        raise RuntimeError("recording duration is unavailable")
+    return float(value)
+
+
+def _recording_is_readable(path: Path, timeout_s: float) -> bool:
+    if not path.is_file() or path.stat().st_size <= 0:
+        return False
+    result = subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-i", str(path), "-map", "0:v:0",
+         "-frames:v", "1", "-f", "null", "-"],
+        capture_output=True, timeout=timeout_s,
+    )
+    return result.returncode == 0
+
+
+def _best_effort_stop_record(port: int, password: str, timeout_s: float) -> None:
+    with contextlib.suppress(Exception), ObsWebsocket(port, password, timeout=timeout_s) as ws:
+        ws.request("StopRecord")
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if ws.request("GetRecordStatus").get("outputActive") is False:
+                return
+            time.sleep(0.02)
+
+
+def stop_record(port: int, password: str, *, fps: float,
+                timeout_s: float = RECORD_STOP_TIMEOUT_S) -> tuple[str, dict[str, Any]]:
+    started = time.monotonic()
+    result_detail: dict[str, Any] = {
+        "requiredPostRestorationFrames": RECORD_TAIL_FRAMES,
+        "postRestorationFramesComplete": False,
+        "inactive": False,
+        "readable": False,
+    }
+    stop_sent = False
+    try:
+        if not isinstance(fps, (int, float)) or isinstance(fps, bool) or not math.isfinite(fps) or fps <= 0:
+            raise RuntimeError(f"recording fps is invalid: {fps!r}")
+        deadline = started + timeout_s
+        tail_s = RECORD_TAIL_FRAMES / float(fps)
+        with ObsWebsocket(port, password, timeout=timeout_s) as ws:
+            initial = ws.request("GetRecordStatus")
+            if initial.get("outputActive") is not True:
+                raise RuntimeError("recording is not active before stop")
+            initial_duration = _recording_duration_ms(initial)
+            target_duration = initial_duration + 1000.0 * tail_s
+            last = initial
+            while time.monotonic() < deadline:
+                last = ws.request("GetRecordStatus")
+                if _recording_duration_ms(last) >= target_duration and time.monotonic() - started >= tail_s:
+                    result_detail["postRestorationFramesComplete"] = True
+                    break
+                time.sleep(0.02)
+            if not result_detail["postRestorationFramesComplete"]:
+                raise RuntimeError(f"recording did not retain {RECORD_TAIL_FRAMES} post-restoration frames")
+            result_detail["observedPostRestorationFrames"] = math.floor(
+                (_recording_duration_ms(last) - initial_duration) * float(fps) / 1000.0)
+            stopped = ws.request("StopRecord")
+            stop_sent = True
+            output_path = stopped.get("outputPath")
+            if not isinstance(output_path, str) or not output_path:
+                raise RuntimeError("StopRecord returned no output path")
+            while time.monotonic() < deadline:
+                status = ws.request("GetRecordStatus")
+                if status.get("outputActive") is False:
+                    result_detail["inactive"] = True
+                    break
+                time.sleep(0.02)
+        if not result_detail["inactive"]:
+            raise RuntimeError("recording remained active after StopRecord")
+        remaining = max(0.1, deadline - time.monotonic())
+        result_detail["readable"] = _recording_is_readable(Path(output_path), remaining)
+        if not result_detail["readable"]:
+            raise RuntimeError("recording output is not readable after finalization")
+        return output_path, result_detail
+    except Exception as exc:
+        if not stop_sent:
+            _best_effort_stop_record(port, password, timeout_s)
+        exc.detail = result_detail
+        if isinstance(exc, RuntimeError):
+            raise
+        error = RuntimeError(f"{type(exc).__name__}: {exc}")
+        error.detail = result_detail
+        raise error from exc
+    finally:
+        result_detail["durationS"] = round(time.monotonic() - started, 6)
 
 
 def slide1_phases(s: Session) -> None:
@@ -1956,9 +2547,12 @@ def score_placement_control(value: Any, run_dir: Path) -> dict[str, Any]:
 
 def placement_control_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None, *,
                               placement: str, studio_enabled: bool, measure_control: str | None = None) -> dict[str, Any]:
+    started = time.monotonic()
     run_dir = ctx["shots"] / "runs" / name
     run_dir.mkdir(parents=True, exist_ok=True)
+    scope = placement_scope(ctx.get("tier", "full"), ctx.get("devProfile"))
     control: dict[str, Any] = {"session": name, "placement": placement, "studioEnabled": studio_enabled,
+                               **scope,
                                "measureControl": measure_control}
     host: LiveOutputHost | None = None
     initial_control = None if name == "failed-preview-off" else measure_control
@@ -2024,8 +2618,10 @@ def placement_control_session(name: str, ctx: dict[str, Any], decision: dict[str
     control["hostLog"] = write_placement_json(run_dir, "host-log", _host_log_excerpt(host_log_path))
     scored = score_placement_control(control, run_dir)
     control["recordedVerdict"] = scored["verdict"]
-    dissolve_probe.save_run(ctx["shots"], name, {"placementControl": control}, {})
-    return {"session": name, "runDir": str(run_dir), "verdict": scored["verdict"], "output": control.get("output")}
+    dissolve_probe.save_run(ctx["shots"], name, {**scope, "acquisition": placement_acquisition(ctx),
+                                                 "placementControl": control}, {})
+    return {"session": name, "runDir": str(run_dir), "verdict": scored["verdict"],
+            "output": control.get("output"), "timingS": {"script": round(time.monotonic() - started, 2)}, **scope}
 
 
 def placement_control_rows(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2123,14 +2719,130 @@ def score_placement_capture_attempts(run_dir: Path, arm: dissolve_probe.Arm,
                          "problems": [f"attempt unreadable: {type(exc).__name__}: {exc}"], "mismatch": []})
     problems = [f"attempt {row['attempt']}: {problem}" for row in rows if row["outcome"] != "MATCH"
                 for problem in (row["problems"] or [f"outcome {row['outcome']}; mismatch {row['mismatch']}"])]
-    return calibration_gate("PASS" if not problems else "INCONCLUSIVE", problems, attempts=rows)
+    verdict = ("FAIL" if any(row["outcome"] == "MISMATCH" for row in rows) else
+               "INCONCLUSIVE" if problems else "PASS")
+    return calibration_gate(verdict, problems, attempts=rows)
+
+
+def _drive_placement(host: LiveOutputHost, arm: dissolve_probe.Arm, target: dict[str, Any],
+                     capture: Callable[[], np.ndarray], *,
+                     placement_read: Callable[[Any], None] | None = None,
+                     ) -> tuple[dict[str, Any], dict[str, np.ndarray], dict[str, Any] | None]:
+    try:
+        driven, images = dissolve_probe.drive(
+            host, arm, target, capture, placement=True, placement_read=placement_read)
+        return driven, images, None
+    except dissolve_probe.ReadinessTimeout as exc:
+        return {}, {}, {"verdict": "INCONCLUSIVE", "kind": "readiness", "message": str(exc)}
+
+
+def _placement_injected_session_attempt(
+        name: str, ctx: dict[str, Any], decision: dict[str, Any] | None, *,
+        run_name: str, attempt: int | None = None,
+        ) -> tuple[dict[str, Any], dict[str, Any], dict[str, np.ndarray]]:
+    arm = dissolve_probe.ARMS[name]
+    scope = placement_scope(ctx.get("tier", "full"), ctx.get("devProfile"))
+    record: dict[str, Any] = {
+        "arm": name, "load": os.getloadavg()[0], "headlessBefore": mm_opacity_probe.headless_chromes(),
+        **scope, "acquisition": placement_acquisition(ctx),
+    }
+    timing = record["timingS"] = {"classification": 0.0, "recordingAnalysis": 0.0, "collectionCopy": 0.0}
+    if attempt is not None:
+        record["captureAttempt"] = attempt
+    images: dict[str, np.ndarray] = {}
+    host: LiveOutputHost | None = None
+    injection: PlacementInjection | None = None
+    started = time.monotonic()
+    run_dir = ctx["shots"] / "runs" / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        t = time.monotonic()
+        resolved = dissolve_probe.resolve(arm, ctx["shots"] / "scratch", decision, tag=name)
+        timing["preparation"] = round(time.monotonic() - t, 6)
+        record.update(resolved.fields())
+        acquisition_started = time.monotonic()
+        host = LiveOutputHost(
+            resolved.root, resolved.slides, resolver=resolved.resolver,
+            transport_factory=dissolve_probe.hooked_transport(before=PLACEMENT_ALPHA_JS),
+            attach_endpoint=ctx["endpoint"], attach_match=ctx["target"], bridge="obs-managed", output_rate=ctx["rate"],
+            continuity=arm.continuity, gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off",
+            calibration=None, placement_mode="probe",
+        )
+        with dissolve_probe.serving(arm.splice):
+            host.start()
+        value = arm.placement_value or dissolve_probe.CEF_PLACEMENT.placement
+        injection = PlacementInjection(host, ctx["calibration"].identity, ctx["target"], value)
+        injection.start()
+        transport = host._require_transport()
+        record["inputLiveS"] = await_input(transport)
+        transport.evaluate("(function(){var n=document.getElementById('obed-placement-alpha');if(n)n.remove()})()")
+        record["page"] = "alpha" if host.output.get("alpha") else "screen"
+        record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
+        record["g2"] = ((transport.evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
+        with source_shots(*ctx["creds"]) as shot:
+            raw: dict[int, np.ndarray] = {}
+            driven, captured, integrity_failure = _drive_placement(
+                host, arm, resolved.target, lambda: raw.setdefault(id(image := shot()), image),
+                placement_read=injection.take_read)
+            images = {key: unpremultiply(value) if raw.get(id(value)) is value else value
+                      for key, value in captured.items()}
+        record.update(driven)
+        if integrity_failure is not None:
+            record["integrityFailure"] = integrity_failure
+        else:
+            injection.ensure_valid()
+        timing["acquisition"] = round(time.monotonic() - acquisition_started, 6)
+        missing = dissolve_evidence(record)
+        if integrity_failure is not None:
+            record["error"] = f"placement readiness INCONCLUSIVE: {integrity_failure['message']}"
+        elif missing:
+            record["error"] = f"placement evidence missing: {'; '.join(missing)}"
+    except Exception:
+        record["error"] = traceback.format_exc()
+    finally:
+        if injection is not None:
+            record["placementInjection"] = injection.stop_and_revoke()
+            if injection.failure is not None:
+                record["integrityFailure"] = {
+                    "verdict": "INCONCLUSIVE", "kind": "placement-injection", "message": injection.failure,
+                }
+        if host is not None:
+            try:
+                host.stop()
+            except Exception as exc:
+                record["stopError"] = str(exc)
+    timing["script"] = round(time.monotonic() - started, 6)
+    t = time.monotonic()
+    dissolve_probe.save_run(ctx["shots"], run_name, record, images)
+    timing["reportWrite"] = round(time.monotonic() - t, 6)
+    saved_path = run_dir / "record.json"
+    if saved_path.is_file():
+        saved = json.loads(saved_path.read_text())
+        saved["timingS"] = timing
+        saved_path.write_text(json.dumps(saved))
+    out: dict[str, Any] = {
+        "session": name, "runDir": str(run_dir), "page": record.get("page"), **scope,
+        "output": record.get("output"), "timingS": timing,
+    }
+    if record.get("integrityFailure"):
+        out["integrityFailure"] = record["integrityFailure"]
+    if record.get("error"):
+        out["fatal"] = str(record["error"])[-3000:]
+    return out, record, images
 
 
 def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None, *,
                                run_name: str, attempt: int | None = None,
                                ) -> tuple[dict[str, Any], dict[str, Any], dict[str, np.ndarray]]:
+    if name not in PLACEMENT_ANCHORS:
+        return _placement_injected_session_attempt(
+            name, ctx, decision, run_name=run_name, attempt=attempt)
     arm = dissolve_probe.ARMS[name]
-    record: dict[str, Any] = {"arm": name, "load": os.getloadavg()[0], "headlessBefore": mm_opacity_probe.headless_chromes()}
+    scope = placement_scope(ctx.get("tier", "full"), ctx.get("devProfile"))
+    record: dict[str, Any] = {"arm": name, "load": os.getloadavg()[0],
+                              "headlessBefore": mm_opacity_probe.headless_chromes(), **scope,
+                              "acquisition": placement_acquisition(ctx)}
+    timing = record["timingS"] = {"collectionCopy": 0.0, "recordingAnalysis": 0.0, "classification": 0.0}
     if attempt is not None:
         record["captureAttempt"] = attempt
     images: dict[str, np.ndarray] = {}
@@ -2138,6 +2850,7 @@ def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[st
     sample_lock = threading.Lock()
     host: LiveOutputHost | None = None
     preflight: dict[str, Any] = {}
+    recording_stop: dict[str, Any] = {}
     started = time.monotonic()
     run_dir = ctx["shots"] / "runs" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -2165,20 +2878,38 @@ def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[st
         return {"inputLiveS": input_live_s, "controlsAbsent": absent, "equalProgramSamples": True}
 
     sampled = name != "m-snap-cef"
+
+    def stop_placement_recording() -> str:
+        nonlocal recording_stop
+        try:
+            recording, recording_stop = stop_record(*ctx["creds"], fps=ctx["canvasFps"])
+            return recording
+        except Exception as exc:
+            detail = getattr(exc, "detail", None)
+            if isinstance(detail, dict):
+                recording_stop = detail
+            raise
+
     adapter = QualificationCalibrationAdapter(
         ctx["calibration"], sample, placement="offcanvas" if name == "opaque-off" else "preview",
         settle=settle, start_recording=lambda: start_record(*ctx["creds"]),
-        stop_recording=lambda: stop_record(*ctx["creds"]), read_stats=lambda: recording_stats(ctx["creds"]),
+        stop_recording=stop_placement_recording,
+        read_stats=lambda: recording_stats(ctx["creds"]),
         sample_capture_phases=sampled,
     )
     try:
+        t = time.monotonic()
         resolved = dissolve_probe.resolve(arm, ctx["shots"] / "scratch", decision, tag=name)
+        timing["preparation"] = round(time.monotonic() - t, 6)
         record.update(resolved.fields())
         collection_path = ctx["collectionPath"]
         baseline_saved = collection_saved_by_obs(collection_path)
+        t = time.monotonic()
         _baseline, baseline_ref = capture_collection(collection_path, run_dir, "baseline", saved_by_obs=baseline_saved)
         _null_before, null_before_ref = capture_collection(collection_path, run_dir, "null-before", saved_by_obs=baseline_saved)
         _null_after, null_after_ref = capture_collection(collection_path, run_dir, "null-after", saved_by_obs=baseline_saved)
+        timing["collectionCopy"] += time.monotonic() - t
+        acquisition_started = time.monotonic()
         host = LiveOutputHost(
             resolved.root, resolved.slides, resolver=resolved.resolver,
             transport_factory=dissolve_probe.hooked_transport(before=PLACEMENT_ALPHA_JS),
@@ -2200,7 +2931,9 @@ def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[st
         placement = host.output.get("placement") or {}
         if result is None:
             raise RuntimeError("managed placement calibration did not complete")
+        t = time.monotonic()
         _cleanup, cleanup_ref = capture_collection(collection_path, run_dir, "cleanup", saved_by_obs=True)
+        timing["collectionCopy"] += time.monotonic() - t
         controls = preflight.get("programGuard") or {}
         controls["candidate"] = _jsonable(result.program)
         sample("null")
@@ -2208,7 +2941,21 @@ def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[st
         record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
         record["inputLiveS"] = (adapter.settle_detail or {}).get("inputLiveS")
         drive_placement = json.loads(json.dumps(placement))
-        expected_value = placement_probe.classify_probe(result.evidence).verdict.value if result.evidence else None
+        t = time.monotonic()
+        classification = placement_probe.classify_probe(result.evidence) if result.evidence is not None else None
+        tone = probe_tone_rows(result.evidence, classification) if result.evidence is not None and classification is not None else {
+            "ramp": [], "patches": [], "problems": ["classifier evidence missing"]}
+        tone.update({"complete": False, "applied": "identity", "observed": classification.tone_map.value
+                     if classification and classification.tone_map else None,
+                     "missingRows": ["second fresh launch acceleration-on", "second fresh launch acceleration-off", "hevc10",
+                                     "Keynote-HEVC", "skin tones", "reset/invalidation controls"]})
+        timing["classification"] = round(time.monotonic() - t, 6)
+        t = time.monotonic()
+        classifier_control_rows = (
+            classifier_controls(result.evidence, classification, placement_probe.ProbeVerdict.FRAC)
+            if result.evidence is not None and classification is not None else None)
+        timing["classifierControls"] = round(time.monotonic() - t, 6)
+        expected_value = classification.verdict.value if classification else None
         if arm.placement_value is not None and arm.placement_value != expected_value:
             record["forcedPlacement"] = dissolve_probe.commit_grant(
                 host._require_transport().evaluate, host._placement_token, arm.placement_value, 15_000)
@@ -2216,11 +2963,14 @@ def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[st
         record["g2"] = ((host._require_transport().evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
         with source_shots(*ctx["creds"]) as shot:
             raw: dict[int, np.ndarray] = {}
-            driven, captured = dissolve_probe.drive(
+            driven, captured, integrity_failure = _drive_placement(
                 host, arm, resolved.target, lambda: raw.setdefault(id(image := shot()), image))
             images = {key: unpremultiply(value) if raw.get(id(value)) is value else value
                       for key, value in captured.items()}
         record.update(driven)
+        if integrity_failure is not None:
+            record["integrityFailure"] = integrity_failure
+        timing["acquisition"] = round(time.monotonic() - acquisition_started, 6)
 
         rgba_paths = []
         phases = []
@@ -2239,27 +2989,22 @@ def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[st
             path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(adapter.recording, path)
             recording_ref = dissolve_probe.placement_file_ref(path, run_dir)
+            t = time.monotonic()
             recording_analysis = analyze_program_recording(
                 path, started_s=adapter.recording_started_s, stopped_s=adapter.recording_stopped_s,
                 transaction_started_s=result.started_s, transaction_finished_s=result.finished_s,
                 fps=ctx["canvasFps"], stats_before=adapter.recording_stats_before,
                 stats_after=adapter.recording_stats_after,
             )
-        classification = placement_probe.classify_probe(result.evidence) if result.evidence is not None else None
-        tone = probe_tone_rows(result.evidence, classification) if result.evidence is not None and classification is not None else {
-            "ramp": [], "patches": [], "problems": ["classifier evidence missing"]}
-        tone.update({"complete": False, "applied": "identity", "observed": classification.tone_map.value
-                     if classification and classification.tone_map else None,
-                     "missingRows": ["second fresh launch acceleration-on", "second fresh launch acceleration-off", "hevc10",
-                                     "Keynote-HEVC", "skin tones", "reset/invalidation controls"]})
+            timing["recordingAnalysis"] = round(time.monotonic() - t, 6)
         telemetry = {
             "programGuard": controls,
             "programRecording": recording_analysis,
             "recordingError": adapter.recording_error,
+            "recordingStop": recording_stop or None,
             "recordingControls": preflight.get("recordingControls"),
             "alpha": analyze_rgba_samples(rgba_paths, phases),
-            "classifierControls": classifier_controls(result.evidence, classification, placement_probe.ProbeVerdict.FRAC)
-            if result.evidence is not None and classification is not None else None,
+            "classifierControls": classifier_control_rows,
             "liveProbeControls": ctx["placementControls"]["probe"],
             "toneRows": tone,
             "liveControls": preflight.get("liveControls"),
@@ -2283,7 +3028,9 @@ def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[st
             stock_sha256=resolved.served["stockSha256"],
         )
         missing = dissolve_evidence(record)
-        if missing:
+        if integrity_failure is not None:
+            record["error"] = f"placement readiness INCONCLUSIVE: {integrity_failure['message']}"
+        elif missing:
             record["error"] = f"placement evidence missing: {'; '.join(missing)}"
     except Exception:
         record["error"] = traceback.format_exc()
@@ -2294,16 +3041,20 @@ def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[st
                 host.stop()
             except Exception as exc:
                 record["stopError"] = str(exc)
+    timing["collectionCopy"] = round(timing["collectionCopy"], 6)
+    timing["script"] = round(time.monotonic() - started, 6)
+    t = time.monotonic()
     dissolve_probe.save_run(ctx["shots"], run_name, record, images)
+    timing["reportWrite"] = round(time.monotonic() - t, 6)
     saved_path = run_dir / "record.json"
     if saved_path.is_file():
         saved = json.loads(saved_path.read_text())
-        calibration = saved.get("placementCalibration")
-        if isinstance(calibration, dict):
-            calibration["gates"] = score_placement_calibration(calibration, run_dir)["gates"]
-            saved_path.write_text(json.dumps(saved))
-    out: dict[str, Any] = {"session": name, "runDir": str(run_dir), "page": record.get("page"),
-                           "output": record.get("output"), "timingS": {"script": round(time.monotonic() - started, 2)}}
+        saved["timingS"] = timing
+        saved_path.write_text(json.dumps(saved))
+    out: dict[str, Any] = {"session": name, "runDir": str(run_dir), "page": record.get("page"), **scope,
+                           "output": record.get("output"), "timingS": timing}
+    if record.get("integrityFailure"):
+        out["integrityFailure"] = record["integrityFailure"]
     if record.get("error"):
         out["fatal"] = str(record["error"])[-3000:]
     if name == "opaque-off":
@@ -2326,7 +3077,8 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
             name, ctx, decision, run_name=f"{name}/attempt-{attempt}", attempt=attempt)
 
     sessions, attempts = capture_placement_sessions(arm, capture, cal)
-    summary = {"arm": name, "captureAttempts": [
+    scope = placement_scope(ctx.get("tier", "full"), ctx.get("devProfile"))
+    summary = {"arm": name, **scope, "acquisition": placement_acquisition(ctx), "captureAttempts": [
         {key: value for key, value in row.items() if key != "runDir"} for row in attempts
     ]}
     (run_dir / "record.json").write_text(json.dumps(summary))
@@ -2339,14 +3091,17 @@ def placement_session(name: str, ctx: dict[str, Any], decision: dict[str, Any] |
         "output": last.get("output"),
         "timingS": {"attempts": [session.get("timingS") for session in sessions]},
         "attempts": [{"attempt": index, "runDir": session.get("runDir")} for index, session in enumerate(sessions, 1)],
+        **scope,
         **({"fatal": fatal[-1]} if fatal else {}),
     }
 
 
 def chrome_placement_session(name: str, ctx: dict[str, Any], *, gpu: bool) -> dict[str, Any]:
+    started = time.monotonic()
     run_dir = ctx["shots"] / "runs" / name
     run_dir.mkdir(parents=True, exist_ok=True)
-    record: dict[str, Any] = {"arm": name}
+    scope = placement_scope(ctx.get("tier", "full"), ctx.get("devProfile"))
+    record: dict[str, Any] = {"arm": name, **scope, "acquisition": placement_acquisition(ctx)}
     try:
         measured = dissolve_probe.run_chrome_placement_probe(gpu=gpu)
         tone = probe_tone_rows(measured["input"], measured["classification"])
@@ -2378,7 +3133,8 @@ def chrome_placement_session(name: str, ctx: dict[str, Any], *, gpu: bool) -> di
         if isinstance(calibration, dict):
             calibration["gates"] = score_placement_calibration(calibration, run_dir)["gates"]
             record_path.write_text(json.dumps(saved))
-    out = {"session": name, "runDir": str(run_dir), "timingS": {"script": 0.0}}
+    out = {"session": name, "runDir": str(run_dir),
+           "timingS": {"script": round(time.monotonic() - started, 2)}, **scope}
     if record.get("error"):
         out["fatal"] = str(record["error"])[-3000:]
     return out
@@ -2447,7 +3203,8 @@ def soak_script(minutes: int, armed: dict[str, Any], looping: bool) -> Callable[
         started = s.phase("slide2-live")
         hold(started, SOAK_WINDOW_S)
         s.ev(MARK_JS % UNMEASURED_MARK)
-        s.out.setdefault("windows", []).append({"minute": minute, "recording": stop_record(*s.creds)})
+        s.out.setdefault("windows", []).append({
+            "minute": minute, "recording": stop_record(*s.creds, fps=s.canvas_fps)[0]})
 
     def script(s: Session) -> None:
         s.execute("show")
@@ -3203,11 +3960,16 @@ def dissolve_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict
     return {"DX-2": gate(checks, invalid), "dissolveCalibration": calibration, "dissolveVerdict": verdict}
 
 
-def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dict[str, Any]:
+def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None, *,
+                    profile: dissolve_probe.Profile = dissolve_probe.CEF_PLACEMENT,
+                    write_updates: bool = True,
+                    product_scores: dict[Path, dict[str, Any]] | None = None,
+                    pure_scores: dict[tuple[Any, ...], Any] | None = None) -> dict[str, Any]:
     sessions = {s["session"]: s for s in run["sessions"]}
     control_rows = placement_control_rows(run["sessions"])
     checks: list[dict[str, Any]] = []
-    expected = {*PLACEMENT_ARMS, "probe-chrome-gpu", "probe-chrome-software", *PLACEMENT_CONTROL_SESSIONS}
+    integrity_problems = []
+    expected = {*profile.arms, "probe-chrome-gpu", "probe-chrome-software", *PLACEMENT_CONTROL_SESSIONS}
     check(checks, "every placement session ran", sorted(sessions), set(sessions) == expected, ",".join(sorted(expected)))
     for name in PLACEMENT_CONTROL_SESSIONS:
         session = sessions.get(name) or {}
@@ -3216,8 +3978,14 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
         if run_dir_value:
             run_dir = Path(run_dir_value)
             try:
-                saved = json.loads((run_dir / "record.json").read_text())
-                rescored = score_placement_control(saved.get("placementControl"), run_dir)
+                path = run_dir / "record.json"
+                cached = (product_scores or {}).get(path)
+                if cached is not None:
+                    rescored = (cached.get("gates") or {}).get("placement-control") or calibration_gate(
+                        "INCONCLUSIVE", ["cached control score missing"])
+                else:
+                    saved = json.loads(path.read_text())
+                    rescored = score_placement_control(saved.get("placementControl"), run_dir)
             except (OSError, json.JSONDecodeError) as exc:
                 rescored = calibration_gate("INCONCLUSIVE", [f"control rescore failed: {type(exc).__name__}: {exc}"])
         check(checks, f"{name}: control verdict", rescored, rescored["verdict"] == "PASS", "PASS")
@@ -3232,45 +4000,104 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
         if not run_dir_value or name not in dissolve_probe.ARMS:
             continue
         run_dir = Path(run_dir_value)
-        paths = placement_attempt_paths(run_dir, dissolve_probe.ARMS[name]) or [run_dir / "record.json"]
-        existing = [path for path in paths if path.is_file()]
-        if existing:
-            run_paths[name] = existing
-    runs = {name: (json.loads(paths[-1].read_text()), dissolve_probe.RunImages(paths[-1].parent))
-            for name, paths in run_paths.items()}
-    lut, lut_detail = dissolve_probe.launch_lut(runs, cal or dissolve_probe.Calibration(), profile=dissolve_probe.CEF_PLACEMENT)
+        paths = placement_attempt_paths(run_dir, dissolve_probe.ARMS[name])
+        if paths:
+            run_paths[name] = paths
+    runs = {}
+    for name, paths in run_paths.items():
+        try:
+            if not all(path.is_file() for path in paths):
+                continue
+            runs[name] = (json.loads(paths[-1].read_text()), dissolve_probe.RunImages(paths[-1].parent))
+        except (OSError, json.JSONDecodeError):
+            pass
+    evidence_records = []
+    for name, paths in run_paths.items():
+        if name not in profile.arms:
+            continue
+        for path in paths:
+            try:
+                evidence_records.append((name, path, json.loads(path.read_text())))
+            except (OSError, json.JSONDecodeError):
+                pass
+    evidence_mode, mode_problems, anchor_problems, anchor_engines, anchor_scores = placement_launch_evidence(
+        evidence_records, profile, live_probe_controls=control_rows["probe"],
+        product_scores=product_scores, pure_scores=pure_scores)
+    check(checks, "placement evidence composition", evidence_mode,
+          evidence_mode in ("legacy", "anchors+injection"), "legacy or anchors+injection")
+    integrity_problems.extend(mode_problems)
+    if evidence_mode == "anchors+injection":
+        integrity_problems.extend(anchor_problems)
+    lut, lut_detail = dissolve_probe.launch_lut(runs, cal or dissolve_probe.Calibration(), profile=profile)
     check(checks, "CEF placement tone observation", lut_detail, lut is not None, "measured identity/analytic/table map")
     tone_summary = {"complete": False, "applied": "identity", "observed": lut_detail.get("kind"),
                     "samples": lut_detail.get("samples"), "problems": list(lut_detail.get("problems") or []),
                     "missingRows": ["second fresh CEF launch acceleration-on", "second fresh CEF launch acceleration-off",
                                     "hevc10", "Keynote-HEVC", "skin tones", "reset/invalidation controls"]}
-    for name in PLACEMENT_ARMS:
+    for name in profile.arms:
         run_dir_value = sessions.get(name, {}).get("runDir")
         run_dir = Path(run_dir_value) if run_dir_value else None
         paths = run_paths.get(name, [])
         if not paths:
             check(checks, f"{name}: placement evidence", None, False, "PASS")
         for attempt, path in enumerate(paths, 1):
-            record = json.loads(path.read_text())
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                check(checks, f"{name} attempt {attempt}: placement evidence", None, False,
+                      f"readable record ({type(exc).__name__})")
+                continue
+            integrity_problem = None
+            if "integrityFailure" in record:
+                integrity_failure = record["integrityFailure"]
+                message = (integrity_failure.get("message") if isinstance(integrity_failure, dict)
+                           else str(integrity_failure))
+                integrity_problem = f"{name} attempt {attempt}: {message or 'integrity failure reported'}"
+                integrity_problems.append(integrity_problem)
             encoded = record.get("placementCalibration") or {}
             integrity = encoded.get("integrity") if isinstance(encoded, dict) else None
             telemetry_ref = integrity.get("telemetry") if isinstance(integrity, dict) else None
-            if isinstance(telemetry_ref, dict):
+            telemetry_changed = False
+            if write_updates and isinstance(telemetry_ref, dict):
                 telemetry = _read_ref_json(telemetry_ref, path.parent)
-                telemetry["toneRows"] = {**(telemetry.get("toneRows") or {}), **tone_summary}
-                integrity["telemetry"] = write_placement_json(path.parent, "telemetry", telemetry)
-            rescored = score_placement_calibration(
-                encoded, path.parent, live_probe_controls=control_rows["probe"])
-            if isinstance(encoded, dict):
+                updated_tone = {**(telemetry.get("toneRows") or {}), **tone_summary}
+                if telemetry.get("toneRows") != updated_tone:
+                    telemetry["toneRows"] = updated_tone
+                    integrity["telemetry"] = write_placement_json(path.parent, "telemetry", telemetry)
+                    telemetry_changed = True
+            rescored = None if telemetry_changed else (anchor_scores.get(path) or (product_scores or {}).get(path))
+            if evidence_mode == "mixed":
+                rescored = {"overall": "INCONCLUSIVE", "gates": {
+                    "placement-evidence": calibration_gate("INCONCLUSIVE", mode_problems)},
+                    "problems": mode_problems}
+            elif evidence_mode == "anchors+injection" and name not in PLACEMENT_ANCHORS:
+                rescored = score_placement_injection(
+                    record.get("placementInjection"), record, dissolve_probe.ARMS[name], profile,
+                    anchor_problems, anchor_engines)
+            elif rescored is None:
+                rescored = score_placement_calibration(
+                    encoded, path.parent, live_probe_controls=control_rows["probe"], pure_scores=pure_scores)
+            if product_scores is not None:
+                product_scores[path] = rescored
+            if integrity_problem is not None:
+                rescored = {**rescored, "overall": "INCONCLUSIVE",
+                            "problems": [*rescored.get("problems", []), integrity_problem]}
+            if evidence_mode == "anchors+injection" and rescored.get("overall") == "INCONCLUSIVE":
+                evidence_problems = rescored.get("problems") or ["placement evidence was inconclusive"]
+                integrity_problems.extend(
+                    f"{name} attempt {attempt}: {problem}" for problem in evidence_problems
+                    if problem not in anchor_problems)
+            if write_updates and isinstance(record.get("placementCalibration"), dict):
                 encoded["gates"] = rescored["gates"]
-            path.write_text(json.dumps(record))
+            if write_updates:
+                path.write_text(json.dumps(record))
             label = f"{name} attempt {attempt}: placement evidence" if len(paths) > 1 else f"{name}: placement evidence"
             check(checks, label, rescored.get("overall"), rescored.get("overall") == "PASS", "PASS")
         attempts = (score_placement_capture_attempts(run_dir, dissolve_probe.ARMS[name],
                                                      cal or dissolve_probe.Calibration(), lut)
                     if run_dir is not None else calibration_gate("INCONCLUSIVE", ["run directory missing"]))
         parent_path = run_dir / "record.json" if run_dir is not None else None
-        if parent_path is not None and parent_path.is_file():
+        if write_updates and parent_path is not None and parent_path.is_file():
             parent = json.loads(parent_path.read_text())
             parent["captureAttemptScore"] = attempts
             parent_path.write_text(json.dumps(parent))
@@ -3281,22 +4108,36 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None) -> dic
         if run_dir_value:
             run_dir = Path(run_dir_value)
             try:
-                record = json.loads((run_dir / "record.json").read_text())
-                rescored = score_placement_calibration(record.get("placementCalibration") or {}, run_dir)
+                path = run_dir / "record.json"
+                rescored = (product_scores or {}).get(path)
+                if rescored is None:
+                    record = json.loads(path.read_text())
+                    rescored = score_placement_calibration(
+                        record.get("placementCalibration") or {}, run_dir, pure_scores=pure_scores)
                 observed = ((rescored.get("gates") or {}).get("probe-chrome-harness") or {}).get("verdict")
             except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError):
                 pass
         check(checks, f"{name}: classifier", observed, observed == "PASS", "PASS")
-    verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(),
-                                        profile=dissolve_probe.CEF_PLACEMENT, lut=lut)
+    try:
+        verdict = dissolve_probe.score_runs(runs, decision, cal or dissolve_probe.Calibration(), profile=profile, lut=lut)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+        verdict = {"gates": {name: {"verdict": "INCONCLUSIVE", "reasons": [
+            f"renderer rescore failed: {type(exc).__name__}: {exc}"]} for name in profile.controls()},
+                   "arms": {}, "overall": "INCONCLUSIVE", "missing": list(profile.required(False)),
+                   "profile": profile.name}
     for name, result in verdict["gates"].items():
-        reported = result["verdict"] in ("REPORTED", "N/A")
+        reported = result["verdict"] in ("REPORTED", "N/A", "NOT RUN")
         check(checks, name, [result["verdict"], result.get("reasons") or result.get("problems")],
               result["verdict"] == "PASS" or reported, "PASS", enforced=not reported)
     for name, outcome in verdict["arms"].items():
         check(checks, f"arm {name}", outcome, outcome == "MATCH", "MATCH")
     invalid = None if cal is not None else f"placement INCONCLUSIVE: calibration opaque-off n {calibration['n']}"
-    return {"CEF-placement": gate(checks, invalid), "dissolveCalibration": calibration, "placementVerdict": verdict}
+    placement_gate = gate(checks, invalid)
+    if integrity_problems:
+        placement_gate["verdict"] = "INCONCLUSIVE"
+        integrity_invalid = f"placement INCONCLUSIVE: {'; '.join(integrity_problems)}"
+        placement_gate["invalid"] = "; ".join(part for part in (invalid, integrity_invalid) if part)
+    return {"CEF-placement": placement_gate, "dissolveCalibration": calibration, "placementVerdict": verdict}
 
 
 def mmo_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3313,6 +4154,112 @@ def mmo_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         value = cvc[0].get("max") if cvc and cvc[0] else None
         check(checks, f"MO-2 CvC (rate {rate}) gates that rate", value, value is not None and value <= MMO_CVC_MAX, f"<= {MMO_CVC_MAX}")
     return checks
+
+
+def placement_launch_record(run: dict[str, Any]) -> dict[str, Any]:
+    sessions = run.get("sessions") if isinstance(run.get("sessions"), list) else []
+    scopes = []
+    cef_identities = set()
+    chrome_targets = {True: set(), False: set()}
+    unreadable = []
+    for session in sessions:
+        paths = placement_session_run_dirs(session)
+        if not paths:
+            unreadable.append(f"{session.get('session')}: run directory missing")
+            continue
+        for path in paths:
+            try:
+                record = json.loads((path / "record.json").read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                unreadable.append(f"{session.get('session')}: {type(exc).__name__}")
+                continue
+            scopes.append((record.get("tier"), record.get("devProfile")))
+            calibration = record.get("placementCalibration")
+            injection = record.get("placementInjection")
+            if isinstance(calibration, dict) and calibration.get("backend") == "cef" and isinstance(calibration.get("engine"), dict):
+                cef_identities.add(json.dumps(calibration["engine"], sort_keys=True))
+            if isinstance(injection, dict) and isinstance(injection.get("engine"), dict):
+                cef_identities.add(json.dumps(injection["engine"], sort_keys=True))
+            if isinstance(calibration, dict) and calibration.get("backend") == "chrome-harness":
+                identity = (calibration.get("input") or {}).get("identity") or {}
+                target = identity.get("target_id")
+                telemetry = _telemetry(calibration, path)
+                gpu = telemetry.get("chromeGpu") if isinstance(telemetry, dict) else None
+                if isinstance(gpu, bool) and target:
+                    chrome_targets[gpu].add(str(target))
+    expected = set()
+    profile_problem = None
+    try:
+        tier, dev_profile, profile, legacy = placement_record_scope(run, scopes)
+        expected = {*profile.arms, *PLACEMENT_CONTROL_SESSIONS, "probe-chrome-gpu", "probe-chrome-software"}
+    except ValueError as exc:
+        tier, dev_profile, legacy = run.get("tier") or "full", run.get("devProfile"), False
+        profile_problem = str(exc)
+    names = [session.get("session") for session in sessions if isinstance(session.get("session"), str)]
+    scope_expected = (tier, dev_profile if tier == "dev" else None)
+    wrong_scopes = [scope for scope in scopes if scope != scope_expected and not (legacy and scope == (None, None))]
+    problems = list(unreadable)
+    if profile_problem:
+        problems.append(profile_problem)
+    if set(names) != expected or len(names) != len(expected):
+        problems.append(f"session set incomplete: missing={sorted(expected - set(names))}, unexpected={sorted(set(names) - expected)}")
+    if wrong_scopes:
+        problems.append(f"child acquisition scope mismatch: {wrong_scopes}")
+    if not sessions:
+        problems.append("launch has no sessions")
+    if len(cef_identities) != 1:
+        problems.append(f"launch has {len(cef_identities)} CEF engine identities; need exactly one")
+    for gpu in (True, False):
+        if len(chrome_targets[gpu]) != 1:
+            problems.append(f"launch has {len(chrome_targets[gpu])} Chrome target identities for gpu={gpu}; need exactly one")
+    launch_passed = run.get("devPassed") is True if tier == "dev" else run.get("passed") is True
+    if run.get("valid") is not True or not launch_passed:
+        problems.append("launch did not finish valid and passing")
+    return {
+        "launchId": run.get("placementLaunchId") or run.get("ts"), "rate": run.get("rate"), "take": run.get("take"),
+        "tier": tier, "devProfile": dev_profile, "sessions": names, "cefIdentities": sorted(cef_identities),
+        "chromeTargets": {str(gpu).lower(): sorted(chrome_targets[gpu]) for gpu in (True, False)},
+        "problems": problems, "passed": not problems,
+    }
+
+
+def placement_launch_set_check(launches: list[dict[str, Any]]) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, value: Any, ok: bool, limit: str) -> None:
+        checks.append({"check": name, "value": value, "ok": ok, "limit": limit, "enforced": True})
+
+    add("placement launches present", len(launches), bool(launches), ">= 1")
+    tiers = [launch.get("tier") for launch in launches]
+    bundle_tier = "dev" if "dev" in tiers else "full"
+    add("one acquisition tier", tiers, bool(launches) and len(set(tiers)) == 1 and set(tiers) <= {"full", "dev"}, "all full or all dev")
+    incomplete = {launch.get("launchId") or f"row-{index}": launch.get("problems") or []
+                  for index, launch in enumerate(launches) if not launch.get("passed")}
+    add("every placement launch complete", incomplete, not incomplete, "no empty, aborted, missing, or malformed launch")
+    launch_ids = [launch.get("launchId") for launch in launches]
+    add("fresh launch identities", launch_ids,
+        bool(launches) and all(isinstance(value, str) and value for value in launch_ids) and len(set(launch_ids)) == len(launch_ids),
+        "one distinct identity per launch")
+    cef = [identity for launch in launches for identity in launch.get("cefIdentities") or []]
+    add("fresh CEF launches", cef, bool(launches) and len(cef) == len(launches) and len(set(cef)) == len(launches),
+        "one distinct CEF identity per launch")
+    for gpu in (True, False):
+        targets = [target for launch in launches for target in (launch.get("chromeTargets") or {}).get(str(gpu).lower(), [])]
+        add(f"fresh Chrome launches gpu={gpu}", targets,
+            bool(launches) and len(targets) == len(launches) and len(set(targets)) == len(launches),
+            "one distinct target per launch")
+    rates = sorted(launch.get("rate") for launch in launches if launch.get("rate") in MMO_RATES)
+    if bundle_tier == "full":
+        add("full placement rates", rates, set(rates) == set(MMO_RATES), f"both {list(MMO_RATES)}")
+        rate_counts = Counter(rates)
+        add("complete placement pairs", dict(rate_counts),
+            rate_counts[25] == rate_counts[30] >= 1,
+            "equal non-zero counts at 25 and 30 fps")
+    else:
+        add("full placement rates", rates, False, f"DEV cannot satisfy both-rate qualification ({list(MMO_RATES)})")
+    ok = bool(checks) and all(row["ok"] for row in checks)
+    return {"tier": bundle_tier, "checks": checks, "qualified": bundle_tier == "full" and ok,
+            "devPassed": bundle_tier == "dev" and all(row["ok"] for row in checks if row["check"] != "full placement rates")}
 
 
 KB_EXPECT = {
@@ -3633,6 +4580,7 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
     if arm == "dissolve":
         return [dissolve_session(name, ctx, args.decision) for name in DISSOLVE_ARMS]
     if arm == "placement":
+        profile = placement_profile(args.tier, args.dev_profile)
         controls = [placement_control_session(
             name, ctx, args.decision, placement=PLACEMENT_CONTROL_SPECS[name][0],
             studio_enabled=PLACEMENT_CONTROL_SPECS[name][1], measure_control=PLACEMENT_CONTROL_SPECS[name][2],
@@ -3640,7 +4588,7 @@ def sessions_for(arm: str, ctx: dict[str, Any], args: argparse.Namespace, armed:
         ctx["placementControls"] = placement_control_rows(controls)
         sessions = [*controls, chrome_placement_session("probe-chrome-gpu", ctx, gpu=True),
                     chrome_placement_session("probe-chrome-software", ctx, gpu=False)]
-        for name in PLACEMENT_ARMS:
+        for name in (arm_name for arm_name in PLACEMENT_ARMS if arm_name in profile.arms):
             session = placement_session(name, ctx, args.decision)
             sessions.append(session)
             if name == "opaque-off":
@@ -3698,6 +4646,8 @@ def handback_geometry_safe(recording: Path, series: dict[str, np.ndarray], size:
 
 def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: argparse.Namespace,
              armed: dict[str, Any] | None) -> dict[str, Any]:
+    take_started = time.monotonic()
+    preparation_started = time.monotonic()
     ts = stamp()
     canvas_label, product_source = managed_obs.RATES[rate]
     source = rate if arm == "positive" else product_source
@@ -3705,30 +4655,41 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     record_dir.mkdir(parents=True, exist_ok=True)
     shots = out_dir / "shots" / f"{arm}-{ts}"
     shots.mkdir(parents=True, exist_ok=True)
+    scope = placement_scope(args.tier, args.dev_profile) if arm == "placement" else {}
     run: dict[str, Any] = {"arm": arm, "rate": rate, "take": take, "ts": ts, "canvas": canvas_label, "source": source,
+                           **scope,
                            "launch": args.launch, "kb": args.kb, "kbSplice": args.kb_splice, "fixture": str(args.fixture),
                            "counter": fixture_counter(args.fixture), "fixtureIdentity": args.fixture_identity,
                            "soakMinutes": args.soak_minutes, "precheck": args.precheck,
                            "head": subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip(),
                            "home": str(home), "recordDir": str(record_dir), "checks": [], "sessions": []}
+    if arm == "placement":
+        run["decision"] = args.decision
     engine = ManagedObs(home, record_dir=record_dir, quit_timeout_s=QUIT_TIMEOUT_S)
     user_before = tree_snapshot(USER_OBS_TREE)
     sentinel_before = tree_snapshot(engine.tree / ".sentinel")
     started = datetime.now()
-    take_started = time.monotonic()
     timing = run["timingS"] = {}
+    pure_scores: dict[tuple[Any, ...], Any] = {}
+    timing["preparation"] = round(time.monotonic() - preparation_started, 6)
     print(f"[{arm} rate {rate} source {source} {args.launch} take {take}] launching", flush=True)
     try:
         t = time.monotonic()
         creds = launch_engine(engine, rate, source, args.launch, run)
         timing["launch"] = round(time.monotonic() - t, 2)
-        ctx = {"endpoint": engine.cdp_endpoint, "target": engine.target_id, "rate": rate, "creds": creds, "shots": shots,
+        launch_id = f"{ts}:{engine.target_id}"
+        if arm == "placement":
+            run["placementLaunchId"] = launch_id
+        ctx = {"endpoint": engine.cdp_endpoint, "target": engine.target_id, "rate": rate, "take": take, "creds": creds, "shots": shots,
                "fixture": args.fixture, "tag": f"{arm}{rate}{take}{ts}",
+               "tier": args.tier, "devProfile": args.dev_profile, "placementLaunchId": launch_id,
                "calibration": engine.calibration_adapter(), "obsVersion": run.get("obsVersion"),
                "videoSettings": run.get("videoSettings"), "canvasFps": canvas_fps(run.get("videoSettings"), rate),
                "collectionPath": engine.tree / "basic/scenes/AK.json",
                "engineState": lambda: {k: engine.state().get(k) for k in ("state", "warnings")}}
+        t = time.monotonic()
         run["sessions"] = sessions_for(arm, ctx, args, armed)
+        timing["acquisition"] = round(time.monotonic() - t, 6)
     except Exception:
         run["fatal"] = traceback.format_exc()[-3000:]
         print(run["fatal"], flush=True)
@@ -3739,8 +4700,11 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
         timing["quit"] = round(time.monotonic() - t, 2)
         run["engineAfterQuit"] = engine.state()
         engine.close()
+    t = time.monotonic()
     if arm == "placement":
-        finalize_placement_persistence(run["sessions"], engine.tree / "basic/scenes/AK.json")
+        timing["placementFinalization"] = finalize_placement_persistence(
+            run["sessions"], engine.tree / "basic/scenes/AK.json", pure_scores=pure_scores)
+    timing["finalization"] = round(time.monotonic() - t, 6)
     ended = datetime.now()
     record = json.loads((home / "ak-engine.json").read_text()) if (home / "ak-engine.json").exists() else {}
     run["lifecycle"] = {"readyS": run.get("readyS"), "stateAfterQuit": run["engineAfterQuit"]["state"],
@@ -3788,20 +4752,32 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     if not args.keep_recordings:
         shutil.rmtree(record_dir, ignore_errors=True)
 
+    t = time.monotonic()
     try:
-        run["gates"] = arm_gates(arm, run, args, armed, invalid)
+        run["gates"] = arm_gates(
+            arm, run, args, armed, invalid, pure_scores=pure_scores)
     except Exception:
         run["gates"] = {"error": gate([{"check": "gate computation", "value": traceback.format_exc()[-2000:], "limit": "",
                                         "ok": False, "enforced": True}])}
+    if arm == "placement":
+        timing["rendererScoring"] = (run["gates"].get("placementVerdict") or {}).get("timingS") or {}
+    timing["scoring"] = round(time.monotonic() - t, 6)
     run["invalid"] = invalid
     run["valid"] = not invalid
     gate_ok = all(g.get("verdict") in ("PASS", "INVALID") for g in run["gates"].values() if isinstance(g, dict) and "verdict" in g)
     run["kbResult"] = kb_verdict(args.kb, arm, run["gates"]) if args.kb and not args.precheck else None
     lifecycle_ok = all(c["ok"] for c in run["checks"] if c["enforced"])
     run["passed"] = run["valid"] and lifecycle_ok and (run["kbResult"]["caught"] if run["kbResult"] else gate_ok)
-    timing["total"] = round(time.monotonic() - take_started, 2)
+    if arm == "placement" and args.tier == "dev":
+        run["devPassed"] = run["passed"]
+        run["passed"] = False
     dest = out_dir / "runs" / f"{arm}-{ts}.json"
-    dest.write_text(json.dumps(run, indent=1, default=str))
+    timing["total"] = round(time.monotonic() - take_started, 6)
+    payload = json.dumps(run, indent=1, default=str)
+    t = time.monotonic()
+    dest.write_text(payload)
+    timing["reportWrite"] = round(time.monotonic() - t, 6)
+    timing["bytes"] = {"runJson": len(payload)}
     print_run(run, dest)
     return run
 
@@ -3813,7 +4789,7 @@ def contract_problem(run: dict[str, Any]) -> str | None:
 
 
 def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: dict[str, Any] | None,
-              invalid: list[str]) -> dict[str, Any]:
+              invalid: list[str], *, pure_scores: dict[tuple[Any, ...], Any] | None = None) -> dict[str, Any]:
     problem = contract_problem(run)
     if problem:
         invalid.append(problem)
@@ -3855,7 +4831,11 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
             invalid.append(gates["DX-2"]["invalid"])
         return gates
     if arm == "placement":
-        return placement_gates(run, args.decision)
+        gates = placement_gates(
+            run, args.decision, profile=placement_profile(args.tier, args.dev_profile), pure_scores=pure_scores)
+        if gates["CEF-placement"]["invalid"]:
+            invalid.append(gates["CEF-placement"]["invalid"])
+        return gates
     if args.precheck:
         gates = precheck_gates(run, args.fixture)
         if gates["precheck"]["invalid"]:
@@ -3867,14 +4847,34 @@ def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: di
 def timing_summary(run: dict[str, Any]) -> dict[str, Any]:
     timing = run.get("timingS") or {}
     sessions = {s.get("session"): s.get("timingS") or {} for s in run.get("sessions") or []}
-    return {"arm": run.get("arm"), "take": run.get("take"), "launch": timing.get("launch"),
-            "script": round(sum(t.get("script") or 0 for t in sessions.values()), 2),
-            "quit": timing.get("quit"), "decode": round(sum(t.get("decode") or 0 for t in sessions.values()), 2),
-            "total": timing.get("total"), "sessions": sessions}
+
+    def total_of(value: Any, key: str) -> float:
+        if isinstance(value, dict):
+            return float(value.get(key) or 0) + sum(total_of(child, key) for name, child in value.items() if name != key)
+        if isinstance(value, list):
+            return sum(total_of(child, key) for child in value)
+        return 0.0
+
+    detail_keys = ("script", "decode", "recordingAnalysis", "framemd5", "collectionCopy",
+                   "retirement", "pngDecode", "classification", "classifierControls", "pixelScoring", "subprocessCpu")
+    detail = {key: round(sum(total_of(value, key) for value in sessions.values()) + total_of(timing, key), 6)
+              for key in detail_keys}
+    detail["preparationNested"] = round(
+        sum(total_of(value, "preparation") for value in sessions.values()) + total_of(timing, "preparation"), 6)
+    phases = {key: timing.get(key) for key in
+              ("preparation", "launch", "acquisition", "quit", "finalization", "scoring", "reportWrite", "total")}
+    measured = sum(float(phases.get(key) or 0) for key in
+                   ("preparation", "launch", "acquisition", "quit", "finalization", "scoring", "reportWrite"))
+    exclusive = None if phases["total"] is None else round(max(0.0, float(phases["total"]) - measured), 6)
+    return {"arm": run.get("arm"), "take": run.get("take"), **phases, **detail,
+            "obsRelease": phases["quit"], "exclusiveUnattributed": exclusive,
+            "bytes": timing.get("bytes") or {}, "sessions": sessions}
 
 
 def print_run(run: dict[str, Any], dest: Path) -> None:
-    verdict = f"INVALID ({'; '.join(run['invalid'])})" if not run["valid"] else ("PASS" if run["passed"] else "FAIL")
+    verdict = (f"INVALID ({'; '.join(run['invalid'])})" if not run["valid"] else
+               "DEV — NOT A QUALIFICATION PASS" if run.get("devPassed") else
+               "PASS" if run["passed"] else "FAIL")
     print(f"[{run['arm']} rate {run['rate']} take {run['take']}] {verdict}  ready {run.get('readyS')} s  -> {dest}", flush=True)
     for session in run["sessions"]:
         for name, stats in ((session.get("decode") or {}).get("phases") or {}).items():
@@ -3975,103 +4975,197 @@ def score_mmo(root: Path) -> int:
 
 def score_placement_runs(root: Path) -> int | None:
     parent_paths = sorted(set(root.glob("**/runs/*/record.json")))
-    parent_paths += [p for p in sorted((root / "runs").glob("*.json")) if p not in parent_paths]
-    paths = []
-    for path in parent_paths:
-        try:
-            record = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            paths.append(path)
-            continue
-        attempts = record.get("captureAttempts")
-        if not isinstance(attempts, list):
-            paths.append(path)
-            continue
-        for index, attempt in enumerate(attempts, 1):
-            relative = attempt.get("record") if isinstance(attempt, dict) else None
-            paths.append(path.parent / relative if isinstance(relative, str)
-                         else path.parent / f"attempt-{index}" / "record.json")
-    control_records = []
-    for path in paths:
-        try:
-            control = json.loads(path.read_text()).get("placementControl")
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(control, dict) and control.get("session") in PLACEMENT_CONTROL_SESSIONS:
-            control_records.append({"session": control["session"], "runDir": str(path.parent)})
-    offline_probe_controls = (placement_control_rows(control_records)["probe"]
-                              if {record["session"] for record in control_records} == set(PLACEMENT_CONTROL_SESSIONS)
-                              else None)
-    results = []
-    control_names = set()
-    for path in paths:
-        try:
-            record = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        control = record.get("placementControl")
-        if isinstance(control, dict):
-            rescored = score_placement_control(control, path.parent)
-            if control.get("session") in PLACEMENT_CONTROL_SESSIONS:
-                control_names.add(control["session"])
-            results.append({"run": str(path.relative_to(root)), "backend": "control", "engine": None,
-                            "launch": None, "probeIdentity": None, "overall": rescored["verdict"],
-                            "gates": {"placement-control": rescored}, "problems": rescored["problems"]})
-            print(f"[placement {path.parent.name}] {rescored['verdict']}", flush=True)
-            continue
-        calibration = record.get("placementCalibration")
-        if not isinstance(calibration, dict):
-            if record.get("arm") in (*PLACEMENT_ARMS, "probe-chrome-gpu", "probe-chrome-software"):
-                problem = "placementCalibration missing"
-                results.append({"run": str(path.relative_to(root)), "backend": None, "engine": None,
-                                "launch": record.get("launch"), "probeIdentity": None, "overall": "INCONCLUSIVE",
-                                "gates": {"placement-evidence": calibration_gate("INCONCLUSIVE", [problem])},
-                                "problems": [problem]})
-                print(f"[placement {path.parent.name}] INCONCLUSIVE", flush=True)
-            continue
-        run_dir = path.parent
-        rescored = score_placement_calibration(
-            calibration, run_dir, live_probe_controls=offline_probe_controls if calibration.get("backend") == "cef" else None)
-        results.append({"run": str(path.relative_to(root)), "backend": calibration.get("backend"),
-                        "engine": calibration.get("engine"), "launch": record.get("launch"),
-                        "probeIdentity": (calibration.get("input") or {}).get("identity"), **rescored})
-        print(f"[placement {path.parent.name}] {rescored['overall']}", flush=True)
-        for name, result in rescored["gates"].items():
-            print(f"    {name}: {result['verdict']} {result['problems'] or ''}", flush=True)
-    if not results:
+    summary_paths = sorted((root / "runs").glob("placement-*.json"))
+    if not parent_paths and not summary_paths:
         return None
-    if any(row["backend"] == "cef" for row in results) and control_names != set(PLACEMENT_CONTROL_SESSIONS):
-        missing = sorted(set(PLACEMENT_CONTROL_SESSIONS) - control_names)
-        unexpected = sorted(control_names - set(PLACEMENT_CONTROL_SESSIONS))
-        problem = f"placement control records incomplete: missing={missing}, unexpected={unexpected}"
-        results.append({"run": "controls", "backend": "control", "engine": None, "launch": None,
-                        "probeIdentity": None, "overall": "INCONCLUSIVE",
-                        "gates": {"placement-control": calibration_gate("INCONCLUSIVE", [problem])},
-                        "problems": [problem]})
-    cef_launches = {json.dumps(row["engine"], sort_keys=True) for row in results
-                    if row["backend"] == "cef" and isinstance(row.get("engine"), dict)}
-    chrome_launches = {
-        gpu: {str((row.get("probeIdentity") or {}).get("target_id")) for row in results
-              if row["backend"] == "chrome-harness" and (row.get("launch") or {}).get("gpu") is gpu
-              and (row.get("probeIdentity") or {}).get("target_id")}
-        for gpu in (True, False)
-    }
-    for row in results:
-        problem = None
-        gate = None
-        if row["backend"] == "cef" and len(cef_launches) < 2:
-            problem, gate = f"only {len(cef_launches)} fresh CEF launch(es); need 2", "probe-cef"
-        elif row["backend"] == "chrome-harness":
-            gpu = (row.get("launch") or {}).get("gpu")
-            if gpu not in chrome_launches or len(chrome_launches[gpu]) < 2:
-                problem, gate = f"only {len(chrome_launches.get(gpu, set()))} fresh Chrome launch(es) for gpu={gpu}; need 2", "probe-chrome-harness"
-        if problem and gate:
-            row["gates"][gate] = calibration_gate("INCONCLUSIVE", [problem])
-            row["overall"] = "INCONCLUSIVE" if row["overall"] == "PASS" else row["overall"]
+
+    summaries = []
+    for path in summary_paths:
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            value = {"arm": "placement", "ts": path.stem.removeprefix("placement-"), "fatal": "summary unreadable"}
+        value["_path"] = path
+        summaries.append(value)
+
+    groups: dict[str, dict[str, Any]] = {}
+
+    def fallback_group(path: Path) -> str:
+        runs_parent = next((parent.parent for parent in path.parents if parent.name == "runs"), path.parent.parent)
+        return runs_parent.name or str(runs_parent)
+
+    for parent_path in parent_paths:
+        try:
+            parent = json.loads(parent_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            parent = None
+        acquisition = parent.get("acquisition") if isinstance(parent, dict) else None
+        key = acquisition.get("launchId") if isinstance(acquisition, dict) else None
+        key = str(key or fallback_group(parent_path))
+        session_name = parent_path.parent.name
+        paths = [parent_path]
+        attempts = parent.get("captureAttempts") if isinstance(parent, dict) else None
+        if isinstance(attempts, list):
+            paths = []
+            for index, attempt in enumerate(attempts, 1):
+                relative = attempt.get("record") if isinstance(attempt, dict) else None
+                paths.append(parent_path.parent / relative if isinstance(relative, str)
+                             else parent_path.parent / f"attempt-{index}" / "record.json")
+        group = groups.setdefault(key, {"sessions": {}, "records": [], "metadata": None})
+        group["sessions"][session_name] = {"session": session_name, "runDir": str(parent_path.parent),
+                                            **({"attempts": [{"attempt": index, "runDir": str(path.parent)}
+                                                              for index, path in enumerate(paths, 1)]}
+                                               if isinstance(attempts, list) else {})}
+        for path in paths:
+            group["records"].append((session_name, path))
+
+    for summary in summaries:
+        key = str(summary.get("placementLaunchId") or f"placement-{summary.get('ts')}")
+        group = groups.get(key)
+        if group is None:
+            dirname = f"placement-{summary.get('ts')}"
+            group = groups.get(dirname)
+        if group is None:
+            group = groups.setdefault(key, {"sessions": {}, "records": [], "metadata": None})
+        group["metadata"] = summary
+
+    results = []
+    launch_records = []
+    dev_renderer = []
+    any_placement_record = False
+    product_scores: dict[Path, dict[str, Any]] = {}
+    pure_scores: dict[tuple[Any, ...], Any] = {}
+    for key, group in sorted(groups.items()):
+        records = []
+        scopes = []
+        acquisitions = []
+        for session_name, path in group["records"]:
+            any_placement_record = True
+            try:
+                record = json.loads(path.read_text())
+                error = None
+            except (OSError, json.JSONDecodeError) as exc:
+                record = {}
+                error = f"record unreadable: {type(exc).__name__}: {exc}"
+            records.append((session_name, path, record, error))
+            scopes.append((record.get("tier"), record.get("devProfile")))
+            if isinstance(record.get("acquisition"), dict):
+                acquisitions.append(record["acquisition"])
+        metadata_record = group.get("metadata") if isinstance(group.get("metadata"), dict) else None
+        metadata = metadata_record or {}
+        try:
+            tier, dev_profile, profile, _legacy = placement_record_scope(metadata, scopes)
+        except ValueError:
+            tier = "dev" if any(scope[0] == "dev" for scope in scopes) else (metadata.get("tier") or "full")
+            dev_profile = metadata.get("devProfile")
+            profile = dissolve_probe.CEF_PLACEMENT
+        controls = [{"session": name, "runDir": session["runDir"]} for name, session in group["sessions"].items()
+                    if name in PLACEMENT_CONTROL_SESSIONS]
+        probe_controls = (placement_control_rows(controls)["probe"]
+                          if {row["session"] for row in controls} == set(PLACEMENT_CONTROL_SESSIONS) else None)
+        evidence_records = [(name, path, record) for name, path, record, error in records
+                            if name in profile.arms and error is None]
+        evidence_mode, mode_problems, anchor_problems, anchor_engines, _anchor_scores = placement_launch_evidence(
+            evidence_records, profile, live_probe_controls=probe_controls,
+            product_scores=product_scores, pure_scores=pure_scores)
+        product_ok = True
+        for session_name, path, record, error in records:
+            if error:
+                rescored = {"overall": "INCONCLUSIVE", "gates": {
+                    "placement-evidence": calibration_gate("INCONCLUSIVE", [error])}, "problems": [error]}
+                backend = None
+            elif isinstance(record.get("placementControl"), dict):
+                control = score_placement_control(record["placementControl"], path.parent)
+                rescored = {"overall": control["verdict"], "gates": {"placement-control": control},
+                            "problems": control["problems"]}
+                backend = "control"
+            elif session_name in profile.arms and evidence_mode == "mixed":
+                rescored = {"overall": "INCONCLUSIVE", "gates": {
+                    "placement-evidence": calibration_gate("INCONCLUSIVE", mode_problems)},
+                    "problems": mode_problems}
+                backend = None
+            elif session_name in profile.arms and evidence_mode == "anchors+injection" and session_name not in PLACEMENT_ANCHORS:
+                rescored = score_placement_injection(
+                    record.get("placementInjection"), record, dissolve_probe.ARMS[session_name], profile,
+                    anchor_problems, anchor_engines)
+                backend = "harness-injection"
+            elif isinstance(record.get("placementCalibration"), dict):
+                calibration = record["placementCalibration"]
+                rescored = product_scores.get(path)
+                if rescored is None:
+                    rescored = score_placement_calibration(
+                        calibration, path.parent,
+                        live_probe_controls=probe_controls if calibration.get("backend") == "cef" else None,
+                        pure_scores=pure_scores)
+                backend = calibration.get("backend")
+            else:
+                problem = "placement evidence missing"
+                rescored = {"overall": "INCONCLUSIVE", "gates": {
+                    "placement-evidence": calibration_gate("INCONCLUSIVE", [problem])}, "problems": [problem]}
+                backend = None
+            product_ok &= rescored["overall"] == "PASS"
+            product_scores[path] = rescored
+            results.append({"run": str(path.relative_to(root)), "launchId": key, "session": session_name,
+                            "tier": tier, **({"devProfile": dev_profile} if tier == "dev" else {}),
+                            "backend": backend, **rescored})
+            print(f"[placement {key}/{session_name}] {rescored['overall']}", flush=True)
+
+        sessions = list(group["sessions"].values())
+        opaque = next((row for row in records if row[0] == "opaque-off" and not row[3]), None)
+        if opaque is not None:
+            try:
+                summary = opaque_off_calibration(opaque[2], dissolve_probe.RunImages(opaque[1].parent))
+                sessions_by_name = {session["session"]: session for session in sessions}
+                sessions_by_name["opaque-off"]["calibration"] = summary
+            except (OSError, KeyError, TypeError, ValueError):
+                pass
+        metadata_valid = (metadata_record is not None and metadata.get("valid") is True
+                          and not metadata.get("fatal")
+                          and all(row.get("ok") for row in metadata.get("checks") or [] if row.get("enforced")))
+        recorded_passed = metadata.get("passed") is True
+        live = {
+            "arm": "placement", "ts": metadata.get("ts") or key, "placementLaunchId": key,
+            "rate": metadata.get("rate") or next((row.get("rate") for row in acquisitions if row.get("rate") in MMO_RATES), None),
+            "take": metadata.get("take") or next((row.get("take") for row in acquisitions if isinstance(row.get("take"), int)), None),
+            "tier": tier, **({"devProfile": dev_profile} if tier == "dev" else {}), "sessions": sessions,
+            "valid": product_ok and metadata_valid,
+            "passed": product_ok and metadata_valid and (recorded_passed if tier == "full" else True),
+        }
+        if tier == "dev":
+            gates = placement_gates(live, metadata.get("decision"), profile=profile, write_updates=False,
+                                    product_scores=product_scores, pure_scores=pure_scores)
+            renderer_gate = gates["CEF-placement"]
+            renderer_verdict = ("INCONCLUSIVE" if renderer_gate["verdict"] == "INVALID"
+                                else renderer_gate["verdict"])
+            renderer_ok = renderer_verdict == "PASS"
+            live["valid"] &= renderer_ok
+            live["devPassed"] = product_ok and metadata_valid and renderer_ok
+            live["passed"] = False
+            dev_renderer.append({"launchId": key, "profile": profile.name,
+                                 "recordedDevPassed": metadata.get("devPassed"),
+                                 "verdict": renderer_verdict,
+                                 "gate": renderer_gate, "placementVerdict": gates.get("placementVerdict")})
+        launch_records.append(placement_launch_record(live))
+
+    if not any_placement_record and not summaries:
+        return None
+    launch_set = placement_launch_set_check(launch_records)
+    bundle_dev = launch_set["tier"] == "dev"
+    product_passed = bool(results) and all(row["overall"] == "PASS" for row in results)
+    dev_pixel_passed = all(row["verdict"] == "PASS" for row in dev_renderer)
+    passed = product_passed and (launch_set["devPassed"] and dev_pixel_passed if bundle_dev else launch_set["qualified"])
+    report = {"scope": "DEV renderer pixel rescore" if bundle_dev else "qualification product/control rescore",
+              "tier": launch_set["tier"], "devPassed": passed if bundle_dev else False,
+              "qualified": passed if not bundle_dev else False, "productControlPassed": product_passed,
+              "launchSet": launch_set,
+              "results": results, "renderer": dev_renderer}
     dest = root / f"placement-rescore-{stamp()}.json"
-    dest.write_text(json.dumps(results, indent=1))
+    dest.write_text(json.dumps(report, indent=1))
     print(f"-> {dest}", flush=True)
-    return 0 if all(row["overall"] == "PASS" for row in results) else 1
+    if bundle_dev and passed:
+        print("DEV — NOT A QUALIFICATION PASS", flush=True)
+        return 10
+    return 0 if passed else 1
 
 
 def _recording_framemd5(path: Path, run_dir: Path) -> dict[str, Any]:
@@ -4084,7 +5178,10 @@ def _recording_framemd5(path: Path, run_dir: Path) -> dict[str, Any]:
     return dissolve_probe.placement_file_ref(destination, run_dir)
 
 
-def _retire_passing_recordings(calibration: dict[str, Any], run_dir: Path) -> None:
+def _retire_passing_recordings(calibration: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    started = time.monotonic()
+    child_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    framemd5_s = 0.0
     integrity = calibration.get("integrity") or {}
     telemetry_ref = integrity.get("telemetry")
     telemetry = _read_ref_json(telemetry_ref, run_dir)
@@ -4103,14 +5200,32 @@ def _retire_passing_recordings(calibration: dict[str, Any], run_dir: Path) -> No
         dissolve_probe._placement_ref_bytes(ref, run_dir, load=False)
         path = run_dir / ref["path"]
         if ref["path"] not in by_path:
+            size = path.stat().st_size
+            framemd5_started = time.monotonic()
             framemd5 = _recording_framemd5(path, run_dir)
+            framemd5_s += time.monotonic() - framemd5_started
             subprocess.run(["/usr/bin/trash", str(path)], capture_output=True, text=True, check=True, timeout=30)
             by_path[ref["path"]] = framemd5
-            retired.append({"recording": ref["path"], "sha256": ref["sha256"], "framemd5": framemd5})
+            retired.append({"recording": ref["path"], "sha256": ref["sha256"], "framemd5": framemd5, "bytes": size})
         owner["framemd5"] = by_path[ref["path"]]
         ref["retained"] = False
+    child_after = resource.getrusage(resource.RUSAGE_CHILDREN)
     telemetry["retention"] = {"verdict": "PASS", "recordings": retired}
+    retirement_s = round(time.monotonic() - started, 6)
+    detail = {
+        "retirement": retirement_s,
+        "framemd5": round(framemd5_s, 6),
+        "subprocessCpu": round((child_after.ru_utime + child_after.ru_stime)
+                                - (child_before.ru_utime + child_before.ru_stime), 6),
+    }
+    telemetry.setdefault("timingS", {}).update(
+        retirement=retirement_s,
+        framemd5=detail["framemd5"], subprocessCpu=detail["subprocessCpu"],
+    )
+    detail["bytes"] = sum(row["bytes"] for row in retired)
+    telemetry.setdefault("bytes", {})["retiredRecordings"] = detail["bytes"]
     integrity["telemetry"] = write_placement_json(run_dir, "telemetry", telemetry)
+    return detail
 
 
 def placement_session_run_dirs(session: dict[str, Any]) -> list[Path]:
@@ -4121,56 +5236,112 @@ def placement_session_run_dirs(session: dict[str, Any]) -> list[Path]:
     return [Path(session["runDir"])] if isinstance(session.get("runDir"), str) else []
 
 
-def finalize_placement_persistence(sessions: list[dict[str, Any]], collection_path: Path) -> None:
-    for session in sessions:
-        for run_dir in placement_session_run_dirs(session):
-            _finalize_placement_persistence(run_dir, collection_path)
+def _quit_evidence(collection_path: Path) -> dict[str, Any]:
+    stat = collection_path.stat()
+    collection = collection_path.read_bytes()
+    value = json.loads(collection)
+    if not isinstance(value, dict):
+        raise ValueError("OBS scene collection is not a JSON object")
+    backups = []
+    for source in sorted(collection_path.parent.glob("AK.json.bak*")):
+        if source.is_file():
+            data = source.read_bytes()
+            backups.append({"name": source.name, "digest": hashlib.sha256(data).hexdigest(), "data": data})
+    return {
+        "quit": {"data": collection, "digest": hashlib.sha256(collection).hexdigest(),
+                 "mtimeNs": stat.st_mtime_ns, "savedByObs": True},
+        "backups": backups,
+    }
 
 
-def _finalize_placement_persistence(run_dir: Path, collection_path: Path) -> None:
+def finalize_placement_persistence(
+        sessions: list[dict[str, Any]], collection_path: Path, *,
+        pure_scores: dict[tuple[Any, ...], Any] | None = None,
+        ) -> dict[str, Any]:
+    rows = []
+    run_dirs = [run_dir for session in sessions for run_dir in placement_session_run_dirs(session)]
+    if not run_dirs:
+        return {"records": rows, "bytes": 0}
+    try:
+        evidence = _quit_evidence(collection_path)
+    except (OSError, ValueError, managed_obs.ManagedObsError) as exc:
+        return {"records": rows, "bytes": 0,
+                "error": f"authoritative quit evidence unavailable: {type(exc).__name__}: {exc}"}
+    for run_dir in run_dirs:
+        detail = _finalize_placement_persistence(run_dir, evidence, pure_scores=pure_scores)
+        if detail:
+            rows.append(detail)
+    return {"records": rows, "bytes": sum(row.get("bytes", 0) for row in rows),
+            "quitDigests": {"collection": evidence["quit"]["digest"],
+                            "backups": [row["digest"] for row in evidence["backups"]]}}
+
+
+def _finalize_placement_persistence(
+        run_dir: Path, evidence: dict[str, Any], *,
+        pure_scores: dict[tuple[Any, ...], Any] | None = None,
+        ) -> dict[str, Any] | None:
+    started = time.monotonic()
     record_path = run_dir / "record.json"
-    if not record_path.is_file() or not collection_path.is_file():
-        return
+    if not record_path.is_file():
+        return None
     record = json.loads(record_path.read_text())
     calibration = record.get("placementCalibration")
     persistence = calibration.get("persistence") if isinstance(calibration, dict) else None
     if not isinstance(persistence, dict):
-        return
-    _quit, persistence["quit"] = capture_collection(collection_path, run_dir, "quit", saved_by_obs=True)
+        return None
+    copying_started = time.monotonic()
+    quit_row = evidence["quit"]
+    quit_path = run_dir / "placement" / "collections" / "quit.json"
+    quit_path.parent.mkdir(parents=True, exist_ok=True)
+    quit_path.write_bytes(quit_row["data"])
+    persistence["quit"] = dissolve_probe.placement_file_ref(
+        quit_path, run_dir, mtime_ns=quit_row["mtimeNs"], saved_by_obs=quit_row["savedByObs"])
     backups = []
-    for index, source in enumerate(sorted(collection_path.parent.glob("AK.json.bak*"))):
-        if not source.is_file():
-            continue
-        dest = run_dir / "placement" / "collections" / f"backup-{index}{source.suffix}"
+    for row in evidence["backups"]:
+        dest = run_dir / "placement" / "collections" / row["name"]
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, dest)
+        dest.write_bytes(row["data"])
         backups.append(dissolve_probe.placement_file_ref(dest, run_dir))
     persistence["backup"] = backups
-    rescored = score_placement_calibration(calibration, run_dir)
+    collection_copy_s = time.monotonic() - copying_started
+    rescored = score_placement_calibration(calibration, run_dir, pure_scores=pure_scores)
+    retirement = {}
     if rescored["overall"] == "PASS":
-        _retire_passing_recordings(calibration, run_dir)
-        rescored = score_placement_calibration(calibration, run_dir)
+        retirement = _retire_passing_recordings(calibration, run_dir)
+        rescored = score_placement_calibration(calibration, run_dir, pure_scores=pure_scores)
     persistence["checks"] = rescored.get("persistenceChecks", [])
     calibration["gates"] = rescored["gates"]
+    detail = {"finalization": round(time.monotonic() - started, 6), "collectionCopy": round(collection_copy_s, 6),
+              "framemd5": retirement.get("framemd5", 0.0), "retirement": retirement.get("retirement", 0.0),
+              "subprocessCpu": retirement.get("subprocessCpu", 0.0), "bytes": retirement.get("bytes", 0)}
+    record.setdefault("timingS", {})["finalization"] = detail
     record_path.write_text(json.dumps(record))
+    return detail
 
 
-def placement_disk_preflight(out_dir: Path, home: Path, takes: int) -> dict[str, int]:
-    recordings = (len(PLACEMENT_ARMS) + 2) * len(MMO_RATES) * takes * 2
-    retained = 0
+def placement_disk_preflight(out_dir: Path, home: Path, takes: int, *,
+                             profile: dissolve_probe.Profile = dissolve_probe.CEF_PLACEMENT,
+                             rates: tuple[int, ...] = MMO_RATES) -> dict[str, Any]:
+    attempts = sum(3 if dissolve_probe.ARMS[name].counter_strip == "distinct" else 1
+                   for name in PLACEMENT_ANCHORS if name in profile.arms)
+    recordings = attempts * len(rates) * takes * 2
+    non_pass = recordings * PLACEMENT_RECORDING_ESTIMATE_BYTES
     working = 2 * PLACEMENT_RECORDING_ESTIMATE_BYTES
     out_free = shutil.disk_usage(out_dir).free
     home.parent.mkdir(parents=True, exist_ok=True)
     home_free = shutil.disk_usage(home.parent).free
     same_device = out_dir.stat().st_dev == home.parent.stat().st_dev
-    required_out = retained + working
+    required_out = working
     if out_free < required_out or (not same_device and home_free < working):
         raise RuntimeError(
-            f"placement needs about {retained / 1024 ** 3:.1f} GiB retained plus {working / 1024 ** 3:.1f} GiB working; "
+            f"placement needs about {working / 1024 ** 3:.1f} GiB working; "
+            f"a fully retained non-PASS run totals about {non_pass / 1024 ** 3:.1f} GiB; "
             f"free is {out_free / 1024 ** 3:.1f} GiB at {out_dir} and {home_free / 1024 ** 3:.1f} GiB at {home.parent}"
         )
-    detail = {"recordings": recordings, "retainedBytes": retained, "workingBytes": working,
-              "nonPassRetentionBytesPerSession": working,
+    detail = {"profile": profile.name, "rates": list(rates), "takes": takes,
+              "acquisitionPath": "anchors+injection", "recordings": recordings,
+              "nonPassRetentionBytes": non_pass, "workingBytes": working, "requiredOutBytes": required_out,
+              "nonPassRetentionBytesPerSession": 2 * PLACEMENT_RECORDING_ESTIMATE_BYTES,
               "outFreeBytes": out_free, "homeFreeBytes": home_free}
     print("placement disk preflight", json.dumps(detail), flush=True)
     return detail
@@ -4180,8 +5351,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Live qualification of the managed OBS (launches OBS; one OBS at a time).")
     parser.add_argument("--arm", choices=("2x", "positive", "both", "g2", "failsafe", "soak", "mmo", "mmo-cef", "dissolve", "placement"),
                         default="both")
-    parser.add_argument("--rate", type=int, choices=sorted(managed_obs.RATES), default=25, help=f"ignored for mmo ({MMO_RATES})")
-    parser.add_argument("--takes", type=int, default=2, help="ignored (1) for failsafe, soak, mmo, mmo-cef and dissolve")
+    parser.add_argument("--rate", type=int, choices=sorted(managed_obs.RATES),
+                        help=f"placement DEV rate (default 25); full placement always runs {MMO_RATES}; default 25 otherwise; ignored for mmo")
+    parser.add_argument("--takes", type=int,
+                        help="placement pairs (default 1); default 2 otherwise; ignored (1) for failsafe, soak, mmo, mmo-cef and dissolve")
+    parser.add_argument("--tier", choices=("dev", "full"), default="full",
+                        help="placement acquisition tier (default full; DEV never qualifies and exits 10 on success)")
+    parser.add_argument("--dev-profile", choices=sorted(PLACEMENT_DEV_PROFILES),
+                        help="placement DEV subset (default renderer; renderer or harness)")
     parser.add_argument("--launch", choices=("hidden", "shown", "projector"), default="hidden", help="shown = hidden launch, then Show OBS once ready; projector = hidden launch + a windowed program projector (eyeball)")
     parser.add_argument("--kb", choices=sorted(KB_SHAS), help="known-bad control: frozen|oldbytes (module splice), latelost (g2)")
     parser.add_argument("--fixture", type=Path, help=f"soak fixture root (default {SOAK_FIXTURE}); other arms: {FIXTURE} (default) or "
@@ -4198,6 +5375,15 @@ def main(argv: list[str] | None = None) -> int:
         root = args.score.expanduser().resolve()
         placement_status = score_placement_runs(root)
         return placement_status if placement_status is not None else score_mmo(root)
+    if args.tier == "dev" and args.arm != "placement":
+        parser.error("--tier dev applies to --arm placement only.")
+    if args.dev_profile is not None and not (args.arm == "placement" and args.tier == "dev"):
+        parser.error("--dev-profile requires --arm placement --tier dev.")
+    args.dev_profile = (args.dev_profile or "renderer") if args.arm == "placement" and args.tier == "dev" else None
+    if args.arm == "placement" and args.tier == "full" and args.rate is not None:
+        parser.error("--rate cannot be supplied for full placement; full always runs both 25 and 30 fps.")
+    if args.takes is not None and args.takes < 1:
+        parser.error("--takes must be >= 1.")
     if args.decision is not None and args.arm not in ("dissolve", "placement"):
         parser.error("--decision applies to --arm dissolve or placement only.")
     if args.arm in ("dissolve", "placement") and args.fixture is not None:
@@ -4249,28 +5435,56 @@ def main(argv: list[str] | None = None) -> int:
             print("MO-2 ROI_top", [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())], int(top.sum()), "px", flush=True)
     (args.out / "runs").mkdir(parents=True, exist_ok=True)
     arms = ("2x", "positive") if args.arm == "both" else (args.arm,)
-    takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef", "dissolve") else args.takes
-    rates = MMO_RATES if args.arm in ("mmo", "placement") else (args.rate,)
+    default_takes = 1 if args.arm == "placement" else 2
+    requested_takes = args.takes if args.takes is not None else default_takes
+    takes = 1 if args.arm in ("failsafe", "soak", "mmo", "mmo-cef", "dissolve") else requested_takes
+    selected_rate = args.rate or 25
+    args.rate = selected_rate
+    rates = (MMO_RATES if args.arm == "mmo" or (args.arm == "placement" and args.tier == "full") else
+             (selected_rate,))
     if args.arm == "placement":
         try:
-            placement_disk_preflight(args.out, home, takes)
+            placement_disk_preflight(args.out, home, takes, profile=placement_profile(args.tier, args.dev_profile),
+                                     rates=rates)
         except RuntimeError as exc:
             parser.error(str(exc))
-    awake = subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
     runs: list[dict[str, Any]] = []
+    preparation_cache = args.out / "prep-cache" if args.arm == "placement" else None
+    prep_cache_cleanup = None
     try:
-        for take in range(1, takes + 1):
-            for arm, rate in itertools.product(arms, rates):
-                if obs_running():
-                    print("An OBS is still running after the previous take; stopping.", flush=True)
-                    break
-                runs.append(run_take(arm, rate, take, home, args.out, args, armed))
+        if preparation_cache is not None:
+            if preparation_cache.exists():
+                subprocess.run(["/usr/bin/trash", str(preparation_cache)], check=True)
+            dissolve_probe.set_preparation_cache(preparation_cache)
+        awake = subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
+        try:
+            for take in range(1, takes + 1):
+                for arm, rate in itertools.product(arms, rates):
+                    if obs_running():
+                        print("An OBS is still running after the previous take; stopping.", flush=True)
+                        break
+                    runs.append(run_take(arm, rate, take, home, args.out, args, armed))
+        finally:
+            awake.terminate()
     finally:
-        awake.terminate()
-    summary: dict[str, Any] = {"rate": list(rates) if len(rates) > 1 else args.rate, "arms": list(arms), "takes": takes, "launch": args.launch, "kb": args.kb,
+        if preparation_cache is not None:
+            dissolve_probe.set_preparation_cache(None)
+            if preparation_cache.exists():
+                cleanup = subprocess.run(["/usr/bin/trash", str(preparation_cache)], capture_output=True, text=True)
+                if cleanup.returncode != 0:
+                    prep_cache_cleanup = {
+                        "returncode": cleanup.returncode,
+                        "stderr": cleanup.stderr.strip(),
+                    }
+                    print(f"WARNING prep-cache cleanup failed: {json.dumps(prep_cache_cleanup)}", flush=True)
+    summary: dict[str, Any] = {"rate": list(rates) if len(rates) > 1 else rates[0], "arms": list(arms), "takes": takes, "launch": args.launch, "kb": args.kb,
+                               **(placement_scope(args.tier, args.dev_profile) if args.arm == "placement" else {}),
                                "kbSplice": args.kb_splice, "limits": LIMITS,
+                               **({"prepCacheCleanup": prep_cache_cleanup} if prep_cache_cleanup is not None else {}),
                                "runs": [{"arm": r["arm"], "take": r["take"], "ts": r["ts"], "valid": r["valid"], "invalid": r["invalid"],
-                                         "passed": r["passed"], "nativeRepeat": native_repeat(r),
+                                         **({k: r[k] for k in ("tier", "devProfile") if k in r}),
+                                         "passed": r["passed"], **({"devPassed": r["devPassed"]} if "devPassed" in r else {}),
+                                         "nativeRepeat": native_repeat(r),
                                          "gates": {n: g["verdict"] for n, g in r["gates"].items() if isinstance(g, dict) and "verdict" in g}}
                                         for r in runs]}
     checks: list[dict[str, Any]] = []
@@ -4285,14 +5499,25 @@ def main(argv: list[str] | None = None) -> int:
     checks += cross_take(runs, armed) + mmo_summary(runs)
     summary["checks"] = checks
     summary["timingS"] = [timing_summary(r) for r in runs]
-    summary["passed"] = all(r["passed"] for r in runs) and all(c["ok"] for c in checks if c["enforced"])
+    base_passed = all((r.get("devPassed") if args.arm == "placement" and args.tier == "dev" else r["passed"])
+                      for r in runs) and all(c["ok"] for c in checks if c["enforced"])
+    launch_set = None
+    if args.arm == "placement":
+        launch_set = placement_launch_set_check([placement_launch_record(run) for run in runs])
+        checks.extend(launch_set["checks"])
+        summary["launchSet"] = launch_set
+        summary["devPassed"] = base_passed and launch_set["devPassed"]
+        summary["passed"] = base_passed and launch_set["qualified"]
+    else:
+        summary["passed"] = base_passed
     dest = args.out / "runs" / f"summary-{stamp()}.json"
     dest.write_text(json.dumps(summary, indent=1, default=str))
-    print(f"SUMMARY {'PASS' if summary['passed'] else 'FAIL'} -> {dest}", flush=True)
+    label = "PASS" if summary["passed"] else "DEV — NOT A QUALIFICATION PASS" if summary.get("devPassed") else "FAIL"
+    print(f"SUMMARY {label} -> {dest}", flush=True)
     for c in checks:
         print(f"    {'ok  ' if c['ok'] else 'FAIL'} {c['check']} = {c['value']}", flush=True)
     print("TIMING " + json.dumps([{k: v for k, v in t.items() if k != "sessions"} for t in summary["timingS"]]), flush=True)
-    return 0 if summary["passed"] else 1
+    return 0 if summary["passed"] else 10 if summary.get("devPassed") else 1
 
 
 if __name__ == "__main__":
