@@ -24,16 +24,16 @@ def _load_candidate(repo: Path):
     return module
 
 
-def _load_base(repo: Path) -> tuple[dict, str]:
+def _load_base(repo: Path, base: str) -> tuple[dict, str]:
     source = subprocess.run(
-        ["git", "show", "HEAD:tests/test_live_runtime.py"],
+        ["git", "show", f"{base}:tests/test_live_runtime.py"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
     ).stdout
     if "def _chain_opacity(parent, node: dict):\n    if parent is None:\n        return None\n    value = _node_opacity(node)" not in source:
-        raise RuntimeError("HEAD does not contain the expected pre-zero _chain_opacity mirror")
+        raise RuntimeError(f"{base} does not contain the expected pre-zero _chain_opacity mirror")
     namespace = {
         "__file__": str(repo / "tests/test_live_runtime.py"),
         "__name__": "base_live_runtime_tests",
@@ -50,13 +50,14 @@ def _export_jsons(root: Path) -> list[Path]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, required=True)
+    parser.add_argument("--base", required=True)
     parser.add_argument("--old-f2", type=Path, required=True)
     parser.add_argument("--current-f2", type=Path, required=True)
     args = parser.parse_args()
     repo = args.repo.resolve()
     sys.path[:0] = [str(repo), str(repo / "src")]
     candidate = _load_candidate(repo)
-    base, base_sha = _load_base(repo)
+    base, base_sha = _load_base(repo, args.base)
 
     source_paths = {
         "main_output_fixtures": _export_jsons(candidate.MAIN_OUTPUT / "fixtures"),
@@ -115,7 +116,7 @@ def main() -> int:
     status = "PASS" if actual == EXPECTED and changes else "INCONCLUSIVE" if not changes else "FAIL"
     report = {
         "status": status,
-        "base": {"revision": "HEAD", "test_source_sha256": base_sha},
+        "base": {"revision": subprocess.run(["git", "rev-parse", f"{args.base}^{{commit}}"], cwd=args.repo, check=True, capture_output=True, text=True).stdout.strip(), "test_source_sha256": base_sha},
         "candidate_test_source_sha256": hashlib.sha256((repo / "tests/test_live_runtime.py").read_bytes()).hexdigest(),
         "sources": source_counts,
         "distinct_effects": effect_count,

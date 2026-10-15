@@ -1,9 +1,9 @@
 {
   "base": {
-    "revision": "HEAD",
+    "revision": "e476ea74542b3f1e15d4328248f63d57cde60eb7",
     "test_source_sha256": "86e36607e81421edfd4aa608532c01d5d5528f2538008190bcceaf18cd71030f"
   },
-  "candidate_test_source_sha256": "a3e38471d9fd13071e628a0575cbfbe7763f53b5fb12105cac77d219b6a72769",
+  "candidate_test_source_sha256": "418d9e8464c898e95135c0be9cf1cfadb73726199834cb94a33fb47139a0e0c1",
   "changes": [
     {
       "base": [

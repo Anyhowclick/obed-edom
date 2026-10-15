@@ -310,7 +310,7 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # Line Draw (R14-R20) merged with CEF frac placement: main had aa0ae4bb... / 134114e0... and rendering 416613aa... /
 # 7d9eb308...; the placement branch had 63c328b2... / 7b0af749... and rendering a117b3ee... / 2432c819....
 # The frac boundary repair replaces True e57025c3... / bff8f5ae...; False and rendering remain unchanged. Absorbing a
-# proved ancestor zero replaces the prior True/rendering values below.
+# proved ancestor zero replaces True d3ddd770... / 1036a8e2... and rendering 8202717a... / c0faaa3c...; False unchanged.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
         True: "0c94dd74b4e8b4f199971cae3ccf95581136655c173281bc293124f33d2500fb",
@@ -1037,6 +1037,7 @@ def test_mm_opacity_real_patched_methods_draw_the_authored_opacity_on_p2_1_to_2(
     assert [[new for _, new in row] for row in _mirror(effect)] == patched
     assert [[old for old, _ in row] for row in _mirror(effect)] == stock
 
+    # Local slots 0/1/2 are original F2 slots 7/8/10.
     f2_effect = json.loads(F2_SLIDE3_MM_SUBTREE.read_text())
     f2_stock = [[1, 1, 0], [1, 1, 0.5], [1, 1, 1]]
     f2_patched = [[0, 0, 0], [0, 0, 0.5], [0, 0, 1]]
@@ -1471,10 +1472,6 @@ def test_mm_opacity_census_mirror_changes_only_expected_slots_in_committed_fixtu
     assert _effect_fingerprint(json.loads(EFFECT_7_TO_8.read_text())) == ALPHA_DSK_7_TO_8_FINGERPRINT
     f2_effect = json.loads(F2_SLIDE3_MM_SUBTREE.read_text())
     assert _effect_fingerprint(f2_effect) == F2_SLIDE3_MM_SUBTREE_FINGERPRINT
-    for row in _mirror(f2_effect):
-        # Local slots 0/1/2 are original F2 slots 7/8/10.
-        assert row[:2] == [(1, 0), (1, 0)]
-        assert row[2][0] == row[2][1]
     assert stock_changed == {
         (P2_1_TO_2_FINGERPRINT, 4),
         (ALPHA_DSK_7_TO_8_FINGERPRINT, 6),
