@@ -2749,18 +2749,20 @@ def score_continuity(
 
 def paint_start(
     samples: list[dict[str, Any]], element_id: Any, boundary_scene: float, window: dict[str, float], floor: float | None,
+    *, transition_scene: float | None = None,
 ) -> float:
     """The per-frame window's start: back to the first settled row of scene `boundary_scene - 1`'s
     own visit (`_visit_start`) on which the carried decoder is decoded (so a pin transition longer
     than the pad is covered, never initial load), never before `floor` (the chain clip / forced-wrap
     start)."""
-    visit = _visit_start(samples, boundary_scene - 1)
+    source_scene = (boundary_scene if transition_scene is None else transition_scene) - 1
+    visit = _visit_start(samples, source_scene)
     decoded = [
         row["t"] for row in samples
-        if row["t"] > visit and row.get("scene") == boundary_scene - 1 and row.get("busy") is False
+        if row["t"] > visit and row.get("scene") == source_scene and row.get("busy") is False
         and any(v.get("id") == element_id and (v.get("readyState") or 0) >= 2 for v in row.get("videos") or [])
     ]
-    start = min(window["start"], min(decoded)) if decoded else window["start"]
+    start = min(decoded) if decoded else window["start"]
     return start if floor is None else max(floor, start)
 
 
@@ -2795,7 +2797,9 @@ def carry_paint(
 
     source = (boundary_scene if transition_scene is None else transition_scene) - 1
 
-    start = paint_start(samples, element_id, boundary_scene, window, floor)
+    start = paint_start(
+        samples, element_id, boundary_scene, window, floor, transition_scene=transition_scene,
+    )
     end = window["end"]
     if segment is not None:
         start, end = max(start, segment[0]), min(end, segment[1])
@@ -2839,6 +2843,21 @@ def carry_paint_outside_gl(
         for segment in segments if segment[1] >= segment[0]
         and any(segment[0] <= row.get("t", -math.inf) <= segment[1] for row in samples)
     ]
+    for row in scored:
+        reasons = row.get("reasons") or []
+        coverage = row.get("coverage") if isinstance(row.get("coverage"), dict) else {}
+        if row.get("status") == "inconclusive" and reasons and all(
+            reason.startswith("coverage: cadence ") for reason in reasons
+        ) and coverage.get("seqGaps") == 0 and not any(
+            row.get(key) for key in (
+                "unobserved", "unreadable", "unpaintedFrames", "partialFrames",
+                "doubleFrames", "substituteFrames",
+            )
+        ):
+            row.update(
+                status="ok", verdict=True, reasons=[], settledCadenceReportOnly=reasons,
+                coverage={**coverage, "ok": True, "reasons": [], "settledCadenceReportOnly": reasons},
+            )
     applicable = [row for row in scored if row.get("status") != "n/a"]
     if not applicable:
         return {"status": "inconclusive", "verdict": None, "reasons": ["no pre/post GL paint segment"],
@@ -3768,6 +3787,7 @@ def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
         labels = score_labels_over_feed(record.get("labels"))
         results.update(feedLive=primary, labelsOverFeed=labels)
         applicable = (primary, rider, labels, artwork, *((handback,) if handback is not None else ()))
+        applicable_names = set(results)
         interval = mm_feed_instrument.feed_interval(record.get("feed"))
     elif mode in ("once", "departure", "standDown"):
         hold = score_hold_frame(record.get("hold"))
@@ -3775,16 +3795,14 @@ def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
         results.update(holdFrame=hold, posterHold=poster)
         if record.get("continuousExpected") is True:
             results["feedLive"] = score_feed_live(record.get("feed"), continuous_expected=True)
-            applicable = (results["feedLive"], hold, poster, rider, artwork,
-                          *((handback,) if handback is not None else ()))
-        else:
-            applicable = (hold, poster, rider, artwork, *((handback,) if handback is not None else ()))
+        applicable = (hold, poster, rider, artwork, *((handback,) if handback is not None else ()))
+        applicable_names = set(results) - {"feedLive"}
         interval = mm_feed_instrument.feed_interval(record.get("hold"))
     else:
         return _inconclusive(f"unknown under-artwork evidence mode {mode!r}")
     value = mm_feed_instrument.combine(*applicable)
-    failing = [name for name, row in results.items() if row.get("verdict") is False]
-    unknown = [name for name, row in results.items() if row.get("verdict") is None]
+    failing = [name for name, row in results.items() if name in applicable_names and row.get("verdict") is False]
+    unknown = [name for name, row in results.items() if name in applicable_names and row.get("verdict") is None]
     reason = f"under-artwork verdicts failed: {failing}" if failing else (
         f"inconclusive: under-artwork verdicts unreadable: {unknown}" if unknown else None
     )

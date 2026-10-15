@@ -585,11 +585,13 @@ def _visit_record(
     upload_frame_time = last_upload_row.get("frameTimestamp") if isinstance(last_upload_row, dict) else None
     canvas_linger = float(closed_at) - float(upload_frame_time) \
         if _finite(closed_at) and _finite(upload_frame_time) else None
-    interval_end = min(float(closed_at), last_move_frame_time + 1.5 * period) if _finite(closed_at) \
-        and last_move_frame_time is not None else last_move_frame_time + 1.5 * period \
+    interval_starts = [value for value in (move.get("createdAt"), move_frame_times[0] if move_frame_times else None)
+                       if _finite(value)]
+    interval_start = min(interval_starts) if interval_starts else None
+    interval_end = float(closed_at) if _finite(closed_at) else last_move_frame_time + 1.5 * period \
         if last_move_frame_time is not None else None
-    interval = {"start": fed_frame_times[0], "end": interval_end} if usable and bound and fed_frame_times \
-        and interval_end is not None and interval_end >= fed_frame_times[0] else None
+    interval = {"start": interval_start, "end": interval_end} if usable and bound and fed_frame_times \
+        and interval_start is not None and interval_end is not None and interval_end >= interval_start else None
     upload_times = sorted(float(r["t"]) for r in move_uploads if _finite(r.get("t")))
     gaps = [b - a for a, b in zip(upload_times, upload_times[1:])]
     wanted_frame_ns = {f.get("n") for f, group in zip(move_frames, rows_by_frame, strict=True) if group and _finite(f.get("n"))}
@@ -610,6 +612,10 @@ def _visit_record(
     riders = [r for group in rider_rows for r in group]
     rider_coverage = bool(move_frames) and all(len(group) == 1 and _rider_readable(group[0]) for group in rider_rows)
     labels = [r for f in move_frames for r in f.get("labels") or [] if isinstance(r, dict) and r.get("entryId") == entry_id]
+    expected_labels = sum(
+        1 for f in move_frames for r in f.get("labelExpected") or []
+        if isinstance(r, dict) and r.get("entryId") == entry_id
+    )
     label_coverage = bool(move_frames) and all(
         len([r for r in f.get("labels") or [] if isinstance(r, dict) and r.get("entryId") == entry_id])
         == len([r for r in f.get("labelExpected") or [] if isinstance(r, dict) and r.get("entryId") == entry_id])
@@ -627,9 +633,9 @@ def _visit_record(
               and not any(p.get("kind") == "play" and _finite(p.get("t")) and r["t"] < p["t"] < resume["t"] for p in media)]
     pause = pauses[-1] if pauses else None
     after = next((r for r in media if r.get("kind") == "videoFrame" and resume and _finite(r.get("t")) and r["t"] >= resume["t"]), None)
-    video_times = [r.get("mediaTime") for r in media if r.get("kind") == "videoFrame" and _finite(r.get("mediaTime"))]
-    durations = [b - a for a, b in zip(video_times, video_times[1:]) if b > a]
-    frame_duration = sorted(durations)[len(durations) // 2] if durations else None
+    frame_duration = _source_frame_duration(
+        media, created_at=move.get("createdAt"), source_fps=entry.get("sourceFps"),
+    ) or _source_frame_duration(media, source_fps=entry.get("sourceFps"))
     clock_rows = [r.get("decoder") for r in rows if _finite(r.get("t")) and (
         pause is None or r["t"] >= pause["t"]
     ) and (not resume or r["t"] <= resume["t"])]
@@ -642,7 +648,9 @@ def _visit_record(
         "mode": "standDown" if mode == "standDown" else "departure", "mediaOverflow": media_overflow,
         "holdPauseMissing": pause is None, "clockReadable": clock_readable, "clockStill": clock_still,
         "departurePauseBeforeMove": bool(pause and _finite(first_t) and pause["t"] <= first_t),
-        "lastUploadedFrame": last_upload, "successfulFeed": bool(entry_uploads),
+        "lastUploadedFrame": last_upload,
+        "lastUploadedMediaTime": last_upload_row.get("mediaTime") if isinstance(last_upload_row, dict) else None,
+        "successfulFeed": bool(entry_uploads),
     }
     if pause and resume and after and _finite(frame_duration):
         poster.update({
@@ -655,12 +663,33 @@ def _visit_record(
             "resumedFromZero": after.get("mediaTime", 1) <= 0,
         })
     window_frames = move_frames if mode != "standDown" or stand is None else [f for f in move_frames if _finite(f.get("t")) and f["t"] >= stand["t"]]
-    chosen_frames = [] if not window_frames else [window_frames[0], window_frames[len(window_frames) // 2], window_frames[-1]]
+    held_frames = [
+        (frame, [row for row in frame.get("rows") or []
+                 if isinstance(row, dict) and row.get("entryId") == entry_id])
+        for frame in window_frames
+    ]
+    held_frames = [(frame, group) for frame, group in held_frames if group]
+    chosen_frames = [] if mode not in ("departure", "standDown") or not held_frames else [
+        held_frames[0], held_frames[len(held_frames) // 2], held_frames[-1],
+    ]
     hold_reads: list[dict[str, Any]] = []
     if len(chosen_frames) == 3:
         selected = []
-        for frame in chosen_frames:
-            match = next((r.get("holdMatch") for r in frame.get("rows") or [] if isinstance(r, dict) and r.get("entryId") == entry_id), None)
+        for _frame, group in chosen_frames:
+            match = next((r.get("holdMatch") for r in group if isinstance(r.get("holdMatch"), dict)), None)
+            if not isinstance(match, dict):
+                textures = [
+                    texture for row in group for texture in row.get("textures") or []
+                    if isinstance(texture, dict) and texture.get("ordinal") in expected_ordinals
+                    and isinstance(texture.get("presentedFrames"), int)
+                    and not isinstance(texture.get("presentedFrames"), bool)
+                ]
+                frames = {texture["presentedFrames"] for texture in textures}
+                if len(frames) == 1 and textures:
+                    match = {
+                        "kind": "texture", "bestFrame": next(iter(frames)),
+                        "textureOrdinals": sorted({texture["ordinal"] for texture in textures}),
+                    }
             selected.append(match)
         if all(isinstance(match, dict) for match in selected):
             hold_reads = [{"phase": phase, **match} for phase, match in zip(("first", "middle", "last"), selected, strict=True)]
@@ -699,7 +728,10 @@ def _visit_record(
         "mode": mode, "reason": reason, "evidenceVersion": report.get("version", 1), **common,
         "continuousExpected": continuous_expected,
         "feed": feed, "rider": {"riders": riders, "coverage": rider_coverage, "complete": frames_complete},
-        "labels": {"labels": labels, "coverage": label_coverage, "complete": frames_complete},
+        "labels": {
+            "labels": labels, "expected": expected_labels,
+            "coverage": label_coverage, "complete": frames_complete,
+        },
         "hold": hold, "poster": poster, "artwork": {"reads": artwork, "complete": artwork_complete},
         "handback": handback,
         "module": report.get("module"),
@@ -953,6 +985,8 @@ def score_labels_over_feed(record: Any) -> dict[str, Any]:
     if isinstance(record, dict) and record.get("coverage") is not True:
         return _verdict(None, "the label reads do not cover every overlapping label draw")
     rows = record.get("labels") if isinstance(record, dict) else None
+    if isinstance(rows, list) and not rows and record.get("expected") == 0:
+        return _verdict(True, labels=[], notApplicable=True)
     if not isinstance(rows, list) or not rows:
         return _verdict(None, "no label-over-feed reads were recorded")
     checks, inconclusive = [], False
@@ -990,7 +1024,7 @@ def score_hold_frame(record: Any) -> dict[str, Any]:
         return _verdict(False, "a texture was uploaded after stand-down")
     if mode == "standDown" and record.get("reuploadAfterStandDown") is None:
         return _verdict(None, "post-stand-down upload evidence is unreadable")
-    target = record.get("lastUploadedFrame") if mode == "standDown" and record.get("successfulFeed") is True \
+    target = record.get("lastUploadedFrame") if record.get("successfulFeed") is True \
         else record.get("lastPresentedBeforeDeparture")
     reads = record.get("reads")
     if not isinstance(target, int) or isinstance(target, bool) or not isinstance(reads, list) or len(reads) < 3:
@@ -998,8 +1032,17 @@ def score_hold_frame(record: Any) -> dict[str, Any]:
     if {read.get("phase") for read in reads if isinstance(read, dict)} != {"first", "middle", "last"}:
         return _verdict(None, "the held reads do not cover first, middle, and last draw")
     for read in reads:
-        if not isinstance(read, dict) or not isinstance(read.get("bestFrame"), int) or not _finite(read.get("matchMargin")) \
-                or read.get("kind") not in ("alpha", "counter"):
+        if not isinstance(read, dict) or not isinstance(read.get("bestFrame"), int) \
+                or read.get("kind") not in ("alpha", "counter", "texture"):
+            return _verdict(None, "a held-frame match is unreadable", reads=reads)
+        if read["kind"] == "texture":
+            ordinals = read.get("textureOrdinals")
+            if not isinstance(ordinals, list) or not ordinals or not all(
+                isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in ordinals
+            ):
+                return _verdict(None, "a retained texture reading is unreadable", reads=reads)
+            continue
+        if not _finite(read.get("matchMargin")):
             return _verdict(None, "a held-frame match is unreadable", reads=reads)
         required = ALPHA_HOLD_MARGIN if read["kind"] == "alpha" else COUNTER_HOLD_MARGIN
         if read["matchMargin"] < required:
@@ -1047,15 +1090,20 @@ def score_poster_hold(record: Any) -> dict[str, Any]:
     if record["firstAfterFrame"] <= 0 or record.get("resumedFromZero") is True:
         return _verdict(False, "the decoder restarted from frame zero")
     mode = record.get("mode", "departure")
-    media_step = record["firstAfterMediaTime"] - record["pauseMediaTime"]
-    frame_step = record["firstAfterFrame"] - record["pauseFrame"]
-    if frame_step > 1:
-        return _verdict(None, "the first post-resume video-frame callback was dropped")
+    base_frame = record.get("lastUploadedFrame") if record.get("successfulFeed") is True else record["pauseFrame"]
+    base_media_time = record.get("lastUploadedMediaTime") if record.get("successfulFeed") is True \
+        else record["pauseMediaTime"]
+    if not isinstance(base_frame, int) or isinstance(base_frame, bool) or not _finite(base_media_time):
+        return _verdict(None, "the held resume target is unreadable")
+    media_step = record["firstAfterMediaTime"] - base_media_time
+    frame_step = record["firstAfterFrame"] - base_frame
     if frame_step <= 0:
         return _verdict(False, "the decoder did not present the held-plus-one frame")
-    resumed_from_pause = abs(media_step - frame_duration) <= frame_duration / 2
-    if not resumed_from_pause:
-        return _verdict(False, "the first media time after settle was not one frame after the pause", exactHeldPlusOne=False)
+    source_steps = round(media_step / frame_duration)
+    if media_step <= 0 or source_steps != frame_step \
+            or abs(media_step - source_steps * frame_duration) > frame_duration / 2:
+        return _verdict(False, "the post-resume media time did not continue from the held frame", exactHeldPlusOne=False)
+    resumed_from_pause = frame_step == 1
     if mode != "standDown" and mode != "departure":
         return _verdict(None, f"unknown poster-hold mode {mode!r}")
     last_upload = record.get("lastUploadedFrame")
@@ -1064,11 +1112,11 @@ def score_poster_hold(record: Any) -> dict[str, Any]:
         return _verdict(None, "the last uploaded frame is unreadable")
     if mode == "standDown" and successful_feed and record["pauseFrame"] < last_upload:
         return _verdict(None, "the pause frame precedes the retained upload")
-    discontinuity = mode == "standDown" and successful_feed and record["pauseFrame"] > last_upload
+    discontinuity = frame_step > 1
     return _verdict(True, mode=mode, exactHeldPlusOne=resumed_from_pause if not discontinuity else False,
                     resumedFromPausePlusOne=resumed_from_pause,
-                    resumptionDiscontinuity=(record["pauseFrame"] - last_upload if discontinuity else 0),
-                    resumedFromFrame=record["pauseFrame"])
+                    resumptionDiscontinuity=(frame_step - 1 if discontinuity else 0),
+                    resumedFromFrame=base_frame)
 
 
 def score_artwork_above(record: Any) -> dict[str, Any]:

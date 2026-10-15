@@ -403,6 +403,21 @@ def test_v2_mm_feed_report_rejects_missing_handback_endpoints() -> None:
     assert any("mmFeed.handback.frame.frameIndex:missing" in error for error in errors)
 
 
+def test_v2_mm_feed_report_accepts_only_empty_unbound_gl_contexts() -> None:
+    report = _mm_feed_report()
+    report.update(version=2, browserFrames=[], handbacks=[])
+    report["contexts"][0].update(atScene=None, entryIds=[], closedAt=None, closedFrameIndex=None)
+    report["departures"][0].update(generation=1, visit=1)
+    report["frames"][0].update(
+        atScene=None, rows=[], labels=[], riders=[], labelExpected=[], frameIndex=0, frameTimestamp=2.0,
+    )
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    report["frames"][0]["rows"] = [{}]
+    assert "mmFeed.frame.atScene at mmFeedEvidence.frames[0]" in contract.first_errors(
+        contract.mm_feed_report(report), limit=20,
+    )
+
+
 @pytest.mark.parametrize(("mutate", "clause"), [
     (lambda r: r["contexts"][0].pop("lost"), "mmFeed.context.lost:missing"),
     (lambda r: r["contexts"][0].pop("closedAt"), "mmFeed.context.closedAt:missing"),

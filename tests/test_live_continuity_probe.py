@@ -11662,12 +11662,13 @@ def _feed_live() -> dict[str, Any]:
 
 
 def _hold_frame(mode: str = "departure") -> dict[str, Any]:
+    target = 42 if mode == "departure" else 41
     record = {
         "mode": mode, "usableContext": True, "boundTextures": True,
         "interval": {"start": 500.0, "end": 2000.0}, "lastPresentedBeforeDeparture": 42,
-        "lastUploadedFrame": 41, "successfulFeed": True, "advancedDecoder": True,
+        "lastUploadedFrame": target, "successfulFeed": True, "advancedDecoder": True,
         "reuploadAfterStandDown": False, "mediaOverflow": 0,
-        "reads": [{"phase": phase, "bestFrame": 42 if mode == "departure" else 41,
+        "reads": [{"phase": phase, "bestFrame": target,
                    "kind": "alpha", "matchMargin": 8.0} for phase in ("first", "middle", "last")],
     }
     return record
@@ -11817,6 +11818,11 @@ def test_a_readable_red_label_is_not_masked_by_an_inconclusive_label() -> None:
     assert probe.score_labels_over_feed(record)["verdict"] is False
 
 
+def test_no_overlapping_label_draw_is_not_applicable() -> None:
+    scored = probe.score_labels_over_feed({"complete": True, "coverage": True, "expected": 0, "labels": []})
+    assert scored == {"verdict": True, "labels": [], "notApplicable": True}
+
+
 @pytest.mark.parametrize(("mutate", "expected"), [
     (lambda r: None, True),
     (lambda r: r["reads"][-1].update(bestFrame=0), False),
@@ -11835,6 +11841,7 @@ def _poster_hold(mode: str = "departure") -> dict[str, Any]:
             "settleCurrentTime": 5.0, "pauseFrame": 42, "firstAfterFrame": 43, "seeked": False,
             "pauseMediaTime": 5.0, "firstAfterMediaTime": 5.0 + 1 / 30, "frameDurationS": 1 / 30,
             "clockToleranceS": .49 / 30, "resumedFromZero": False, "lastUploadedFrame": 41,
+            "lastUploadedMediaTime": 5.0 - 1 / 30,
             "successfulFeed": mode == "standDown", "mediaOverflow": 0, "clockReadable": True,
             "clockStill": True, "departurePauseBeforeMove": True, "holdPauseMissing": False}
 
@@ -11861,10 +11868,22 @@ def test_post_feed_stand_down_reports_resumption_discontinuity_without_claiming_
     assert scored["exactHeldPlusOne"] is False
 
 
-def test_dropped_first_post_resume_callback_is_inconclusive() -> None:
+def test_dropped_first_post_resume_callback_is_report_only_when_no_seek_resumption_is_proven() -> None:
     record = _poster_hold()
     record.update(firstAfterFrame=44, firstAfterMediaTime=5.0 + 2 / 30)
-    assert probe.score_poster_hold(record)["verdict"] is None
+    scored = probe.score_poster_hold(record)
+    assert scored["verdict"] is True
+    assert scored["exactHeldPlusOne"] is False
+    assert scored["resumptionDiscontinuity"] == 1
+
+
+def test_hold_frame_accepts_the_same_uploaded_texture_target_across_the_move() -> None:
+    record = _hold_frame()
+    record["reads"] = [
+        {"phase": phase, "kind": "texture", "bestFrame": 42, "textureOrdinals": [5, 6]}
+        for phase in ("first", "middle", "last")
+    ]
+    assert probe.score_hold_frame(record)["verdict"] is True
 
 
 def test_missing_post_stand_down_upload_census_is_inconclusive() -> None:
@@ -11895,12 +11914,69 @@ def test_gl_interval_exempts_only_the_hidden_move_rows() -> None:
     )["verdict"] is False
 
 
+def test_gl_outer_settled_cadence_is_report_only_when_every_browser_frame_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [{"t": float(t), "ts": float(t), "seq": i} for i, t in enumerate((0, 100, 200, 300), start=1)]
+    unreadable: list[dict[str, Any]] = []
+
+    def slow_settled(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "inconclusive", "verdict": None,
+            "reasons": ["coverage: cadence 100.0 ms is slower than 20 fps"],
+            "coverage": {"ok": False, "reasons": ["cadence"], "seqGaps": 0},
+            "frames": 2, "unobserved": [], "unreadable": list(unreadable), "unpaintedFrames": 0,
+            "partialFrames": 0, "doubleFrames": 0, "substituteFrames": 0,
+        }
+
+    monkeypatch.setattr(probe, "carry_paint", slow_settled)
+    scored = probe.carry_paint_outside_gl(
+        rows, 1, ASSET, {"start": 0.0, "end": 300.0}, 8, SRC_RECT, DST_RECT,
+        transition_scene=7, rect_tolerance=2.0, floor=None, wrap_times=(),
+        gl_interval={"start": 150.0, "end": 250.0},
+    )
+    assert scored["verdict"] is True
+    assert all(row["settledCadenceReportOnly"] for row in scored["segments"])
+    unreadable.append({"seq": 2})
+    scored = probe.carry_paint_outside_gl(
+        rows, 1, ASSET, {"start": 0.0, "end": 300.0}, 8, SRC_RECT, DST_RECT,
+        transition_scene=7, rect_tolerance=2.0, floor=None, wrap_times=(),
+        gl_interval={"start": 150.0, "end": 250.0},
+    )
+    assert scored["verdict"] is None
+
+
 def test_feed_off_can_hold_exactly_but_still_reds_an_explicit_continuous_expectation() -> None:
     hold = probe.score_hold_frame(_hold_frame())
     feed = _feed_live()
     feed["mode"] = "once"
     assert hold["verdict"] is True
     assert probe.score_feed_live(feed, continuous_expected=True)["verdict"] is False
+
+
+def test_feed_off_expected_red_feed_live_does_not_red_the_under_artwork_aggregate() -> None:
+    record = {
+        "mode": "departure", "continuousExpected": True,
+        "feed": {**_feed_live(), "mode": "departure"}, "hold": _hold_frame(),
+        "poster": _poster_hold(),
+        "rider": {"complete": True, "coverage": True, "riders": [
+            {"visible": False, "opacityProduct": 0.0, "intersectsCanvas": True},
+        ]},
+        "artwork": {"complete": True, "reads": [{"artworkAbove": True}]},
+    }
+    scored = probe.score_under_artwork({"carry-a": record}, {"id": "carry-a"})
+    assert scored["feedLive"]["verdict"] is False
+    assert scored["verdict"] is True
+    assert scored["reason"] is None
+
+
+def test_paint_start_begins_at_the_first_decoded_settled_source_frame() -> None:
+    samples = [
+        {"t": 1.0, "scene": 3, "busy": False, "videos": []},
+        {"t": 2.0, "scene": 4, "busy": False, "videos": [{"id": 7, "readyState": 1}]},
+        {"t": 3.0, "scene": 4, "busy": False, "videos": [{"id": 7, "readyState": 2}]},
+    ]
+    assert probe.paint_start(samples, 7, 5, {"start": 2.0, "end": 4.0}, None) == 3.0
 
 
 def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None:
@@ -12359,7 +12435,7 @@ def test_gl_interval_exempts_same_tick_edges_but_counts_a_real_hidden_gap(monkey
     assert scored_seqs == {gap["seq"]}
 
 
-def test_lingering_canvas_does_not_exempt_settled_dwell_and_null_close_still_bounds_interval() -> None:
+def test_canvas_lifecycle_exempts_its_linger_and_null_close_still_bounds_interval() -> None:
     entry = {
         "id": "carry-a", "objectId": "movie-a", "dstObjectId": "movie-b", "atScene": 8,
         "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
@@ -12383,13 +12459,14 @@ def test_lingering_canvas_does_not_exempt_settled_dwell_and_null_close_still_bou
     }
     record = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)["carry-a"]
     interval = probe.mm_feed_instrument.feed_interval(record["feed"])
-    assert interval == {"start": 500.0, "end": 2075.0}
+    assert interval == {"start": 500.0, "end": 4000.0}
     assert record["canvasLingerMs"] == 2000.0
 
     open_report = copy.deepcopy(report)
     open_report["contexts"][0]["closedAt"] = None
     open_record = probe.mm_feed_instrument.verdict_records(open_report, [entry], continuous_expected=True)["carry-a"]
-    assert probe.mm_feed_instrument.feed_interval(open_record["feed"]) == interval
+    open_interval = probe.mm_feed_instrument.feed_interval(open_record["feed"])
+    assert open_interval == {"start": 500.0, "end": 2075.0}
     assert open_record["canvasLingerMs"] is None
 
     rows = _v2(moving_boundary_samples())
@@ -12403,7 +12480,9 @@ def test_lingering_canvas_does_not_exempt_settled_dwell_and_null_close_still_bou
         extra = copy.deepcopy(row["pp"]["videos"][0])
         extra["id"] = 99
         row["pp"]["videos"].append(extra)
-    scored = probe.score_continuity(rows, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, gl_interval=interval)
+    scored = probe.score_continuity(
+        rows, ASSET, 8, SRC_RECT, DST_RECT, True, transition_scene=7, gl_interval=open_interval,
+    )
     assert scored["verdict"] is False
     assert [row["t"] for row in scored["ownerMismatches"]] == [2100.0]
     assert scored["paint"]["doubleFrames"] == 1

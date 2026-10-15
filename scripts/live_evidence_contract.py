@@ -627,7 +627,7 @@ def evidence(value: Any, path: str = "evidence") -> Iterator[str]:
 
 MM_FEED_CONTEXT_FIELDS = {
     "serial": _id, "id": _non_empty_str, "createdAt": _finite,
-    "closedAt": lambda v: v is None or _finite(v), "atScene": _count,
+    "closedAt": lambda v: v is None or _finite(v), "atScene": lambda v: v is None or _count(v),
     "lost": lambda v: isinstance(v, bool),
     "entryIds": lambda v: isinstance(v, list) and all(_non_empty_str(item) for item in v),
 }
@@ -698,12 +698,16 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
         yield f"mmFeed.mediaOverflow at {path}"
     if value.get("callbackCostP95Ms") is not None and not (_finite(value.get("callbackCostP95Ms")) and value["callbackCostP95Ms"] >= 0):
         yield f"mmFeed.callbackCostP95Ms at {path}"
+    contexts_by_serial = {}
     for index, context in enumerate(value.get("contexts") or []):
         where = f"{path}.contexts[{index}]"
         if not isinstance(context, dict):
             yield f"mmFeed.context:object at {where}"
         else:
+            contexts_by_serial[context.get("serial")] = context
             yield from _fields(context, "mmFeed.context", where, MM_FEED_CONTEXT_FIELDS)
+            if context.get("atScene") is None and (version != 2 or context.get("entryIds") != []):
+                yield f"mmFeed.context.atScene at {where}"
             if version == 2 and not (context.get("closedFrameIndex") is None or _count(context.get("closedFrameIndex"))):
                 yield f"mmFeed.context.closedFrameIndex at {where}"
     previous = None
@@ -713,12 +717,18 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
             yield f"mmFeed.frame:object at {where}"
             continue
         yield from _fields(frame, "mmFeed.frame", where, {
-            "serial": _id, "atScene": _count, "n": _id, "t": _finite, "frameTime": _finite,
+            "serial": _id, "atScene": lambda v: v is None or _count(v), "n": _id, "t": _finite, "frameTime": _finite,
             "draws": _count, "uploads": _count,
             "rows": lambda v: isinstance(v, list), "labels": lambda v: isinstance(v, list),
             "riders": lambda v: isinstance(v, list), "labelExpected": lambda v: isinstance(v, list),
             "glErrors": lambda v: isinstance(v, list) and all(_int(e) for e in v),
         })
+        if frame.get("atScene") is None:
+            context = contexts_by_serial.get(frame.get("serial"))
+            empty = all(frame.get(key) == [] for key in ("rows", "labels", "riders", "labelExpected"))
+            if version != 2 or not isinstance(context, dict) or context.get("atScene") is not None \
+                    or context.get("entryIds") != [] or not empty:
+                yield f"mmFeed.frame.atScene at {where}"
         if version == 2:
             yield from _fields(frame, "mmFeed.frame", where, {"frameIndex": _count, "frameTimestamp": _finite})
         if previous is not None and _finite(frame.get("t")) and frame["t"] < previous:
@@ -980,8 +990,14 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
             continue
         yield from _fields(read, "feedVerdict.hold.read", where, {
             "phase": lambda v: v in ("first", "middle", "last"), "bestFrame": _count,
-            "kind": lambda v: v in ("counter", "alpha"), "matchMargin": _finite,
+            "kind": lambda v: v in ("counter", "alpha", "texture"),
         })
+        if read.get("kind") == "texture":
+            if not isinstance(read.get("textureOrdinals"), list) or not read["textureOrdinals"] \
+                    or not all(_count(value) for value in read["textureOrdinals"]):
+                yield f"feedVerdict.hold.read.textureOrdinals at {where}"
+        elif not _finite(read.get("matchMargin")):
+            yield f"feedVerdict.hold.read.matchMargin at {where}"
     for key, list_key in (("rider", "riders"), ("labels", "labels"), ("artwork", "reads")):
         record = value.get(key)
         if isinstance(record, dict) and not isinstance(record.get(list_key), list):
