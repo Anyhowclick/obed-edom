@@ -68,8 +68,9 @@ import mm_opacity_probe as mmo  # noqa: E402
 from obs_cadence_decode import read_strip  # noqa: E402
 
 from obed_edom import dsk_movie_export, live_runtime, placement_probe  # noqa: E402
+from obed_edom.fixture_paths import main_checkout  # noqa: E402
 
-FIXTURES = REPO / "output" / "fixtures"
+FIXTURES = main_checkout() / "output" / "fixtures"
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 VIEWPORT = (1920, 1080)
 FPS = binary.FPS
@@ -4729,7 +4730,7 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
             extra = {"placement_mode": arm.placement_mode} if arm.placement_mode else {}
             host = LiveOutputHost(resolved.root, resolved.slides, headless=True, resolver=resolved.resolver,
                                   transport_factory=hooked_transport(before=before), attach_endpoint=attach, continuity=arm.continuity,
-                                  gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off", **extra)
+                                  gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off", chrome_path=CHROME, **extra)
             with serving(arm.splice):
                 host.start()
         transport = host._require_transport()

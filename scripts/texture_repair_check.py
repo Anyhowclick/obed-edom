@@ -49,7 +49,7 @@ from obed_edom.fixture_paths import fixture, main_checkout  # noqa: E402
 from obed_edom.html_preview import PreviewError, PreviewStale, file_sha256, read_jsonish, source_slides  # noqa: E402
 from obed_edom.live_continuity import canonical_asset_name, derive_plan  # noqa: E402
 
-PREVIEWS = main_checkout() / ".claude" / "worktrees" / "s2-followups-dsk-deck-902af1" / "output" / ".html-preview"
+PREVIEWS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Continuity/stage-t-exports")
 ALPHA_7E3C = "7e3c930194d00effe3a21ee0e86a20baddb74223f661b9fa23186282aaf7081d"
 ALPHA_3B9019 = "3b9019f068d8ef1c14e586c86e75274a2bebad3c65116fd2247362ed9f39a7e3"
 MINIMAL_59CB = "59cb220d674317326e710ccdc7d65fe1d7e473c83646227d2f691e6373d6fa0c"

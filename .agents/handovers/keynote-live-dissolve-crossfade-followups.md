@@ -2,7 +2,7 @@
 
 **2026-10-12; landed in #262 (`c6f37e5e`) 2026-10-13.** Patch: `claude/keynote-live-dissolve-crossfade`, plan `.agents/plans/keynote_live_dissolve_crossfade.plan.md`
 (rev 17, cited as §n). It ships D1–D4 under `mm_opacity` (§0, §4); the movie freeze only on the host-launched, qualified
-Chrome (`LiveOutputHost`, Chrome 154, GPU compositing; §3.3, decision 15). Everything below is deliberately **not** in that PR.
+Chrome (`LiveOutputHost`, Chrome 154/155, GPU compositing; §3.3, decision 15). Everything below is deliberately **not** in that PR.
 Evidence kept (main checkout, git-ignored, pruned 2026-10-13): `output/evidence/s2-dev/dissolve-alpha-2026-10-11/` —
 `q0b-2026-10-11/runs/decision_record_q0b1.json` (the `--decision` input of every DX run), `dx1-2026-10-12/dx1_paced.py` (the
 load-paced DX-1 runner), `cef-frac-2026-10-12/` and `q0bbis-2026-10-12/` (README, results, probe scripts: CEF placement and

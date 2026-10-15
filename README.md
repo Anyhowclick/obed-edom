@@ -254,7 +254,7 @@ slide pops in under a Dissolve over fill-less textures, a cut shows both slides 
 once, and a playing movie jumps back to the opening frame baked into the outgoing slide
 (on, the cross-fade and clean cut apply on every output, raw export and Build Preview included).
 On, the movie instead freezes on its current frame and fades with the slide on a qualified output:
-- **HDMI/headless output:** when the host launched that Chrome itself, it is Chrome 154 with GPU compositing, the scale
+- **HDMI/headless output:** when the host launched that Chrome itself, its major is in `QUALIFIED_SNAP_MAJORS` (re-qualify a new one with `scripts/chrome_requal.py`) with GPU compositing, the scale
   factor is 1, 1.5 or 2 and the stage is unscaled (`grant: snap`, granted from the browser's own report).
 - **Keyer output (managed OBS):** after the host calibrates OBS's browser source. It loads a probe page in a hidden Studio
   Mode preview scene (`AK-Calibrate`, never on program), proves the capture is fresh, measures which rule OBS's renderer
