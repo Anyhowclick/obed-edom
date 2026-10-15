@@ -32,6 +32,7 @@ Branch `claude/suspicious-yalow-7eadf3`, cut from main `a70bbc0e`. Plan `.agents
 | Full suite, Python 3.13.11 (worktree venv), commit `9847eb30` | 11003 passed, 38 skipped, 1 xfailed |
 | Full suite, Python 3.10.10 floor | 11003 passed, 38 skipped, 1 xfailed |
 | Dashboard `test:ui` / `test:maps` | 330 passed (44 files) / 542 + 2 passed |
+| Full suites, merged tree (`707ee6f7`, main `6cf7da26` merged in) | 3.13.11: 11017 passed, 38 skipped, 1 xfailed. 3.10.10: 11017 passed, 38 skipped, 1 xfailed. The merge touched no dashboard files, so the earlier dashboard results stand. |
 | G2 live F2 prepare (owner) | pending |
 | G3 owner eye | **PASS (owner, 2026-10-15): the repaired copies are correct.** Chrome via a local server, stock player. Repaired copies `~/Desktop/StageT-text-glyph-evidence/2026-10-15/attempt-0{1,2}-repaired` (trees `ea5a63b6…`, `5d63e95e…`; 0 hits after) beside the unrepaired `attempt-0{1,2}` controls. Check all eight Malaysia letters through the Twist & Scale build and the settled slide (i in 01, s in 02), and the 176×205 map. |
 
