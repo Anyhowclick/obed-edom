@@ -1,6 +1,6 @@
 # Stage B instrument restructure (plan r3: critique r1 folded by the planner, critique r2 folded by the coordinator)
 
-Owner scope approved 2026-10-15: **C6 → C1 → C2 → C3 + bounded C4 → C5 → C10 audit → verification → Q7 attempt 4 → Stage B closure**.
+**Plan r3 approved by the owner 2026-10-15 ("Approve").** Owner scope approved 2026-10-15: **C6 → C1 → C2 → C3 + bounded C4 → C5 → C10 audit → verification → Q7 attempt 4 → Stage B closure**.
 
 Planner: Codex GPT-6 Astra high (r1, r2). Critic: Opus 5.5 high.
 - r1 was **NOT READY** (6 major, 7 medium, 5 low). The planner folded all 18 into r2; none was refuted.
