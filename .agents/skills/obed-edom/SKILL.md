@@ -840,7 +840,7 @@ for the parked `iwa-surgical-write-generator` feature.
   their current frame that fades with the slide; `off` restores the export's pop-in, double slide and jump to the baked
   opening frame. The freeze needs the host grant `window.__obedPlacement === "snap"` (plan §3.3, decision 15): only a
   `LiveOutputHost` that launched its Chrome (not attach mode), `Browser.getVersion` major in `QUALIFIED_SNAP_MAJORS`
-  (a new major refuses with `unqualified-version` until `scripts/chrome_requal.py --chrome <Stable or Beta binary> --out <dir outside output/>` prints PASS on it — 28 headless arms, ~8 min idle, exit 0/1/2 = PASS/FAIL/INCONCLUSIVE; then add the printed `QUALIFIED_SNAP_MAJORS` line in a PR with a short gate record; plan §13 2026-10-15) and `gpu_compositing: "enabled"`, through a first-run private channel, context-bound round trip, revoked at
+  (a new major refuses with `unqualified-version` until `scripts/chrome_requal.py --chrome <Stable or Beta binary> --out <dir outside output/>` prints PASS on it — 28 headless arms, ~9 min idle, exit 0/1/2 = PASS/FAIL/INCONCLUSIVE; then add the printed `QUALIFIED_SNAP_MAJORS` line in a PR with a short gate record; plan §13 2026-10-15) and `gpu_compositing: "enabled"`, through a first-run private channel, context-bound round trip, revoked at
   `observe()` on fingerprint change (`method: knowledge`, no expiry; decision 16). Managed OBS/CEF gets `frac` only from the
   placement probe (`keynote_live_cef_placement.plan.md`, §11 contracts): `placement_probe.py` (pinned clips + pure classifier),
   `ManagedObs.calibration_adapter()` (hidden Studio Mode preview of `AK-Calibrate`; exact step-0 absent responses; verified
