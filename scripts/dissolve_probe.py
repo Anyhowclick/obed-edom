@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -50,7 +51,8 @@ import time
 import traceback
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +67,7 @@ import binary_counter_movie as binary  # noqa: E402
 import mm_opacity_probe as mmo  # noqa: E402
 from obs_cadence_decode import read_strip  # noqa: E402
 
-from obed_edom import live_runtime  # noqa: E402
+from obed_edom import dsk_movie_export, live_runtime, placement_probe  # noqa: E402
 
 FIXTURES = REPO / "output" / "fixtures"
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -123,6 +125,8 @@ TONE_CELL_PX = 16
 DARK_MAX = 2.0
 VERDICTS = ("PASS", "FAIL", "INCONCLUSIVE", "REPORTED", "N/A")
 MOVIE_SUFFIXES = (".mov", ".mp4", ".m4v")
+PLACEMENT_SCHEMA_VERSION = 1
+PLACEMENT_BACKENDS = ("cef", "chrome-harness")
 
 
 @dataclass(frozen=True)
@@ -165,6 +169,12 @@ SPLICES = {
     "lut-identity": (b"d[j]=L[d[j]],d[j+1]=L[d[j+1]],d[j+2]=L[d[j+2]]", b"d[j]=d[j],d[j+1]=d[j+1],d[j+2]=d[j+2]", 1),
     "sn-frac": (b"sn=function(z,e,k){return Math.round((z-e)*k*p)/p}", b"sn=function(z,e,k){return(z-e)*k}", 1),
     "snap-shift": (b's.left=a0+"px"', b's.left=a0+1/p+"px"', 1),
+    "frac-nooffset-x": (b"fx=dx+(r.left-R.left)+Math.round(cx-r.left)-u0",
+                         b"fx=dx+Math.round(cx-r.left)-u0", 1),
+    "frac-nooffset-y": (b"fy=dy+(r.top-R.top)+Math.round(cy-r.top)-v0",
+                         b"fy=dy+Math.round(cy-r.top)-v0", 1),
+    "frac-underlay-omit": (b'g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);if("frac"===pl)',
+                             b'g=x.getContext("2d");if("frac"===pl)', 1),
 }
 
 RAW_STYLE = '<style id="obed-dx-transparent">html,body,#body{background:transparent!important}</style>'
@@ -210,8 +220,26 @@ CUT_ANIMATION = {"additive": False, "timeOffset": 0, "beginTime": 0, "from": {"s
                  "removedOnCompletion": False}
 FOREGROUND_TEXTURES = ("74EE7166AEA70C8FD2FEDE82CCDC7157", "3652165F1CC62CFCEB8D764941CC3950")
 FOREGROUND_RECTS = ((20.0, 4.0, 80.0, 20.0), (60.0, 8.0, 80.0, 20.0))
+FOREGROUND_FRAME = "3231B69B05EF0523B6E951F3B1F2B938"
 FOREGROUND_SQUARE = "3F22E494EE111203282E35DDB772C32F"
 FOREGROUND_SQUARE_RECT = (120.0, 2.0, 120.0, 30.0)
+EDGE_FOREGROUND_RECTS = ((-8.0, 80.0, 80.0, 20.0), (180.0, 100.0, 80.0, 20.0))
+EDGE_FOREGROUND_SQUARE_RECT = (300.0, 140.0, 120.0, 30.0)
+DSK_COUNTER_MOVIE = (FIXTURES / "p2-binary/html-player/assets/08C861A1-CB39-4832-B189-6DF95B7F3396/assets/"
+                     "Untitled.mov-0.0000-46.0333.mov")
+DSK_COUNTER_SHA256 = "947f8944ba743878133bd0749d3a154c552e0a3cb4482b67ddbe8c23f2bd7203"
+DSK_COUNTER_OFFSETS = {
+    "clip-10-1000001.mov-0.0000-20.8000.mov": 0.0,
+    "clip-10-1000002.mov-0.0000-50.2000.mov": 5.0,
+}
+DSK_COUNTER_DELTA_S = 5.0
+DSK_COUNTER_TIME_TOLERANCE_S = 0.25
+DSK_PLAYER_SRC_ANCHORS = (
+    (b'A.setAttribute("src",this.src),this.showControls', 1),
+    (b'const Q=C.url.native;return null!=Q', 2),
+)
+NOOFFSET_X_DISPLACEMENT = -80.0
+NOOFFSET_Y_DISPLACEMENT = -80.0
 
 
 @dataclass(frozen=True)
@@ -242,6 +270,10 @@ class Arm:
     decoders: int = 1
     letterbox: int = 0
     grant: str = "driver"
+    forgery: str | None = None
+    placement_value: str | None = None
+    placement_mode: str | None = None
+    counter_strip: str = "required"
     reason: str | None = None
     regrant: str | None = None
     min_class_px: int = MIN_CLASS_PX
@@ -314,7 +346,7 @@ ARMS: dict[str, Arm] = {
                      expect={"foreground": "FAIL", "model": "N/A"}),
     "m-tone": Arm(**_TONE, expect={"tone": "PASS", "mask": "PASS"}, twin="m-tone-twin"),
     "m-tone-twin": Arm(**_TONE, splice="fg-omit"),
-    "m-tone-raw": Arm(**{**_MEDIA, "movies": "tone"}, splice="lut-identity", capture="paused", classes=("out",), holders=1,
+    "m-tone-raw": Arm(**{**_MEDIA, "movies": "tone"}, capture="paused", classes=("out",), holders=1,
                       expect={"tone": "FAIL"}),
     "perfect-shift": Arm(**_SNAP, shift=1, expect={"reference": "FAIL"}),
     "m-geo-dpr125": Arm(**_ENGAGE, dsf=1.25, expect={"geometry": "FAIL"}),
@@ -344,6 +376,20 @@ ARMS: dict[str, Arm] = {
                     expect={"overlay": "REPORTED"}),
     "on-sw": Arm("p2", 2, movies="player", gpu=False, classes=_ALL, expect=_ON_EXPECT),
 }
+
+FORGERIES = {
+    f"{value}-{kind}": (value, kind)
+    for value in ("snap", "frac")
+    for kind in ("assignment", "getter")
+}
+for _page in ("raw", "preview"):
+    for _tag in FORGERIES:
+        _base = f"m-{_page}-prod"
+        ARMS[f"{_base}-forge-{_tag}"] = replace(ARMS[_base], forgery=_tag)
+ARMS["m-raw-prod-forge-snap-getter-kb"] = replace(
+    ARMS["m-raw-prod"], mode="on", forgery="snap-getter", holders=1,
+    expect={"model": "PASS", "scope": "PASS"},
+)
 
 LIFECYCLE: dict[str, dict[str, Any]] = {
     "advance": {},
@@ -381,6 +427,68 @@ for _d, _dpr in SNAP_DPR.items():
             SNAPS.append(_name)
             ARMS[_name] = Arm(**_cell, expect=_SNAP_EXPECT | {"geometry": "PASS"}, twin=f"{_name}-twin")
             ARMS[f"{_name}-twin"] = Arm(**_cell, splice="fg-omit")
+
+ARMS["wrongrule-chrome"] = replace(ARMS["m-snap"], placement_value="frac", placement_mode="probe",
+                                           expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="wrongrule-chrome-twin")
+ARMS["wrongrule-chrome-twin"] = replace(ARMS["m-snap-twin"], placement_value="frac", placement_mode="probe")
+
+_CEF_SNAP_ROWS = {
+    "m-snap-cef": replace(ARMS["m-snap"], overrides=("edgefg",)),
+    "m-snap-cef-far-x": ARMS["m-snap-clipx"],
+    "m-snap-cef-far-y": ARMS["m-snap-clipy"],
+    "m-snap-cef-near-x": replace(ARMS["m-snap"], overrides=("clipnearx",)),
+    "m-snap-cef-near-y": replace(ARMS["m-snap"], overrides=("clipneary",)),
+}
+for _name, _arm in _CEF_SNAP_ROWS.items():
+    ARMS[_name] = replace(_arm, placement_value="frac", twin=f"{_name}-twin")
+    ARMS[f"{_name}-twin"] = replace(_arm, placement_value="frac", splice="fg-omit", expect={}, twin=None)
+ARMS["m-paused-cef"] = replace(ARMS["m-paused"], placement_value="frac")
+ARMS["m-off-cef"] = replace(ARMS["m-off"], placement_value="frac")
+ARMS["m-hold-cef"] = replace(ARMS["m-hold"], placement_value="frac")
+ARMS["m-fg-cef"] = replace(ARMS["m-fg"], placement_value="frac",
+                            expect={**ARMS["m-fg"].expect, "frozen_region": "PASS"})
+ARMS["m-fg-omit-cef"] = replace(ARMS["m-fg-omit"], placement_value="frac")
+ARMS["m-fg-swap-cef"] = replace(ARMS["m-fg-swap"], placement_value="frac")
+ARMS["m-tone-cef"] = replace(ARMS["m-tone"], placement_value="frac", twin="m-tone-cef-twin")
+ARMS["m-tone-cef-twin"] = replace(ARMS["m-tone-twin"], placement_value="frac")
+ARMS["m-tone-raw-cef"] = replace(ARMS["m-tone-raw"], placement_value="frac", twin="m-tone-cef-twin")
+ARMS["wrongrule-cef"] = replace(ARMS["m-snap-cef"], placement_value="snap", expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"},
+                                      twin="wrongrule-cef-twin")
+ARMS["wrongrule-cef-twin"] = replace(ARMS["m-snap-cef-twin"], placement_value="snap")
+ARMS["m-snap-cef-nooffset-x"] = replace(ARMS["m-snap-cef-near-x"], splice="frac-nooffset-x",
+                                              overrides=("nooffsetx",),
+                                              counter_strip="displaced-x",
+                                              expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="m-snap-cef-nooffset-x-twin")
+ARMS["m-snap-cef-nooffset-x-twin"] = replace(
+    ARMS["m-snap-cef-near-x-twin"], overrides=("nooffsetx",), splice="frac-nooffset-x+fg-omit",
+    counter_strip="displaced-x"
+)
+ARMS["m-snap-cef-nooffset-y"] = replace(ARMS["m-snap-cef-near-y"], splice="frac-nooffset-y",
+                                              overrides=("nooffsety",),
+                                              counter_strip="displaced-y",
+                                              expect={**_SNAP_EXPECT, "holder_pixels": "FAIL"}, twin="m-snap-cef-nooffset-y-twin")
+ARMS["m-snap-cef-nooffset-y-twin"] = replace(
+    ARMS["m-snap-cef-near-y-twin"], overrides=("nooffsety",), splice="frac-nooffset-y+fg-omit",
+    counter_strip="displaced-y"
+)
+ARMS["m-snap-cef-dsk"] = replace(
+    ARMS["cef-skip-dsk"], placement_value="frac", grant="driver", holders=2, movies="dsk-counter",
+    overrides=("dskcounter",), counter_strip="distinct",
+    expect={"frozen_frame": "PASS", "frozen_region": "PASS", "cost": "PASS", "geometry": "PASS"},
+)
+ARMS["m-snap-cef-underlay-omit"] = replace(
+    ARMS["m-snap-cef"], splice="frac-underlay-omit", capture="engage", holders=0, twin=None,
+    expect={"holder_pixels": "FAIL"},
+)
+ARMS["m-geo-frac-origin-chrome"] = replace(
+    ARMS["m-snap-lbfrac"], placement_value="frac", placement_mode="probe", capture="engage", holders=0, twin=None,
+    expect={"geometry": "FAIL"},
+)
+for _tag in ("dpr15", "dpr2"):
+    ARMS[f"m-geo-frac-{_tag}"] = replace(
+        ARMS[f"m-snap-{_tag}"], placement_value="frac", placement_mode="probe", capture="engage", holders=0, twin=None,
+        expect={"geometry": "FAIL"},
+    )
 DISPLACED = {"frac": ("sn-frac", ("m-snap-dpr15", "m-snap-dpr2")), "shift": ("snap-shift", ("m-snap", "m-snap-dpr15", "m-snap-dpr2"))}
 """Displaced-edge FAIL controls on the 1920x1080 cells: `sn` unrounded at DPR 1.5 and 2 (at DPR 1 the alpha scan rejects
 it, no holder) and the holder one device px right at every DPR."""
@@ -409,7 +517,7 @@ CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
     "tone": (("m-tone",), ("m-tone-raw",)),
     "overlay": (("m-on",), ("m-bridge-off",)),
     "cost": (("case:cost-50",), ("case:cost-50-eps",)),
-    "holder_pixels": (tuple(SNAPS), (*FAILS, "case:holder-shift")),
+    "holder_pixels": (tuple(SNAPS), (*FAILS, "wrongrule-chrome", "case:holder-shift")),
     "reference": ((*SNAPS, *FAILS, "case:reference-valid"), ("perfect-shift",),
                   ("case:reference-stale", "case:reference-extra", "case:reference-unpaused")),
     "mask": ((*SNAPS, *FAILS, "m-tone", "case:mask-production"), (),
@@ -420,7 +528,9 @@ CONTROLS: dict[str, tuple[tuple[str, ...], ...]] = {
     "hidden": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-nohide",), ("case:hide-duplicate", "case:hide-shift")),
     "shown": (("life-hide-twin", "life-hide-screen-twin"), ("life-hide-noshow",)),
     "grant": (("grant-chrome",), ("grant-attach", "channel-predefined")),
-    "scope": ((), ("m-raw-prod", "m-preview-prod")),
+    "scope": (("m-raw-prod-forge-snap-getter-kb",),
+              tuple(n for n in ARMS if (n in ("m-raw-prod", "m-preview-prod") or "-prod-forge-" in n)
+                    and n != "m-raw-prod-forge-snap-getter-kb")),
 }
 """Per gated check: (positive controls -> PASS, negative controls -> FAIL[, scorer cases that must be INCONCLUSIVE])."""
 
@@ -454,10 +564,11 @@ HOOK_JS = r"""
   }
   function track(v) {
     if (recs.has(v)) return;
-    var r = {id: X.vids.length, src: String(v.currentSrc || v.src || '').split('/').pop(), rv: [], rvAt: [], detach: null, tuple: null, err: null};
+    var r = {id: X.vids.length, src: String(v.currentSrc || v.src || '').split('/').pop(), rv: [], rvAt: [],
+             freezeDraws: [], detach: null, tuple: null, err: null};
     recs.set(v, r); X.vids.push(r); els.push(v);
     function cb(t, md) {
-      r.rv.push([md.presentationTime, md.mediaTime, md.presentedFrames]); r.rvAt.push(performance.now());
+      r.rv.push([md.presentationTime, md.mediaTime, md.presentedFrames, md.expectedDisplayTime]); r.rvAt.push(performance.now());
       if (r.rv.length > 900) { r.rv.splice(0, r.rv.length - 900); r.rvAt.splice(0, r.rvAt.length - 900); }
       if (!r.tuple && !r.err) {
         try { var f = new VideoFrame(v), c = f.colorSpace; r.tuple = [c.primaries, c.transfer, c.matrix, c.fullRange].join('/'); f.close(); }
@@ -473,6 +584,30 @@ HOOK_JS = r"""
     for (var j = 0; j < els.length; j++) { var r = recs.get(els[j]); if (r.detach === null && !els[j].isConnected) r.detach = performance.now(); }
   }
   new MutationObserver(scan).observe(document, {childList: true, subtree: true});
+  var nativeDrawImage = CanvasRenderingContext2D.prototype.drawImage;
+  CanvasRenderingContext2D.prototype.drawImage = function (source) {
+    if (!(source && source.tagName === 'VIDEO')) return nativeDrawImage.apply(this, arguments);
+    track(source);
+    var r = recs.get(source);
+    if (!(X.armed && this.canvas && !this.canvas.isConnected && !this.canvas.id))
+      return nativeDrawImage.apply(this, arguments);
+    var draw = {startedAt: performance.now(), argumentCount: arguments.length,
+                beforeTimestampUs: null, afterTimestampUs: null,
+                finishedAt: null, durationMs: null, beforeError: null, afterError: null};
+    function timestamp(key) {
+      var f = null;
+      try { f = new VideoFrame(source); draw[key + 'TimestampUs'] = f.timestamp; }
+      catch (e) { draw[key + 'Error'] = String(e); }
+      finally { if (f) f.close(); }
+    }
+    timestamp('before');
+    try { return nativeDrawImage.apply(this, arguments); }
+    finally {
+      timestamp('after');
+      draw.finishedAt = performance.now(); draw.durationMs = draw.finishedAt - draw.startedAt;
+      r.freezeDraws.push(draw);
+    }
+  };
   var takeValue, takes = [];
   Object.defineProperty(window, '__obedTakeMs', {configurable: true, get: function () { return takeValue; },
     set: function (v) { takeValue = v; takes.push([performance.now(), typeof v === 'number' && isFinite(v) ? v : null]); }});
@@ -674,10 +809,269 @@ PLACEMENT_JS = "('__obedPlacement' in window)?String(window.__obedPlacement):nul
 PREDEFINE_JS = ("Object.defineProperty(window,'__obedPlacement',{get:function(){return 'snap'},enumerable:false,"
                 "configurable:false})")
 """`channel-predefined`: a forged `snap` getter defined before the host's first-run script, which then throws."""
+FORGERY_JS = {
+    f"{value}-assignment": ("(function(){window.__obedPlacement=%s;var d=Object.getOwnPropertyDescriptor(window,'__obedPlacement');"
+                              "return {read:String(window.__obedPlacement),kind:'assignment',configurable:d.configurable,"
+                              "enumerable:d.enumerable,writable:d.writable===true}})()") % json.dumps(value)
+    for value in ("snap", "frac")
+} | {
+    f"{value}-getter": ("(function(){Object.defineProperty(window,'__obedPlacement',{get:function(){return %s},enumerable:false,"
+                          "configurable:false});var d=Object.getOwnPropertyDescriptor(window,'__obedPlacement');"
+                          "return {read:String(window.__obedPlacement),kind:'getter',configurable:d.configurable,"
+                          "enumerable:d.enumerable,writable:false}})()") % json.dumps(value)
+    for value in ("snap", "frac")
+}
 
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def placement_file_ref(path: Path, run_dir: Path, *, mtime_ns: int | None = None,
+                       saved_by_obs: bool | None = None, retained: bool | None = None) -> dict[str, Any]:
+    path, run_dir = path.resolve(), run_dir.resolve()
+    try:
+        relative = path.relative_to(run_dir)
+    except ValueError as exc:
+        raise ValueError(f"placement evidence must be below its run directory: {path}") from exc
+    if not path.is_file():
+        raise ValueError(f"placement evidence file is missing: {path}")
+    ref: dict[str, Any] = {"path": relative.as_posix(), "sha256": sha256_file(path)}
+    if mtime_ns is not None:
+        ref["mtimeNs"] = int(mtime_ns)
+    if saved_by_obs is not None:
+        ref["savedByObs"] = bool(saved_by_obs)
+    if retained is not None:
+        ref["retained"] = bool(retained)
+    return ref
+
+
+def _placement_ref_bytes(ref: Any, run_dir: Path, *, collection: bool = False, load: bool = True) -> bytes:
+    if not isinstance(ref, dict) or set(("path", "sha256")) - set(ref):
+        raise ValueError(f"malformed placement FileRef: {ref!r}")
+    relative = Path(ref["path"])
+    if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != ref["path"]:
+        raise ValueError(f"placement FileRef is not a normalized relative path: {ref.get('path')!r}")
+    path = (run_dir / relative).resolve()
+    try:
+        path.relative_to(run_dir.resolve())
+    except ValueError as exc:
+        raise ValueError(f"placement FileRef escapes its run directory: {ref['path']!r}") from exc
+    retained = ref.get("retained", True)
+    if not isinstance(retained, bool):
+        raise ValueError(f"malformed placement FileRef retention: {ref!r}")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(ref["sha256"])):
+        raise ValueError(f"placement FileRef digest mismatch: {ref['path']!r}")
+    if path.is_file() and sha256_file(path) != ref["sha256"]:
+        raise ValueError(f"placement FileRef digest mismatch: {ref['path']!r}")
+    if retained and not path.is_file():
+        raise ValueError(f"placement FileRef is missing: {ref['path']!r}")
+    if load and not path.is_file():
+        raise ValueError(f"placement FileRef was not retained: {ref['path']!r}")
+    if collection and (not integer(ref.get("mtimeNs")) or not isinstance(ref.get("savedByObs"), bool)):
+        raise ValueError(f"malformed placement CollectionRef: {ref!r}")
+    return path.read_bytes() if load else b""
+
+
+def _placement_capture_name(capture: placement_probe.ProbeCapture, trail: tuple[str, ...]) -> str:
+    label = "-".join(re.sub(r"[^a-zA-Z0-9_.-]", "-", part) for part in trail if part) or "capture"
+    pose = "none" if capture.pose is None else str(capture.pose)
+    return f"{label}-{capture.phase}-{pose}-{capture.sequence}.png"
+
+
+def serialize_placement_calibration(value: Any, run_dir: Path) -> dict[str, Any]:
+    """Strict §11.6 JSON conversion. Probe PNG bytes become digest-bound files; transaction evidence references input."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    capture_dir = run_dir / "placement"
+    root_input = value.get("input") if isinstance(value, dict) else None
+
+    def convert(item: Any, trail: tuple[str, ...]) -> Any:
+        if isinstance(item, Enum):
+            return item.value
+        if isinstance(item, placement_probe.ProbeCapture):
+            capture_dir.mkdir(parents=True, exist_ok=True)
+            path = capture_dir / _placement_capture_name(item, trail)
+            if path.exists() and path.read_bytes() != item.png:
+                raise ValueError(f"two placement captures map to {path.name}")
+            path.write_bytes(item.png)
+            return {f.name: placement_file_ref(path, run_dir) if f.name == "png" else convert(getattr(item, f.name), (*trail, f.name))
+                    for f in fields(item)}
+        if is_dataclass(item):
+            return {f.name: ({"$ref": "#/placementCalibration/input"}
+                              if f.name == "evidence" and getattr(item, f.name) is root_input and root_input is not None
+                              else convert(getattr(item, f.name), (*trail, f.name))) for f in fields(item)}
+        if isinstance(item, dict):
+            if not all(isinstance(k, str) for k in item):
+                raise TypeError(f"placement record keys must be strings at {trail!r}")
+            return {k: convert(v, (*trail, k)) for k, v in item.items()}
+        if isinstance(item, (tuple, list)):
+            return [convert(v, (*trail, str(i))) for i, v in enumerate(item)]
+        if isinstance(item, bytes):
+            raise TypeError(f"raw bytes are allowed only as ProbeCapture.png at {trail!r}")
+        if isinstance(item, Path):
+            raise TypeError(f"Path is not a placement record value; use a FileRef at {trail!r}")
+        if item is None or isinstance(item, (str, int, float, bool)):
+            if isinstance(item, float) and not math.isfinite(item):
+                raise TypeError(f"non-finite placement record number at {trail!r}")
+            return item
+        raise TypeError(f"unsupported placement record value {type(item).__name__} at {trail!r}")
+
+    encoded = convert(value, ())
+    if not isinstance(encoded, dict):
+        raise TypeError("placementCalibration must be a record")
+    return encoded
+
+
+def _probe_identity(value: dict[str, Any]) -> placement_probe.ProbeIdentity:
+    return placement_probe.ProbeIdentity(**value)
+
+
+def _probe_capture(value: dict[str, Any], run_dir: Path) -> placement_probe.ProbeCapture:
+    return placement_probe.ProbeCapture(identity=_probe_identity(value["identity"]), sequence=value["sequence"], nonce=value["nonce"],
+                                        phase=value["phase"], pose=value["pose"], png=_placement_ref_bytes(value["png"], run_dir),
+                                        paint_observed_s=value["paint_observed_s"], capture_started_s=value["capture_started_s"],
+                                        capture_finished_s=value["capture_finished_s"])
+
+
+def placement_classifier_input(value: dict[str, Any], run_dir: Path) -> placement_probe.ClassifierInput:
+    return placement_probe.ClassifierInput(
+        spec=placement_probe.ProbeSpec(**value["spec"]), assets_sha256=tuple(value["assets_sha256"]),
+        identity=_probe_identity(value["identity"]), ready_state=value["ready_state"], video_size=tuple(value["video_size"]),
+        color_tuple=tuple(value["color_tuple"]), freshness=tuple(_probe_capture(v, run_dir) for v in value["freshness"]),
+        poses=tuple(placement_probe.PoseGeometry(pose=v["pose"], rect=tuple(v["rect"]), content_box=tuple(v["content_box"]),
+                                                  box=tuple(v["box"]), snap_dy=v["snap_dy"], frac_dy=v["frac_dy"])
+                    for v in value["poses"]),
+        captures=tuple(_probe_capture(v, run_dir) for v in value["captures"]),
+    )
+
+
+def placement_probe_result(value: dict[str, Any]) -> placement_probe.ProbeResult:
+    return placement_probe.ProbeResult(
+        verdict=placement_probe.ProbeVerdict(value["verdict"]),
+        tone_map=None if value.get("tone_map") is None else placement_probe.ToneMap(value["tone_map"]),
+        grant_eligible=value["grant_eligible"], reason=value["reason"],
+        scores=tuple(placement_probe.PoseScore(pose=s["pose"], tone_map=placement_probe.ToneMap(s["tone_map"]),
+                                               snap_share=s["snap_share"], frac_share=s["frac_share"],
+                                               inner_pixels=s["inner_pixels"]) for s in value["scores"]),
+    )
+
+
+def deserialize_placement_calibration(value: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Resolve §11.6 dataclasses and verify every capture/FileRef for Keynote-free rescoring."""
+    from obed_edom import managed_obs
+
+    decoded = dict(value)
+    input_value = value.get("input")
+    evidence = placement_classifier_input(input_value, run_dir) if isinstance(input_value, dict) else None
+    decoded["input"] = evidence
+    if isinstance(value.get("classification"), dict):
+        decoded["classification"] = placement_probe_result(value["classification"])
+    if isinstance(value.get("engine"), dict):
+        decoded["engine"] = managed_obs.EngineIdentity(**value["engine"])
+
+    def request(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return None
+        return managed_obs.CalibrationRequest(spec=placement_probe.ProbeSpec(**item["spec"]), url=item["url"],
+                                              engine=managed_obs.EngineIdentity(**item["engine"]),
+                                              program_target_id=item["program_target_id"],
+                                              program_context_id=item["program_context_id"],
+                                              connection_generation=item["connection_generation"],
+                                              placement=item.get("placement", "preview"))
+
+    decoded["request"] = request(value.get("request"))
+    tx = value.get("transaction")
+    if isinstance(tx, dict):
+        program = managed_obs.ProgramCheck(**{**tx["program"], "media": tuple(tx["program"]["media"])}) if isinstance(tx.get("program"), dict) else None
+        persistence = managed_obs.PersistenceCheck(**{**tx["persistence"], "differences": tuple(tx["persistence"]["differences"]),
+                                                       "allowed": tuple(tx["persistence"]["allowed"])}) if isinstance(tx.get("persistence"), dict) else None
+        tx_evidence = evidence if tx.get("evidence") == {"$ref": "#/placementCalibration/input"} else None
+        decoded["transaction"] = managed_obs.CalibrationResult(
+            request=request(tx.get("request")), evidence=tx_evidence, program=program,
+            isolation_ok=tx["isolation_ok"], cleanup_verified=tx["cleanup_verified"], restored=tx["restored"],
+            persistence=persistence, errors=tuple(tx["errors"]), started_s=tx["started_s"], finished_s=tx["finished_s"])
+    return decoded
+
+
+def placement_schema_problems(value: Any, run_dir: Path) -> list[str]:
+    required = {"schemaVersion", "backend", "placement", "obsVersion", "engine", "request", "assets", "player", "input",
+                "classification", "transaction", "events", "persistence", "integrity", "gates"}
+    if not isinstance(value, dict):
+        return ["placementCalibration is not a record"]
+    problems = [f"placementCalibration missing {name}" for name in sorted(required - set(value))]
+    problems += [f"placementCalibration has unsupported {name}" for name in sorted(set(value) - required)]
+    if value.get("schemaVersion") != PLACEMENT_SCHEMA_VERSION:
+        problems.append(f"schemaVersion {value.get('schemaVersion')!r} != {PLACEMENT_SCHEMA_VERSION}")
+    if value.get("backend") not in PLACEMENT_BACKENDS:
+        problems.append(f"backend {value.get('backend')!r} is not one of {PLACEMENT_BACKENDS}")
+    asset_fields = {"manifestSha256", "patternSha256", "motionSha256"}
+    player_fields = {"stockSha256", "liveSha256", "renderingSha256"}
+    assets = value.get("assets") if isinstance(value.get("assets"), dict) else {}
+    player = value.get("player") if isinstance(value.get("player"), dict) else {}
+    if set(assets) != asset_fields:
+        problems.append(f"assets fields {sorted(assets)} != {sorted(asset_fields)}")
+    if set(player) != player_fields:
+        problems.append(f"player fields {sorted(player)} != {sorted(player_fields)}")
+    for name, digest in [*(assets.items()), *(player.items())]:
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            problems.append(f"{name} is not a full sha256")
+    try:
+        decoded = deserialize_placement_calibration(value, run_dir)
+        transaction_value = value.get("transaction")
+        if transaction_value is not None:
+            if not isinstance(transaction_value, dict):
+                problems.append("transaction is not a record")
+            elif ((value.get("input") is None and transaction_value.get("evidence") is not None)
+                  or (value.get("input") is not None
+                      and transaction_value.get("evidence") != {"$ref": "#/placementCalibration/input"})):
+                problems.append("transaction evidence does not match placementCalibration.input")
+        if decoded.get("transaction") is not None and decoded["transaction"].evidence is not decoded.get("input"):
+            problems.append("transaction evidence does not resolve to placementCalibration.input")
+        persistence = value.get("persistence")
+        if isinstance(persistence, dict):
+            persistence_fields = {"baseline", "nullBefore", "nullAfter", "cleanup", "quit", "backup",
+                                  "lastRemovalMtimeNs", "checks"}
+            if set(persistence) != persistence_fields:
+                problems.append(f"persistence fields {sorted(persistence)} != {sorted(persistence_fields)}")
+            if not integer(persistence.get("lastRemovalMtimeNs")):
+                problems.append("persistence lastRemovalMtimeNs is not an integer")
+            for name in ("baseline", "nullBefore", "nullAfter", "cleanup", "quit"):
+                if persistence.get(name) is not None:
+                    _placement_ref_bytes(persistence[name], run_dir, collection=True)
+            for ref in persistence.get("backup") or []:
+                _placement_ref_bytes(ref, run_dir)
+        integrity = value.get("integrity") if isinstance(value.get("integrity"), dict) else {}
+        if set(integrity) != {"recording", "rgba", "telemetry"}:
+            problems.append("integrity fields are not recording/rgba/telemetry")
+        if integrity.get("recording") is not None:
+            _placement_ref_bytes(integrity["recording"], run_dir, load=False)
+        for ref in integrity.get("rgba") or []:
+            _placement_ref_bytes(ref, run_dir)
+        if integrity.get("telemetry") is not None:
+            _placement_ref_bytes(integrity["telemetry"], run_dir)
+        events = value.get("events")
+        if not isinstance(events, list) or any(not isinstance(event, dict) or set(event) != {"at", "event", "placement"}
+                                              or not number(event["at"]) or not isinstance(event["event"], str)
+                                              or not isinstance(event["placement"], dict) for event in events):
+            problems.append("events are malformed")
+        gates = value.get("gates")
+        if not isinstance(gates, dict) or any(not isinstance(gate, dict)
+                                              or set(gate) != {"verdict", "problems", "detail"}
+                                              or gate["verdict"] not in ("PASS", "FAIL", "INCONCLUSIVE", "REPORTED")
+                                              or not isinstance(gate["problems"], list) or not isinstance(gate["detail"], dict)
+                                              for gate in gates.values()):
+            problems.append("gates are malformed")
+    except (KeyError, TypeError, ValueError) as exc:
+        problems.append(f"placementCalibration malformed: {type(exc).__name__}: {exc}")
+    return problems
 
 
 def counted_splice(player: bytes, before: bytes, after: bytes, count: int) -> bytes:
@@ -992,6 +1386,29 @@ def _foreground(doc: dict[str, Any], event: int) -> None:
     parent["layers"].extend([_texture_layer(t, r, node) for t, r in zip(FOREGROUND_TEXTURES, FOREGROUND_RECTS)] + [branch])
 
 
+def _edge_foreground(doc: dict[str, Any], event: int) -> None:
+    _foreground(doc, event)
+    builds = list(_effects(doc["events"]))
+    video = [(n, p) for n, p in _layers(builds[0]["baseLayer"]) if n.get("isVideoLayer")]
+    if len(video) != 1 or video[0][1] is None:
+        raise ValueError("expected one video layer inside the renderMovie build")
+    parent = video[0][1]
+    parent["layers"] = [child for child in parent["layers"] if child.get("texture") != FOREGROUND_FRAME]
+    textures = {child.get("texture"): child for child in parent["layers"] if child.get("texture") in FOREGROUND_TEXTURES}
+    branches = [child for child in parent["layers"]
+                if any(grandchild.get("texture") == FOREGROUND_SQUARE for grandchild in child.get("layers") or [])]
+    if set(textures) != set(FOREGROUND_TEXTURES) or len(branches) != 1:
+        raise ValueError("expected the inset foreground layers")
+    for texture, rect in zip(FOREGROUND_TEXTURES, EDGE_FOREGROUND_RECTS):
+        x, y, w, h = rect
+        textures[texture]["initialState"].update(position={"pointX": x + w / 2, "pointY": y + h / 2}, width=w, height=h)
+    x, y, w, h = EDGE_FOREGROUND_SQUARE_RECT
+    branch = branches[0]
+    branch["initialState"].update(position={"pointX": x + w / 2, "pointY": y + h / 2}, width=w, height=h)
+    for child in branch["layers"]:
+        child["initialState"].update(position={"pointX": w / 2, "pointY": h / 2}, width=w, height=h)
+
+
 def _video_layer(doc: dict[str, Any]) -> dict[str, Any]:
     builds = list(_effects(doc["events"]))
     video = [n for b in builds for n, _ in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
@@ -1018,6 +1435,76 @@ def _clip(axis: str) -> Callable[[dict[str, Any], int], None]:
     return edit
 
 
+def _clip_near(axis: str) -> Callable[[dict[str, Any], int], None]:
+    def edit(doc: dict[str, Any], event: int) -> None:
+        builds = list(_effects(doc["events"]))
+        hits = [(n, p) for b in builds for n, p in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
+        if len(hits) != 1 or hits[0][1] is None:
+            raise ValueError("expected one video layer with a parent in the slide's renderMovie builds")
+        video_node, parent_node = hits[0]
+        video, parent = video_node["initialState"], parent_node["initialState"]
+        origin = parent.get("boundsOrigin")
+        if origin is None and isinstance(parent.get("bounds"), dict):
+            origin = parent["bounds"].get("origin")
+        origin_values = ([origin.get("pointX"), origin.get("pointY")] if isinstance(origin, dict)
+                         else list(origin) if isinstance(origin, (list, tuple)) else [0.0, 0.0] if origin is None else [origin])
+        identity4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        if (len(origin_values) != 2 or not all(number(value) and value == 0 for value in origin_values)
+                or parent.get("affineTransform") != [1, 0, 0, 1, 0, 0]
+                or parent.get("sublayerTransform") != identity4
+                or parent.get("rotation") != 0 or parent.get("scale") != 1):
+            raise ValueError("near clipping requires a zero bounds origin and an untransformed parent")
+        size, coord = ("width", "pointX") if axis == "x" else ("height", "pointY")
+        content_near = video["position"][coord] - video["anchorPoint"][coord] * video[size]
+        clip_near = content_near + 0.4 * video[size] + 0.37
+        parent_far = parent["position"][coord] + (1 - parent["anchorPoint"][coord]) * parent[size]
+        parent[size] -= clip_near
+        parent["position"] = {**parent["position"], coord: parent_far - (1 - parent["anchorPoint"][coord]) * parent[size]}
+        for child in parent_node["layers"]:
+            state = child["initialState"]
+            state["position"] = {**state["position"], coord: state["position"][coord] - clip_near}
+        parent["masksToBounds"] = True
+    return edit
+
+
+def _dsk_counter(doc: dict[str, Any], event: int) -> None:
+    builds = list(_effects(doc["events"]))
+    by_asset = {build.get("movie", {}).get("asset"): build for build in builds}
+    expected = {Path(name).stem for name in DSK_COUNTER_OFFSETS}
+    if set(by_asset) != expected:
+        raise ValueError(f"expected the two DSK movie assets, found {sorted(by_asset)}")
+    for filename, offset in DSK_COUNTER_OFFSETS.items():
+        asset = (doc.get("assets") or {}).get(Path(filename).stem)
+        urls = asset.get("url") if isinstance(asset, dict) else None
+        expected_url = f"assets/{filename}"
+        if not isinstance(urls, dict) or urls.get("native") != expected_url:
+            raise ValueError(f"expected native DSK movie URL {expected_url!r}")
+        if offset:
+            urls["native"] = f"{expected_url}#t={offset:g}"
+            if urls.get("web") == expected_url:
+                urls["web"] = urls["native"]
+
+
+def _nooffset(doc: dict[str, Any], event: int, axis: str, displacement: float) -> None:
+    _clip_near(axis)(doc, event)
+    hits = [(n, p) for b in _effects(doc["events"]) for n, p in _layers(b["baseLayer"]) if n.get("isVideoLayer")]
+    if len(hits) != 1 or hits[0][1] is None:
+        raise ValueError("expected one video layer with a parent in the slide's renderMovie builds")
+    video, parent = (node["initialState"] for node in hits[0])
+    size, coord = ("width", "pointX") if axis == "x" else ("height", "pointY")
+    parent_near = parent["position"][coord] - parent["anchorPoint"][coord] * parent[size]
+    video_near = parent_near + video["position"][coord] - video["anchorPoint"][coord] * video[size]
+    parent["position"] = {**parent["position"], coord: parent["position"][coord] + displacement - video_near}
+
+
+def _nooffset_x(doc: dict[str, Any], event: int) -> None:
+    _nooffset(doc, event, "x", NOOFFSET_X_DISPLACEMENT)
+
+
+def _nooffset_y(doc: dict[str, Any], event: int) -> None:
+    _nooffset(doc, event, "y", NOOFFSET_Y_DISPLACEMENT)
+
+
 def _scale(doc: dict[str, Any], event: int) -> None:
     _video_layer(doc)["initialState"]["affineTransform"] = [1.5, 0, 0, 1.5, 0, 0]
 
@@ -1030,7 +1517,12 @@ def _base(doc: dict[str, Any], event: int) -> None:
 
 
 SLIDE_OVERRIDES: dict[str, Callable[[dict[str, Any], int], None]] = {"cut": _cut, "automatic": _automatic, "fg": _foreground,
-                                                                    "scale": _scale, "base": _base, "clipx": _clip("x"), "clipy": _clip("y")}
+                                                                    "edgefg": _edge_foreground,
+                                                                    "dskcounter": _dsk_counter,
+                                                                    "nooffsetx": _nooffset_x,
+                                                                    "nooffsety": _nooffset_y,
+                                                                    "scale": _scale, "base": _base, "clipx": _clip("x"), "clipy": _clip("y"),
+                                                                    "clipnearx": _clip_near("x"), "clipneary": _clip_near("y")}
 HEADER_OVERRIDES: dict[str, Callable[[dict[str, Any]], None]] = {"loop": lambda header: header.update(loopSlideshow=1)}
 
 
@@ -1063,6 +1555,27 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
         if rel in files:
             return files[rel]
         if rel.lower().endswith(MOVIE_SUFFIXES) and arm.movies:
+            if arm.movies == "dsk-counter":
+                filename = Path(rel).name
+                target_prefix = f"assets/{header['slideList'][arm.slide - 1]}/assets/"
+                if filename in DSK_COUNTER_OFFSETS and rel.startswith(target_prefix):
+                    digest = binary.sha256_file(DSK_COUNTER_MOVIE) if DSK_COUNTER_MOVIE.is_file() else None
+                    if digest != DSK_COUNTER_SHA256:
+                        raise ValueError(f"DSK counter movie digest {digest!r} does not match its release pin")
+                    fps = dsk_counter_fps()
+                    if fps is None:
+                        raise ValueError("DSK counter movie frame rate is unavailable")
+                    info = {"path": str(DSK_COUNTER_MOVIE), "bytes": DSK_COUNTER_MOVIE.stat().st_size,
+                            "sha256": digest, "seconds": binary.SECONDS, "fps": fps,
+                            "frames": binary.frame_count(binary.SECONDS, round(fps)),
+                            "seekOffsetS": DSK_COUNTER_OFFSETS[filename]}
+                else:
+                    info = h264_copy(scratch, unmod / rel) if (unmod / rel).is_file() else None
+                    if info is None:
+                        return unmod / rel
+                movies[rel] = info
+                files[rel] = Path(info["path"])
+                return files[rel]
             if arm.movies == "h264":
                 info = h264_copy(scratch, unmod / rel) if (unmod / rel).is_file() else None
                 if info is not None:
@@ -1093,6 +1606,9 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
         return path
 
     header = read_doc(unmod / "assets/header.json")
+    stock = (unmod / "assets/player/main.js").read_bytes()
+    if arm.movies == "dsk-counter" and any(stock.count(anchor) != count for anchor, count in DSK_PLAYER_SRC_ANCHORS):
+        raise ValueError("DSK player does not have the pinned native-URL-to-video-src path")
     overrides: dict[str, str] = {}
     out_dir = scratch / "overrides" / tag
     if arm.overrides:
@@ -1120,7 +1636,6 @@ def resolve(arm: Arm, scratch: Path, decision: dict[str, Any] | None = None, *, 
             if path.suffix.lower() in MOVIE_SUFFIXES and path.is_file():
                 resolver(unmod, str(path.relative_to(unmod)))
     target = find_target(lambda rel: read_doc(resolver(unmod, rel)), arm.slide)
-    stock = (unmod / "assets/player/main.js").read_bytes()
     served = {"mode": arm.mode, "splice": arm.splice, "stockSha256": sha256_bytes(stock),
               "expected": sha256_bytes(served_player(stock, arm.mode, arm.splice))}
     slides = [{"originalOrdinal": i + 1, "playerIndex": i, "exportedUuid": u, "skipped": False}
@@ -1553,6 +2068,10 @@ def score_frozen(holder_index: int | None, reference: int | None, demixed: list[
     return result(ok, problems, holder=holder_index, reference=reference, demixed=demixed)
 
 
+def _demix_limit(cal: Calibration, e: float) -> float:
+    return cal.tau / (1 - e)
+
+
 def score_region(regions: list[np.ndarray], es: list[float], cal: Calibration = Calibration()) -> dict[str, Any]:
     """Ô (unclipped premultiplied RGBA) over the movie region constant across admitted frames: per frame
     max |Ô - median| <= tau / (1 - e) on every channel, alpha included."""
@@ -1563,15 +2082,20 @@ def score_region(regions: list[np.ndarray], es: list[float], cal: Calibration = 
         return result(None, ["empty or non-finite demixed region"])
     med = np.median(stack, axis=0)
     spreads = [float(np.abs(s - med).max()) for s in stack]
-    return result(all(s <= cal.tau / (1 - e) for s, e in zip(spreads, es)), spreads=spreads)
+    return result(all(s <= _demix_limit(cal, e) for s, e in zip(spreads, es)), spreads=spreads)
 
 
 def score_foreground(candidates: list[np.ndarray], s_live: np.ndarray, mask: np.ndarray,
-                     cal: Calibration = Calibration()) -> dict[str, Any]:
+                     cal: Calibration = Calibration(), *, demix_es: list[float] | None = None) -> dict[str, Any]:
     if not mask.any():
         return result(None, ["no counter-block pixel under the foreground"])
-    worst = max(float(np.abs(c[..., :3].astype(np.float32) - s_live[..., :3])[mask].max()) for c in candidates)
-    return result(worst <= cal.tau, worst=worst, pixels=int(mask.sum()))
+    es = demix_es or []
+    if len(candidates) != len(es) + 1 or not all(number(e) and 0 <= e < 1 for e in es):
+        return result(None, ["foreground candidates do not match finite demix progress"])
+    worsts = [float(np.abs(c[..., :3].astype(np.float32) - s_live[..., :3])[mask].max()) for c in candidates]
+    limits = [cal.tau, *(_demix_limit(cal, e) for e in es)]
+    return result(all(worst <= limit for worst, limit in zip(worsts, limits)), worst=max(worsts), worsts=worsts,
+                  limits=limits, pixels=int(mask.sum()))
 
 
 def score_tone(holder: np.ndarray, s_live: np.ndarray, s_live2: np.ndarray, mask: np.ndarray, *, identity: bool) -> dict[str, Any]:
@@ -1688,6 +2212,24 @@ def holder_strip(image: np.ndarray, holder: dict[str, Any], decoder: dict[str, A
     cx, cy, cw, _ = decoder["content"]
     hx, hy = holder["canvasRect"][:2]
     return decode_strip(image, ((cx - hx) * dsf, (cy - hy) * dsf), cw * dsf / decoder["size"][0])
+
+
+def holder_strip_geometry(holder: dict[str, Any], decoder: dict[str, Any]) -> str | None:
+    canvas, content, size = holder.get("canvasRect"), decoder.get("content"), decoder.get("size")
+    if not box_ok(canvas) or not box_ok(content) or not isinstance(size, list) or len(size) != 2 or not all(number(v) for v in size):
+        return None
+    if canvas[2] <= 0 or canvas[3] <= 0 or size[0] <= 0 or size[1] <= 0:
+        return None
+    sx, sy, sw, sh = binary.STRIP_RECT
+    scale = content[2] / size[0]
+    ax0, ay0, aw, ah = content[0] + sx * scale, content[1] + sy * scale, sw * scale, sh * scale
+    bx0, by0, bw, bh = canvas
+    ax1, ay1, bx1, by1 = ax0 + aw, ay0 + ah, bx0 + bw, by0 + bh
+    if ax1 <= bx0 or bx1 <= ax0 or ay1 <= by0 or by1 <= ay0:
+        return "outside"
+    if bx0 <= ax0 and by0 <= ay0 and ax1 <= bx1 and ay1 <= by1:
+        return "inside"
+    return "partial"
 
 
 def production_support(record: dict[str, Any], images: Mapping[str, np.ndarray], decoder_id: Any, shape: tuple[int, int],
@@ -1809,6 +2351,69 @@ def score_holder_pixels(a0: np.ndarray | None, live: np.ndarray | None, box: tup
     if None in split.values():
         return result(None, ["no kept interior or edge-band px"], **split)
     return result(max(split.values()) <= cal.tau, **split)
+
+
+def score_displaced_holder(a0: np.ndarray | None, live: np.ndarray | None, holder: dict[str, Any] | None,
+                           decoder: dict[str, Any] | None, stage: dict[str, Any] | None, mask: np.ndarray | None,
+                           lut: np.ndarray | None, axis: str, dsf: float,
+                           cal: Calibration = Calibration()) -> dict[str, Any]:
+    problems = []
+    if axis not in ("x", "y"):
+        problems.append(f"invalid displacement axis {axis!r}")
+    if a0 is None or live is None or a0.shape != live.shape:
+        problems.append("A0 or S_live missing or of different sizes")
+    if not isinstance(holder, dict) or not box_ok(holder.get("canvasRect")):
+        problems.append("holder canvas geometry missing or malformed")
+    if not isinstance(decoder, dict) or not box_ok(decoder.get("rect")) or not box_ok(decoder.get("content")):
+        problems.append("decoder geometry missing or malformed")
+    if not isinstance(stage, dict) or not number(stage.get(axis)):
+        problems.append("stage geometry missing or malformed")
+    if mask is None:
+        problems.append("no verified production mask")
+    if lut is None or np.shape(lut) != (256,):
+        problems.append("no L_path for the arm's compositing path")
+    if problems:
+        return result(None, problems)
+    index = 0 if axis == "x" else 1
+    displacement_css = decoder["rect"][index] - stage[axis]
+    displacement_px = displacement_css * dsf
+    if abs(displacement_px) < 1:
+        return result(None, [f"predicted {axis} displacement is less than one device pixel"],
+                      displacementCss=displacement_css, displacementPx=displacement_px)
+    canvas = holder["canvasRect"]
+    shifted = list(decoder["content"])
+    shifted[index] -= displacement_css
+    target_canvas = list(canvas)
+    target_canvas[index] -= displacement_css
+    x0, y0 = max(canvas[0], shifted[0], target_canvas[0]), max(canvas[1], shifted[1], target_canvas[1])
+    x1 = min(canvas[0] + canvas[2], shifted[0] + shifted[2], target_canvas[0] + target_canvas[2])
+    y1 = min(canvas[1] + canvas[3], shifted[1] + shifted[3], target_canvas[1] + target_canvas[3])
+    if x1 <= x0 or y1 <= y0:
+        return result(None, ["predicted displaced content overlap is empty"],
+                      displacementCss=displacement_css, displacementPx=displacement_px)
+    px0, py0, px1, py1 = math.ceil(x0 * dsf), math.ceil(y0 * dsf), math.floor(x1 * dsf), math.floor(y1 * dsf)
+    lo, hi = math.floor(displacement_px), math.ceil(displacement_px)
+    shifts = ((lo, 0), (hi, 0)) if axis == "x" else ((0, lo), (0, hi))
+    px0 = max(0, px0, *(-dx for dx, _ in shifts))
+    py0 = max(0, py0, *(-dy for _, dy in shifts))
+    px1 = min(a0.shape[1], px1, *(live.shape[1] - dx for dx, _ in shifts))
+    py1 = min(a0.shape[0], py1, *(live.shape[0] - dy for _, dy in shifts))
+    if px1 <= px0 or py1 <= py0:
+        return result(None, ["predicted displaced overlap falls outside the captured images"], displacementCss=displacement_css)
+    keep = ~mask[py0:py1, px0:px1]
+    for dx, dy in shifts:
+        keep &= ~mask[py0 + dy:py1 + dy, px0 + dx:px1 + dx]
+    if not keep.any():
+        return result(None, ["no unmasked pixels in the predicted displaced overlap"], displacementCss=displacement_css)
+    toned = a0.copy()
+    toned[py0:py1, px0:px1, :3] = np.asarray(lut, np.uint8)[toned[py0:py1, px0:px1, :3]]
+    reference = premul(toned[py0:py1, px0:px1])
+    samples = [premul(live[py0 + dy:py1 + dy, px0 + dx:px1 + dx]) for dx, dy in shifts]
+    lower, upper = np.minimum(*samples) - cal.tau, np.maximum(*samples) + cal.tau
+    outside = np.maximum(np.maximum(lower - reference, reference - upper), 0).max(axis=2)
+    worst = float(outside[keep].max())
+    return result(worst == 0, displacementCss=displacement_css, displacementPx=displacement_px,
+                  sampleOffsetsPx=[lo, hi], overlapPx=int(keep.sum()), worst=worst, attribution="displaced content")
 
 
 def score_perfect(perfect: np.ndarray | None, live: np.ndarray | None, box: tuple[int, int, int, int] | None,
@@ -2093,6 +2698,7 @@ class Profile:
     lifecycle: bool = True
     overrides: tuple[tuple[str, tuple[tuple[str, ...], ...]], ...] = ()
     mid_frames: int = MIN_MID_FRAMES
+    placement: str | None = None
 
     def arm(self, name: str, identity: bool | None = None) -> Arm:
         arm = ARMS[name]
@@ -2111,7 +2717,8 @@ class Profile:
 
 
 CEF_ONLY = ("cef-skip", "cef-skip-dsk")
-DX1 = Profile("DX-1", tuple(n for n in ARMS if n not in CEF_ONLY))
+CEF_PLACEMENT_ONLY = tuple(n for n in ARMS if "cef" in n and n not in CEF_ONLY)
+DX1 = Profile("DX-1", tuple(n for n in ARMS if n not in (*CEF_ONLY, *CEF_PLACEMENT_ONLY)))
 CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "on", "opaque-on", *CEF_ONLY),
               reported=("no_flash", "screen", "geometry", "exterior", "hidden", "shown", "frozen_frame", "frozen_region",
                         "foreground", "tone", "overlay", "cost", "holder_pixels", "reference", "mask", "grant"),
@@ -2119,6 +2726,38 @@ CEF = Profile("CEF", ("opaque-off", "off", "noblend", "on2", "cut-on", "cut-off"
 """DX-2 (§9.2): the DX-1 cross-fade, cut and opaque arms OBS can carry plus `cef-skip` (P2 2->3, DSK 7->8): CEF never
 gets the snapped-placement grant (decision 15), so each publishes a take with no holder; checks without a CEF arm are
 reported."""
+
+CEF_PLACEMENT_POSITIVES = tuple(_CEF_SNAP_ROWS)
+CEF_PLACEMENT_ARMS = (
+    "opaque-off", "off", "noblend", "on2", "cut-on", "cut-off", "on", "opaque-on",
+    *CEF_PLACEMENT_POSITIVES,
+    *(f"{name}-twin" for name in CEF_PLACEMENT_POSITIVES),
+    "m-paused-cef", "m-off-cef", "m-hold-cef", "m-fg-cef", "m-fg-omit-cef", "m-fg-swap-cef",
+    "m-tone-cef", "m-tone-cef-twin", "m-tone-raw-cef", "m-snap-cef-dsk", "wrongrule-cef", "wrongrule-cef-twin",
+    "m-snap-cef-nooffset-x", "m-snap-cef-nooffset-x-twin", "m-snap-cef-nooffset-y", "m-snap-cef-nooffset-y-twin",
+    "m-snap-cef-underlay-omit", "perfect-shift", "m-geo-scale", "m-geo-base",
+)
+CEF_PLACEMENT = Profile(
+    "CEF-placement", CEF_PLACEMENT_ARMS,
+    reported=("no_flash", "screen", "cut", "exterior", "hidden", "shown", "tone", "overlay", "scope", "grant"),
+    headless=False, lifecycle=False, placement="frac",
+    overrides=(
+        ("frozen_frame", (("m-paused-cef",), ("m-off-cef",))),
+        ("frozen_region", (("m-fg-cef",), ("m-hold-cef",))),
+        ("foreground", (("m-fg-cef",), ("m-fg-omit-cef", "m-fg-swap-cef", "case:fg-shifted", "case:fg-double", "case:fg-swapped"))),
+        ("tone", (("m-tone-cef",), ("m-tone-raw-cef",))),
+        ("holder_pixels", (CEF_PLACEMENT_POSITIVES,
+                           ("m-snap-cef-nooffset-x", "m-snap-cef-nooffset-y", "m-snap-cef-underlay-omit", "wrongrule-cef",
+                            "case:holder-shift"))),
+        ("reference", ((*CEF_PLACEMENT_POSITIVES, "case:reference-valid"), ("perfect-shift",),
+                       ("case:reference-stale", "case:reference-extra", "case:reference-unpaused"))),
+        ("mask", ((*CEF_PLACEMENT_POSITIVES, "m-tone-cef", "case:mask-production"), (),
+                  ("case:mask-whole", "case:mask-shift3", "case:mask-empty"))),
+        ("geometry", ((*CEF_PLACEMENT_POSITIVES, "m-snap-cef-dsk"),
+                      ("m-geo-scale", "m-geo-base"))),
+    ),
+    mid_frames=5,
+)
 
 
 ANIM_STATES = ("idle", "running", "paused", "finished")
@@ -2145,8 +2784,8 @@ def integer(value: Any) -> bool:
 
 def anim_problem(a: Any) -> str | None:
     """One transition-animation record: leaf and CSS play state from their enums, finite value, positive duration;
-    `ct`/`start` present, finite when populated, null only outside a timed state (`start` also while a running
-    animation's start is still pending at ct 0)."""
+    `ct`/`start` present, finite when populated, resolved current time in a timed state, and resolved start time for a
+    finished animation. Paused animations and running animations with a pending play task may have no start time."""
     if not isinstance(a, dict):
         return "not a record"
     if a.get("leaf") not in ("in", "out") or a.get("state") not in ANIM_STATES:
@@ -2160,7 +2799,7 @@ def anim_problem(a: Any) -> str | None:
             return f"{key} not finite"
     if a["ct"] is not None and a["ct"] < 0:
         return "negative currentTime"
-    if a["state"] in TIMED_STATES and (a["ct"] is None or (a["start"] is None and a["ct"] != 0)):
+    if a["state"] in TIMED_STATES and (a["ct"] is None or (a["state"] == "finished" and a["start"] is None)):
         return f"null timing while {a['state']}"
     return None
 
@@ -2201,7 +2840,19 @@ def schema_problems(record: dict[str, Any]) -> list[str]:
     vids = dump.get("vids", [])
     if not isinstance(vids, list) or not all(
             isinstance(v, dict) and integer(v.get("id")) and isinstance(v.get("rv"), list)
-            and all(quad(x, 3) and x[1] >= 0 and x[2] >= 0 for x in v["rv"]) and (v.get("detach") is None or number(v.get("detach")))
+            and all(isinstance(x, list) and len(x) in (3, 4) and all(number(n) for n in x)
+                    and x[1] >= 0 and x[2] >= 0 for x in v["rv"])
+            and isinstance(v.get("rvAt"), list) and len(v["rvAt"]) == len(v["rv"])
+            and all(number(value) for value in v["rvAt"])
+            and isinstance(v.get("freezeDraws", []), list)
+            and all(isinstance(draw, dict)
+                    and all(number(draw.get(key)) for key in ("startedAt", "finishedAt", "durationMs"))
+                    and (draw.get("argumentCount") is None or integer(draw.get("argumentCount")))
+                    and all(draw.get(key) is None or number(draw.get(key))
+                            for key in ("beforeTimestampUs", "afterTimestampUs"))
+                    and all(draw.get(key) is None or isinstance(draw.get(key), str)
+                            for key in ("beforeError", "afterError")) for draw in v.get("freezeDraws", []))
+            and (v.get("detach") is None or number(v.get("detach")))
             and all(v.get(k) is None or isinstance(v.get(k), str) for k in ("tuple", "err", "src")) for v in vids) \
             or len({v.get("id") for v in vids if isinstance(v, dict)}) != len(vids):
         problems.append("decoder/rVFC records malformed")
@@ -2430,8 +3081,23 @@ def placement_problems(record: dict[str, Any], arm: Arm, profile: Profile = DX1)
     (the first-run script is always installed) and absent on the production raw/preview page; a reload row also reads
     `invalid` in the fresh document before the host's re-grant and `snap` after it."""
     read = record.get("placement", "missing")
+    if arm.forgery:
+        value, kind = FORGERIES[arm.forgery]
+        forged = record.get("forgery")
+        problems = []
+        if not isinstance(forged, dict) or forged.get("read") != value or forged.get("kind") != kind:
+            problems.append(f"forgery {arm.forgery!r} did not take effect: {forged!r}")
+        if kind == "getter" and (forged or {}).get("configurable") is not False:
+            problems.append(f"forged getter is configurable: {forged!r}")
+        if read != value:
+            problems.append(f"page placement {read!r} != forged {value!r} before the advance")
+        return problems
     if arm.grant == "none":
         want = None if arm.page in ("raw", "preview") else "invalid"
+    elif arm.placement_value is not None:
+        want = arm.placement_value
+    elif profile.placement is not None:
+        want = profile.placement
     elif profile.headless:
         want = "snap"
     else:
@@ -2530,6 +3196,18 @@ def _fade_of(ev: Evidence, arm: Arm, cal: Calibration, min_frames: int = MIN_MID
                       min_frames=min_frames, min_class_px=arm.min_class_px)
 
 
+def capture_coverage(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm,
+                     min_frames: int = MIN_MID_FRAMES, cal: Calibration = Calibration()) -> dict[str, Any]:
+    try:
+        profile = replace(CEF_PLACEMENT, mid_frames=min_frames)
+        scored = score_arm(record, images, arm, cal, profile=profile)
+        fitted = scored.get("fitted", [])
+        mid = sum(number(row[0]) and MID_E[0] < row[0] < MID_E[1] for row in fitted)
+        return {"midFrames": mid, "fitted": fitted, "problems": scored.get("problems", [])}
+    except MALFORMED as exc:
+        return {"midFrames": 0, "fitted": [], "problems": [f"malformed capture: {type(exc).__name__}: {exc}"]}
+
+
 def _handoff_frames(ev: Evidence) -> tuple[np.ndarray | None, np.ndarray | None]:
     if not ev.transition:
         return None, None
@@ -2544,11 +3222,61 @@ def pre_detach(decoder: dict[str, Any]) -> list[list[float]]:
     detach, rv = decoder.get("detach"), decoder.get("rv")
     if not number(detach) or not isinstance(rv, list):
         return []
-    if not all(isinstance(r, (list, tuple)) and len(r) == 3 and all(number(v) for v in r) for r in rv):
+    if not all(isinstance(r, (list, tuple)) and len(r) in (3, 4) and all(number(v) for v in r) for r in rv):
         return []
     if any(b[0] <= a[0] or b[2] < a[2] for a, b in zip(rv, rv[1:])):
         return []
     return [r for r in rv if r[0] <= detach]
+
+
+def frame_at_freeze_draw(decoder: dict[str, Any], counter_fps: float | None,
+                         advance_at: float | None, first_effective_raf_at: float | None,
+                         ) -> tuple[int | None, dict[str, Any], list[str]]:
+    recorded = decoder.get("freezeDraws")
+    draws = ([draw for draw in recorded if isinstance(draw, dict) and number(draw.get("startedAt"))
+              and number(advance_at) and number(first_effective_raf_at)
+              and advance_at <= draw["startedAt"] <= first_effective_raf_at]
+             if isinstance(recorded, list) else [])
+    detail = {"draws": draws, "recordedDrawCount": len(recorded) if isinstance(recorded, list) else None,
+              "window": [advance_at, first_effective_raf_at], "rvfcRows": decoder.get("rv"),
+              "rvfcCallbackAt": decoder.get("rvAt")}
+    if counter_fps is None or not draws:
+        return None, detail, ["no VideoFrame timestamp around the freeze draw"]
+    problems: list[str] = []
+    full_timestamps = []
+    repair_timestamps: list[tuple[int, float]] = []
+    for index, draw in enumerate(draws):
+        argument_count = draw.get("argumentCount")
+        if argument_count not in (5, 9):
+            problems.append(f"freeze draw {index} has unsupported argument count {argument_count!r}")
+            continue
+        before, after = draw.get("beforeTimestampUs"), draw.get("afterTimestampUs")
+        if not number(before) or not number(after):
+            problems.append(f"freeze draw {index} has no before/after VideoFrame timestamp")
+        elif before != after:
+            problems.append(f"freeze draw {index} VideoFrame timestamp changed from {before} to {after}")
+        elif argument_count == 5:
+            full_timestamps.append(before)
+        else:
+            repair_timestamps.append((index, before))
+    if not full_timestamps:
+        problems.append("no full-size freeze draw with a VideoFrame timestamp")
+    elif len(set(full_timestamps)) > 1:
+        problems.append(f"full-size freeze draws used different VideoFrame timestamps: {full_timestamps}")
+    reference = round(full_timestamps[0] / 1_000_000 * counter_fps) if full_timestamps else None
+    repair_frames = [(index, round(timestamp / 1_000_000 * counter_fps))
+                     for index, timestamp in repair_timestamps]
+    diagnostics = []
+    if reference is not None:
+        for index, frame in repair_frames:
+            if frame == reference + 1:
+                diagnostics.append(f"repair draw {index} used frame {frame}, one frame after reference {reference}")
+            elif frame != reference:
+                problems.append(f"repair draw {index} used frame {frame}, expected {reference} or {reference + 1}")
+    detail["fullSizeFrames"] = [round(timestamp / 1_000_000 * counter_fps) for timestamp in full_timestamps]
+    detail["repairFrames"] = [frame for _, frame in repair_frames]
+    detail["diagnostics"] = diagnostics
+    return (reference if reference is not None and not problems else None), detail, problems
 
 
 def holder_parent(first: dict[str, Any], arm: Arm) -> str | None:
@@ -2573,11 +3301,68 @@ def media_arm(arm: Arm) -> bool:
 MEDIA_CHECKS = ("frozen_frame", "frozen_region", "foreground", "tone", "overlay")
 
 
+def dsk_counter_fps() -> float | None:
+    if not DSK_COUNTER_MOVIE.is_file() or binary.sha256_file(DSK_COUNTER_MOVIE) != DSK_COUNTER_SHA256:
+        return None
+    try:
+        _, _, fps, _ = dsk_movie_export._ffprobe(DSK_COUNTER_MOVIE)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return fps if number(fps) and fps > 0 else None
+
+
+def _dsk_first_rvfc_times(decoder: dict[str, Any]) -> tuple[float, float] | None:
+    rv = decoder.get("rv") or []
+    rows = [row for row in rv if isinstance(row, (list, tuple)) and len(row) in (3, 4)
+            and number(row[0]) and number(row[1])]
+    if rows and rows[0][1] == 0:
+        rows = rows[1:]
+    return (float(rows[0][0]), float(rows[0][1])) if rows else None
+
+
+def _dsk_decoder_offset(decoder: dict[str, Any]) -> float | None:
+    src = decoder.get("src")
+    if not isinstance(src, str):
+        return None
+    for filename, offset in DSK_COUNTER_OFFSETS.items():
+        expected = f"{filename}#t={offset:g}" if offset else filename
+        if src == expected:
+            return offset
+    return None
+
+
+def record_dsk_counter_timing(record: dict[str, Any], arm: Arm) -> None:
+    if arm.counter_strip != "distinct":
+        return
+    first = ((record.get("dump") or {}).get("first") or {})
+    holders = first.get("holders") or []
+    outgoing = [decoder for decoder in decoders_of(record)
+                if decoder.get("region") and decoder.get("detach") is not None]
+    bound, _ = bind_holders(holders, outgoing)
+    rows = []
+    counter_fps = dsk_counter_fps()
+    insert = next((row["t"] for row in (record.get("dump") or {}).get("raf") or []
+                   if isinstance(row, dict) and "eff" in row), None)
+    advance = record.get("advanceAt")
+    for index, decoder in bound:
+        selected, detail, problems = frame_at_freeze_draw(decoder, counter_fps, advance, insert)
+        rows.append({"holderIndex": index, "id": decoder.get("id"),
+                     "firstMediaTimeS": (times[1] if (times := _dsk_first_rvfc_times(decoder)) else None),
+                     "freezeFrame": selected, "freezeDraw": detail, "freezeDrawProblems": problems})
+    cost = score_cost((record.get("dump") or {}).get("takes") or [], record.get("advanceAt"), insert)
+    record["dskCounterTiming"] = {"expectedDeltaS": DSK_COUNTER_DELTA_S,
+                                  "toleranceS": DSK_COUNTER_TIME_TOLERANCE_S,
+                                  "counterFps": counter_fps, "takeMs": cost["detail"].get("takeMs"),
+                                  "decoders": rows}
+
+
 def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm,
                     es: list[float]) -> tuple[dict[str, Any] | None, int | None, list[str]]:
     """Shared media evidence (§9.1) for every outgoing movie: a patch-on arm with holders binds each to a distinct decoder
     (`arm.holders` of them) under `holder_parent`, its strip decoding at device scale (not on `fg` arms, whose layers
-    cover the counter blocks by design; their reference is the rVFC record and the requested paused frame); otherwise exactly
+    cover the counter blocks by design; their reference is the rVFC record and the requested paused frame); DSK
+    distinct-counter holders instead use the VideoFrame timestamp sampled around each native draw, with rVFC rows retained
+    as diagnostics; otherwise exactly
     `arm.decoders` detached decoders. Each decoder: colour tuple, geometry, foreground inventory, the last pre-detach rVFC
     record (= the reference; a paused arm's requested frame must equal it), detach inside [advance, transition DOM],
     playback before a patch-off advance; timed captures add >= 3 demixable frames. Returns (first decoder, its reference,
@@ -2610,10 +3395,17 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
     if not pairs:
         problems.append("no decoder for the outgoing movie")
     reference = None
+    decoder_references: dict[Any, int] = {}
+    holder_indices: dict[Any, int] = {}
+    first_rvfc_times: dict[Any, tuple[float, float]] = {}
+    counter_fps = dsk_counter_fps() if arm.counter_strip == "distinct" else None
+    if arm.counter_strip == "distinct" and counter_fps is None:
+        problems.append("pinned DSK counter frame rate is unavailable")
     insert = next((r["t"] for r in (record.get("dump") or {}).get("raf") or [] if isinstance(r, dict) and "eff" in r), None)
     advance = record.get("advanceAt")
     foreground = record.get("foreground") if isinstance(record.get("foreground"), dict) else {}
     for k, (index, decoder) in enumerate(pairs):
+        holder_index = None
         if not isinstance(decoder.get("tuple"), str) or not COLOUR_TUPLE.fullmatch(decoder["tuple"]):
             problems.append(f"decoder colour tuple missing or malformed: {decoder.get('tuple')!r} (an error is not a tuple)")
         inventory = foreground.get(str(decoder.get("id")))
@@ -2624,18 +3416,75 @@ def media_integrity(record: dict[str, Any], images: Mapping[str, np.ndarray], ar
             problems.append("decoder geometry malformed")
         elif index is not None and "fg" not in arm.overrides:
             img = images.get(f"holder-{index}")
-            if img is None or holder_strip(img, holders[index], decoder, arm.dsf) is None:
-                problems.append("holder pixels missing or the holder strip does not decode at its device scale")
+            if img is None:
+                problems.append("holder pixels missing")
+            else:
+                holder_index = holder_strip(img, holders[index], decoder, arm.dsf)
+            if img is not None and holder_index is None:
+                geometry = holder_strip_geometry(holders[index], decoder)
+                displaced = arm.counter_strip in ("displaced-x", "displaced-y") and geometry == "inside"
+                clipped = geometry == "outside" and arm.capture in PAUSED
+                if not displaced and not clipped:
+                    problems.append("holder pixels missing or the holder strip does not decode at its device scale")
         if not (number(advance) and number(insert) and number(decoder.get("detach")) and advance <= decoder["detach"] <= insert):
             problems.append(f"detach {decoder.get('detach')} not inside [advance {advance}, transition DOM {insert}]")
         before = pre_detach(decoder)
-        if not before:
+        drawn, _, draw_problems = (frame_at_freeze_draw(decoder, counter_fps, advance, insert)
+                                    if arm.counter_strip == "distinct" else (None, {}, []))
+        problems += draw_problems
+        if not before and arm.counter_strip != "distinct":
             problems.append("no well-formed, ordered rVFC record before the detach")
-        else:
+        if before:
+            first_rvfc = _dsk_first_rvfc_times(decoder)
+            if first_rvfc is not None:
+                first_rvfc_times[decoder.get("id")] = first_rvfc
+        decoder_reference = drawn if arm.counter_strip == "distinct" else (
+            round(before[-1][1] * FPS) if before else None
+        )
+        if decoder_reference is not None:
             if k == 0:
-                reference = round(before[-1][1] * FPS)
+                reference = decoder_reference
+            if arm.counter_strip == "distinct" and index is not None:
+                decoder_references[decoder.get("id")] = decoder_reference
+                if holder_index is not None:
+                    holder_indices[decoder.get("id")] = holder_index
+                if holder_index is not None and holder_index != decoder_reference:
+                    problems.append(f"holder {index} frame {holder_index} != decoder {decoder.get('id')} frame {decoder_reference}")
             if arm.mode == "off" and before[-1][2] < MIN_PRESENTED:
                 problems.append(f"fewer than {MIN_PRESENTED} presented frames before the advance")
+    if arm.counter_strip == "distinct" and (len(decoder_references) != arm.holders
+                                             or len(set(decoder_references.values())) != len(decoder_references)):
+        problems.append(f"holder decoder frame identities are not distinct: {list(decoder_references.values())}")
+    if arm.counter_strip == "distinct":
+        timing = record.get("dskCounterTiming")
+        rows = timing.get("decoders") if isinstance(timing, dict) else None
+        recorded = ({row.get("id"): (row.get("holderIndex"), row.get("freezeFrame")) for row in rows}
+                    if isinstance(rows, list) and all(isinstance(row, dict) for row in rows)
+                    and len({row.get("id") for row in rows}) == len(rows) else {})
+        paired = {decoder.get("id"): (index, decoder_references.get(decoder.get("id")))
+                  for index, decoder in pairs}
+        if (not isinstance(timing, dict) or timing.get("expectedDeltaS") != DSK_COUNTER_DELTA_S
+                or timing.get("toleranceS") != DSK_COUNTER_TIME_TOLERANCE_S
+                or timing.get("counterFps") != counter_fps or recorded != paired
+                or not isinstance(timing.get("takeMs"), list) or len(timing["takeMs"]) != 1):
+            problems.append("DSK draw-timestamp/take-cost record missing or inconsistent")
+        offsets = {_dsk_decoder_offset(decoder): decoder.get("id") for _, decoder in pairs}
+        if set(offsets) != set(DSK_COUNTER_OFFSETS.values()) or len(offsets) != len(pairs):
+            problems.append("DSK decoder sources do not identify the base and #t=5 clips")
+        else:
+            base_id, offset_id = offsets[0.0], offsets[DSK_COUNTER_DELTA_S]
+            if counter_fps is not None and set(holder_indices) == {base_id, offset_id}:
+                frame_delta = holder_indices[offset_id] - holder_indices[base_id]
+                expected_frames = DSK_COUNTER_DELTA_S * counter_fps
+                index_tolerance = round(DSK_COUNTER_TIME_TOLERANCE_S * counter_fps)
+                if abs(frame_delta - expected_frames) > index_tolerance:
+                    problems.append(f"DSK #t=5 holder frame is not {expected_frames:g} ± "
+                                    f"{index_tolerance} after the base holder: "
+                                    f"{[holder_indices[base_id], holder_indices[offset_id]]}; first rVFC "
+                                    f"presentation/media times: base {first_rvfc_times.get(base_id)}, "
+                                    f"#t=5 {first_rvfc_times.get(offset_id)}")
+            else:
+                problems.append("DSK holder frame indices are missing for the paired decoders")
     if arm.capture in PAUSED:
         requested = (record.get("paused") or {}).get("frame")
         if reference is None or requested != reference:
@@ -2669,8 +3518,14 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
     first_holders = ((record.get("dump") or {}).get("first") or {}).get("holders") or []
     holder_index = (holder_strip(holder_img, first_holders[0], decoder, arm.dsf)
                     if needs_holder and holder_img is not None and first_holders and origin is not None else None)
+    strip_geometry = (holder_strip_geometry(first_holders[0], decoder)
+                      if needs_holder and first_holders and decoder is not None else None)
+    if holder_index is None and strip_geometry == "outside" and arm.capture in PAUSED:
+        holder_index = reference
     o_indices = [decode_strip(straight(o), origin, scale) for o in demixed] if origin else []
     out["frozen_frame"] = _voided(score_frozen(holder_index, reference, o_indices, holder=needs_holder), problems)
+    if strip_geometry == "outside":
+        out["frozen_frame"]["detail"]["strip"] = "strip clipped by geometry"
     region_rect = device_rects([decoder["region"]], arm.dsf)[0] if decoder and decoder.get("region") else None
     region_mask = rect_mask(ev.A.shape[:2], [region_rect]) if region_rect and ev.A is not None else None
     if region_mask is not None and region_mask.any():
@@ -2700,7 +3555,8 @@ def score_media(record: dict[str, Any], images: Mapping[str, np.ndarray], ev: Ev
     fg_rects = device_rects([c["rect"] for c in later if c.get("id") in (*FOREGROUND_TEXTURES, FOREGROUND_SQUARE)], arm.dsf)
     fg_mask = block_mask(shape, origin, scale) & rect_mask(shape, fg_rects)
     pair = [r for r in fg_rects if any(overlaps(r, q) for q in fg_rects if q is not r)]
-    fg = score_foreground([ev.holders[0], *[straight(o) for o in demixed]], live, fg_mask, cal)
+    fg = score_foreground([ev.holders[0], *[straight(o) for o in demixed]], live, fg_mask, cal,
+                          demix_es=[es[i] for i in idx] if ev.B is not None else [])
     if not (rect_mask(shape, pair) & fg_mask).any():
         fg = result(None, ["foreground layers do not overlap over the counter blocks"] + fg["problems"])
     out["foreground"] = _voided(fg, problems)
@@ -2796,6 +3652,8 @@ def score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm
 def verified_mask(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Arm, profile: Profile, cal: Calibration,
                   twin: tuple[dict[str, Any], Mapping[str, np.ndarray]] | None) -> tuple[np.ndarray | None, list[str]]:
     """The production mask of the arm's one holder, verified against its twin (§9.1); problems are shared integrity."""
+    if arm.holders == 0 and arm.expect == {"holder_pixels": "FAIL"}:
+        return None, []
     if arm.twin is None:
         return None, (["no twin to verify the production mask"] if {"holder_pixels", "tone", "mask"} & set(arm.expect) else [])
     if twin is None:
@@ -2865,7 +3723,31 @@ def _score_arm(record: dict[str, Any], images: Mapping[str, np.ndarray], arm: Ar
         holders = ((record.get("dump") or {}).get("first") or {}).get("holders") or []
         box = device_box(holders[0]["rect"], arm.dsf) if holders and quad(holders[0].get("rect")) else None
         live = images.get("live-0")
-        checks["holder_pixels"] = score_holder_pixels(images.get("ref-A0-0"), live, box, mask, lut, cal)
+        if arm.holders == 0 and not holders:
+            insert = next((row["t"] for row in ev.raf if row.get("eff") is not None), None)
+            refusal_problems = list(score_cost((record.get("dump") or {}).get("takes") or [],
+                                               record.get("advanceAt"), insert)["problems"])
+            if record.get("placement") != "frac":
+                refusal_problems.append(f"page placement {record.get('placement')!r} did not exercise frac")
+            checks["holder_pixels"] = result(None if refusal_problems else False, refusal_problems,
+                                               alphaRefusal=not refusal_problems)
+        else:
+            checks["holder_pixels"] = score_holder_pixels(images.get("ref-A0-0"), live, box, mask, lut, cal)
+            decoder = next((d for d in decoders_of(record) if d.get("id") == (record.get("paused") or {}).get("id")), None)
+            if arm.counter_strip in ("displaced-x", "displaced-y"):
+                attribution = score_displaced_holder(
+                    images.get("ref-A0-0"), live, holders[0] if holders else None, decoder, record.get("stage"), mask,
+                    lut, arm.counter_strip[-1], arm.dsf, cal,
+                )
+                checks["holder_pixels"]["detail"]["attribution"] = attribution
+                if attribution["verdict"] != "PASS":
+                    checks["holder_pixels"] = result(
+                        None, [f"displaced-holder attribution {attribution['verdict']}: "
+                               f"{'; '.join(attribution['problems']) or attribution['detail']!r}"],
+                        holderPixels=checks["holder_pixels"], attribution=attribution,
+                    )
+            if decoder is not None and holders and holder_strip_geometry(holders[0], decoder) == "outside":
+                checks["holder_pixels"]["detail"]["strip"] = "strip clipped by geometry"
         checks["reference"] = score_perfect(images.get("ref-perfect-0"), live, box, cal)
         checks["mask"] = result(mask is not None, [] if mask is not None else ["production mask not verified"])
     for name in ("geometry", "exterior", "scope"):
@@ -3258,6 +4140,132 @@ def pending_scene(snapshot: dict[str, Any] | None) -> int | None:
     return snapshot.get("scene") if snapshot.get("state") == "IdleAtInitialState" else snapshot.get("next")
 
 
+def measure_placement_probe(*, spec: placement_probe.ProbeSpec, identity: placement_probe.ProbeIdentity,
+                            evaluate: Callable[[str], Any], capture_png: Callable[[], bytes],
+                            check_current: Callable[[], None] = lambda: None,
+                            clock: Callable[[], float] = time.monotonic,
+                            sleep: Callable[[float], None] = time.sleep) -> placement_probe.ClassifierInput:
+    """Drive §11.1's page API for the Chrome harness."""
+    assets = placement_probe.load_probe_assets()
+    sequence = 0
+    previous_start: float | None = None
+    freshness: list[placement_probe.ProbeCapture] = []
+    captures: list[placement_probe.ProbeCapture] = []
+    poses: dict[int, placement_probe.PoseGeometry] = {}
+    last_snapshot: dict[str, Any] | None = None
+    deadline = clock() + 15.0
+
+    def one(phase: str, pose: int | None) -> placement_probe.ProbeCapture:
+        nonlocal sequence, previous_start, last_snapshot
+        sequence += 1
+        nonce = secrets.token_hex(16)
+        command = {"runId": spec.run_id, "sequence": sequence, "nonce": nonce, "phase": phase, "pose": pose}
+        if evaluate(f"window.__obedProbe.command({json.dumps(command, separators=(',', ':'))})") is not True:
+            raise RuntimeError(f"probe page rejected sequence {sequence}")
+        while True:
+            check_current()
+            if clock() >= deadline:
+                raise TimeoutError("placement probe exceeded 15 seconds")
+            snapshot = evaluate("window.__obedProbe.snapshot()")
+            if (isinstance(snapshot, dict) and snapshot.get("runId") == spec.run_id
+                    and snapshot.get("sequence") == sequence and snapshot.get("paintedSequence") == sequence
+                    and snapshot.get("phase") == phase and snapshot.get("pose") == pose):
+                last_snapshot = snapshot
+                break
+            sleep(0.01)
+        observed = clock()
+        start_not_before = max(observed + 0.3, (previous_start + 0.2) if previous_start is not None else observed)
+        sleep(max(0.0, start_not_before - clock()))
+        check_current()
+        started = clock()
+        png = capture_png()
+        finished = clock()
+        if finished - started > 2.0:
+            raise TimeoutError(f"placement capture {sequence} exceeded 2 seconds")
+        previous_start = started
+        return placement_probe.ProbeCapture(identity=identity, sequence=sequence, nonce=nonce, phase=phase, pose=pose, png=png,
+                                            paint_observed_s=observed, capture_started_s=started, capture_finished_s=finished)
+
+    for _ in range(3):
+        freshness.append(one("motion", None))
+    for pose in (0, 1):
+        for _ in range(2):
+            captures.append(one("pattern", pose))
+        geometry = (last_snapshot or {}).get("geometry")
+        if not isinstance(geometry, dict):
+            raise RuntimeError(f"probe pose {pose} did not publish geometry")
+        poses[pose] = placement_probe.PoseGeometry(
+            pose=geometry["pose"], rect=tuple(geometry["rect"]), content_box=tuple(geometry["contentBox"]),
+            box=tuple(geometry["box"]), snap_dy=geometry["snapDy"], frac_dy=geometry["fracDy"])
+    if last_snapshot is None:
+        raise RuntimeError("probe page published no snapshot")
+    return placement_probe.ClassifierInput(
+        spec=spec, assets_sha256=(assets.manifest_sha256, assets.pattern.sha256, assets.motion.sha256), identity=identity,
+        ready_state=last_snapshot["readyState"], video_size=tuple(last_snapshot["videoSize"]),
+        color_tuple=tuple(last_snapshot["colorTuple"]), freshness=tuple(freshness), poses=(poses[0], poses[1]),
+        captures=tuple(captures),
+    )
+
+
+def run_chrome_placement_probe(*, gpu: bool) -> dict[str, Any]:
+    from obed_edom.live_host import ChromeCdp, _AssetServer
+
+    profile = Path(tempfile.mkdtemp(prefix="placement-chrome-"))
+    proc = transport = server = None
+    try:
+        spec = placement_probe.ProbeSpec(secrets.token_hex(16), 1920, 1080, 60, 1.0)
+        server = _AssetServer(REPO, b"")
+        server.start()
+        url = server.set_probe_run(spec)
+        if url is None:
+            raise RuntimeError("probe server did not publish a URL")
+        proc, port, args = start_chrome(profile, gpu=gpu, viewport=(1920, 1080), dsf=1.0)
+        transport = ChromeCdp(CHROME, profile, None, headless=True, attach_endpoint=f"http://127.0.0.1:{port}")
+        transport.start()
+        transport.call("Emulation.setDeviceMetricsOverride", width=1920, height=1080, deviceScaleFactor=1, mobile=False)
+        transport.goto(url)
+        deadline = time.monotonic() + 10.0
+        snapshot = None
+        while time.monotonic() < deadline:
+            snapshot = transport.evaluate("window.__obedProbe&&window.__obedProbe.snapshot?window.__obedProbe.snapshot():null")
+            if isinstance(snapshot, dict):
+                break
+            time.sleep(0.05)
+        frame = transport.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+        context = transport.main_context(frame)
+        context_id = context.get("uniqueId") if isinstance(context, dict) else None
+        target_id = getattr(transport, "target_id", None)
+        if not isinstance(context_id, str) or not isinstance(target_id, str):
+            raise RuntimeError("Chrome probe identity is unavailable")
+        identity = placement_probe.ProbeIdentity(spec.run_id, None, target_id, context_id, 0,
+                                                  str(transport.evaluate("navigator.userAgent")),
+                                                  float(transport.evaluate("window.devicePixelRatio")))
+
+        def capture() -> bytes:
+            encoded = transport.call("Page.captureScreenshot", format="png", fromSurface=True)["data"]
+            return base64.b64decode(encoded, validate=True)
+
+        evidence = measure_placement_probe(spec=spec, identity=identity, evaluate=transport.evaluate, capture_png=capture)
+        result = placement_probe.classify_probe(evidence)
+        return {"input": evidence, "classification": result,
+                "launch": {"gpu": gpu, "chromeArgs": args[1:], "runId": spec.run_id},
+                "toneRows": {"complete": False, "observed": result.tone_map.value if result.tone_map else None,
+                             "applied": "identity", "problems": ["extended W5 ramp/patch/skin rows not captured"]}}
+    finally:
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.stop()
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=8)
+            if proc.poll() is None:
+                proc.kill()
+        if server is not None and server.httpd is not None:
+            server.httpd.shutdown()
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 def wait_ready(evaluate: Callable[[str], Any], timeout_s: float = 30.0, snapshot_js: str = SNAPSHOT_JS) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -3375,6 +4383,10 @@ def reference_burst(host: Any, target: dict[str, Any], capture: Callable[[], np.
     return record, images
 
 
+def _shot_record(name: str, t0: float, t1: float) -> dict[str, Any]:
+    return {"name": name, "t0": t0, "t1": t1, "durationMs": t1 - t0}
+
+
 def burst(host: Any, target: dict[str, Any], capture: Callable[[], np.ndarray], *, actions: Iterable[tuple[float, str]] = (),
           screencast: Callable[[], Any] | None = None, lead_s: float = 0.0, tag: str = "",
           drop: str | None = None, handoff: bool = False) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
@@ -3422,7 +4434,7 @@ def burst(host: Any, target: dict[str, Any], capture: Callable[[], np.ndarray], 
             img = capture()
             name = f"{tag}shot-{len(record['shots']):03d}"
             images[name] = img
-            record["shots"].append({"name": name, "t0": t0, "t1": now()})
+            record["shots"].append(_shot_record(name, t0, now()))
         if thread is not None:
             thread.join(timeout=30)
     for k, (ts, img) in enumerate(cast):
@@ -3495,6 +4507,7 @@ def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.
                                    handoff="handoff" in arm.expect,
                                    drop=arm.drop)
     record.update(shots)
+    record_dsk_counter_timing(record, arm)
     images.update(shot_images)
     settle(host)
     images["settled"] = capture()
@@ -3657,10 +4670,10 @@ class RawHost:
 GRANT_WAIT_S = 10.0
 
 
-def commit_grant(evaluate: Callable[[str], Any], token: str | None) -> dict[str, Any]:
-    """The privileged channel: `__obedGrant(token, "snap")` with the token the first-run script was built from (never by
-    assigning the property), read back."""
-    ok = evaluate(f"window.__obedGrant({json.dumps(token)},'snap')") if token else None
+def commit_grant(evaluate: Callable[[str], Any], token: str | None, value: str = "snap", ms: int | None = None) -> dict[str, Any]:
+    """Use the privileged channel, including the script-only leased wrong-rule controls."""
+    args = f"{json.dumps(token)},{json.dumps(value)}" + ("" if ms is None else f",{ms}")
+    ok = evaluate(f"window.__obedGrant({args})") if token else None
     return {"committed": ok is True, "read": evaluate(PLACEMENT_JS)}
 
 
@@ -3713,9 +4726,10 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
             host.start(width, height, arm.dsf)
         else:
             before = PREDEFINE_JS if arm.capture == "channel" else None
+            extra = {"placement_mode": arm.placement_mode} if arm.placement_mode else {}
             host = LiveOutputHost(resolved.root, resolved.slides, headless=True, resolver=resolved.resolver,
                                   transport_factory=hooked_transport(before=before), attach_endpoint=attach, continuity=arm.continuity,
-                                  gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off")
+                                  gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off", **extra)
             with serving(arm.splice):
                 host.start()
         transport = host._require_transport()
@@ -3735,11 +4749,15 @@ def run_arm(name: str, scratch: Path, decision: dict[str, Any] | None = None) ->
         if arm.page in ("alpha", "raw", "preview"):
             transport.call("Emulation.setDefaultBackgroundColorOverride", color={"r": 0, "g": 0, "b": 0, "a": 0})
         if arm.grant == "driver":
-            record["grant"] = commit_grant(transport.evaluate, getattr(host, "placement_token", None) or host._placement_token)
+            value = arm.placement_value or "snap"
+            record["grant"] = commit_grant(transport.evaluate, getattr(host, "placement_token", None) or host._placement_token,
+                                             value, 15_000 if arm.placement_mode == "probe" else None)
         elif arm.grant == "host":
             record["grant"] = {"read": host_grant(host, transport.evaluate)}
             if arm.regrant == "reload":
                 record["reload"] = regrant_after_reload(host, transport)
+        if arm.forgery:
+            record["forgery"] = transport.evaluate(FORGERY_JS[arm.forgery])
         record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "page", "indexSha256", "placement")
                             if k in host.output}
         port = port or transport.port
@@ -3776,7 +4794,10 @@ def save_run(out: Path, name: str, record: dict[str, Any], images: Mapping[str, 
     run.mkdir(parents=True, exist_ok=True)
     for key, img in images.items():
         Image.fromarray(img).save(run / f"{key}.png")
-    (run / "record.json").write_text(json.dumps(record, default=str))
+    saved = dict(record)
+    if "placementCalibration" in saved:
+        saved["placementCalibration"] = serialize_placement_calibration(saved["placementCalibration"], run)
+    (run / "record.json").write_text(json.dumps(saved, default=str))
 
 
 class RunImages(Mapping):
@@ -3817,12 +4838,13 @@ def launch_lut(runs: Mapping[str, tuple[dict[str, Any], Mapping[str, np.ndarray]
     """`L_path` measured in this launch (§9.2): the `m-tone` session's holder (the `drawImage` snapshot) against its
     `S_live` (the compositor) on the verified exposed tone cells, through `build_lut`; the session must be complete,
     its mask verified against `m-tone-twin` and its coverage met. None, with the reasons, otherwise."""
-    arm = profile.arm("m-tone")
-    detail: dict[str, Any] = {"source": "m-tone (this launch)", "kind": None, "samples": 0, "problems": []}
-    if "m-tone" not in runs:
-        detail["problems"] = ["no m-tone session in this launch"]
+    tone_name = "m-tone-cef" if profile.placement == "frac" else "m-tone"
+    arm = profile.arm(tone_name)
+    detail: dict[str, Any] = {"source": f"{tone_name} (this launch)", "kind": None, "samples": 0, "problems": []}
+    if tone_name not in runs:
+        detail["problems"] = [f"no {tone_name} session in this launch"]
         return None, detail
-    record, images = runs["m-tone"]
+    record, images = runs[tone_name]
     try:
         decoder, _, problems = media_integrity(record, images, arm, [])
         problems = capture_problems(record, images, arm, profile, cal) + problems

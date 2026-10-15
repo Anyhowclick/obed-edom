@@ -202,28 +202,51 @@ def test_mm_opacity_off_is_byte_identical_to_the_hook_only_output(monkeypatch):
     assert hashlib.sha256(reverted).hexdigest() == hashlib.sha256(off).hexdigest()
 
 
-def test_patch_rendering_is_the_live_output_minus_the_observation_hook(monkeypatch):
-    # The preview serves patch_rendering; live serves patch_player. They must differ only by the hook.
+def _rendering_from_live(player: bytes) -> bytes:
+    player = player.replace(
+        b"UC=new Eg," + live_runtime._INSTALL + b",UC.displayManager.showWaitingIndicator()",
+        live_runtime._ANCHOR,
+    )
+    for before, after in (
+        (live_runtime._MM_OPACITY_REPLACEMENTS[8][1], live_runtime._RENDERING_REPLACEMENTS[8][1]),
+        (live_runtime._MM_OPACITY_REPLACEMENTS[10][1], live_runtime._MM_OPACITY_REPLACEMENTS[10][0]),
+        (live_runtime._MM_OPACITY_REPLACEMENTS[11][1], live_runtime._MM_OPACITY_REPLACEMENTS[11][0]),
+    ):
+        assert player.count(before) == 1 and player.count(after) == 0
+        player = player.replace(before, after)
+    return player
+
+
+def test_patch_rendering_is_the_live_output_minus_the_observation_hook_and_freeze(monkeypatch):
     player = _synthetic_player()
     _pin(monkeypatch, player)
     rendering = live_runtime.patch_rendering(player)
-    assert live_runtime.patch_player(player) == _hook_only(rendering)
+    assert rendering == _rendering_from_live(live_runtime.patch_player(player))
     assert live_runtime._INSTALL not in rendering
     assert rendering.count(live_runtime._ANCHOR) == 1
-    for before, after in live_runtime._MM_OPACITY_REPLACEMENTS:
+    assert b"__obedFreezeTake" not in rendering and b"__obedFreeze(C,A)" not in rendering
+    for before, after in live_runtime._RENDERING_REPLACEMENTS:
         assert rendering.count(before) == 0 and rendering.count(after) == 1
+    for before, after in live_runtime._MM_OPACITY_REPLACEMENTS[10:12]:
+        assert rendering.count(before) == 1 and rendering.count(after) == 0
 
 
 # Each patcher that applies the Magic Move opacity replacements: live output and the dashboard preview.
 MM_PATCHERS = {"patch_player": live_runtime.patch_player, "patch_rendering": live_runtime.patch_rendering}
+MM_PATCHER_REPLACEMENTS = {
+    "patch_player": live_runtime._MM_OPACITY_REPLACEMENTS,
+    "patch_rendering": live_runtime._RENDERING_REPLACEMENTS,
+}
+MM_PATCHER_INDICES = [(name, index) for name, replacements in MM_PATCHER_REPLACEMENTS.items() for index in range(len(replacements))]
 
 
-@pytest.mark.parametrize("patcher", MM_PATCHERS)
-@pytest.mark.parametrize("index", range(len(live_runtime._MM_OPACITY_REPLACEMENTS)))
+@pytest.mark.parametrize(("patcher", "index"), MM_PATCHER_INDICES)
 @pytest.mark.parametrize("count", [0, 2])
 def test_mm_opacity_refuses_a_missing_or_duplicated_anchor(monkeypatch, index, count, patcher):
     anchors = [before for before, _ in live_runtime._MM_OPACITY_REPLACEMENTS]
-    anchors[index : index + 1] = [anchors[index]] * count
+    anchor = MM_PATCHER_REPLACEMENTS[patcher][index][0]
+    anchor_index = anchors.index(anchor)
+    anchors[anchor_index : anchor_index + 1] = [anchor] * count
     player = _synthetic_player(anchors)
     _pin(monkeypatch, player)
     with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="Magic Move opacity anchor"):
@@ -232,11 +255,10 @@ def test_mm_opacity_refuses_a_missing_or_duplicated_anchor(monkeypatch, index, c
     assert live_runtime.patch_player(player, mm_opacity=False) == _hook_only(player)
 
 
-@pytest.mark.parametrize("patcher", MM_PATCHERS)
-@pytest.mark.parametrize("index", range(len(live_runtime._MM_OPACITY_REPLACEMENTS)))
+@pytest.mark.parametrize(("patcher", "index"), MM_PATCHER_INDICES)
 def test_mm_opacity_refuses_a_replacement_that_is_not_unique(monkeypatch, index, patcher):
     # The anchor is unique but its replacement text already occurs once, so it would occur twice after.
-    player = _synthetic_player() + b";" + live_runtime._MM_OPACITY_REPLACEMENTS[index][1]
+    player = _synthetic_player() + b";" + MM_PATCHER_REPLACEMENTS[patcher][index][1]
     _pin(monkeypatch, player)
     with pytest.raises(live_runtime.LiveRuntimeUnsupported, match="Magic Move opacity patch"):
         MM_PATCHERS[patcher](player)
@@ -284,19 +306,22 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # and 6c941ac1... / 50231d3c... (new); rev 9's D1 gave 49d56adc... / 117fd39d... (old)
 # and 7a5e315b... / 52d7edb5... (new); were 574274e8... / fd811938... (old) and 330ef72c... / 33fcdcd2... (new) with R1-R8,
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
+# Line Draw (R14-R20) merged with CEF frac placement: main had aa0ae4bb... / 134114e0... and rendering 416613aa... /
+# 7d9eb308...; the placement branch had 63c328b2... / 7b0af749... and rendering a117b3ee... / 2432c819....
+# The frac boundary repair replaces True e57025c3... / bff8f5ae...; False and rendering remain unchanged.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "aa0ae4bb655cf347878a2394cf9eadf199126f41e97ca85e968dc46afdc2dfc1",
+        True: "d3ddd770dae1cd4aeb67a68a7e6aa12ef3d890b5ce4cd1cb19db81ec5e709d54",
         False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
     },
     NEW_PLAYER_SHA256: {
-        True: "134114e01b14f76914e06c563d1d0672b08e60ae432d18806e7bf5671e929d2f",
+        True: "1036a8e26fae661c0cde23291f1726643bfb7aa0e781b7f95da1739c7cda3732",
         False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
     },
 }
 REAL_RENDERING_SHA256 = {
-    OLD_PLAYER_SHA256: "416613aa2cbcc0a4d9397d1cb291cb5b0a8d58450255a426cc5ce5de04875330",
-    NEW_PLAYER_SHA256: "7d9eb308cadd02908732575a71e6eff437b63bc4d7ef46418805362905aa68dd",
+    OLD_PLAYER_SHA256: "8202717a2699a2e4691aac6848675e3636f5d26ac1336f9ae6faba0a48cc72dd",
+    NEW_PLAYER_SHA256: "c0faaa3c99c88705931f686d96d4e891a8d10b6b59aa2da62faae5cf56b2c4fc",
 }
 
 
@@ -315,11 +340,12 @@ def test_patch_player_output_is_pinned_on_the_real_player(flag, sha):
 
 
 @pytest.mark.parametrize("sha", REAL_PLAYERS)
-def test_patch_rendering_is_the_live_output_minus_the_hook_on_the_real_player(sha):
+def test_patch_rendering_is_the_live_output_minus_the_hook_and_freeze_on_the_real_player(sha):
     player = _real_player(sha)
     rendering = live_runtime.patch_rendering(player)
-    assert _hook_only(rendering) == live_runtime.patch_player(player)
+    assert rendering == _rendering_from_live(live_runtime.patch_player(player))
     assert b"__obedLive" not in rendering
+    assert b"__obedFreezeTake" not in rendering and b"__obedFreeze(C,A)" not in rendering
     assert hashlib.sha256(rendering).hexdigest() == REAL_RENDERING_SHA256[sha]
 
 
@@ -622,6 +648,20 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
     assert patched.count(b"Q=" + live_runtime._FREEZE_QUALIFIED_TUPLES + b",") == 1
     assert b"__obedLut" not in patched
     assert patched.count(b"putImageData") == player.count(b"putImageData") + live_runtime._LINE_DRAW_METHODS.count(b"putImageData")
+    assert patched.count(b"pl=window.__obedPlacement") == 1
+    snap_draw = b'g=x.getContext("2d");g.drawImage(v,dx,dy,dw,dh);'
+    frac_draw = b'g.drawImage(v,fx,fy,fw,fh)}'
+    alpha_scan = b"for(d=g.getImageData(0,0,ww,hh).data,j=3;j<d.length;"
+    boundary_draw = b"g.drawImage(v,0,sy[ei],vw,1,fx,ey[ei],fw,1)"
+    foreground_draw = b"Y.forEach(function(y)"
+    centre_guard = b"if(fx>.5||fy>.5||fx+fw<ww-.5||fy+fh<hh-.5)return;"
+    partial_cells = b"if(ei<fx||ei+1>fx+fw)ex.push(ei)"
+    assert all(patched.count(marker) == 1 for marker in (
+        snap_draw, frac_draw, alpha_scan, boundary_draw, foreground_draw, centre_guard, partial_cells
+    ))
+    assert patched.index(snap_draw) < patched.index(frac_draw) < patched.index(alpha_scan)
+    assert patched.index(alpha_scan) < patched.index(boundary_draw) < patched.index(foreground_draw)
+    assert b"ei===0||ei===ww-1" not in patched and b"ei===0||ei===hh-1" not in patched
     off = live_runtime.patch_player(player, mm_opacity=False)
     for marker in (b"obedMix", b"__obedHandbackTextures", b"obedDissolve", b"__obedFreeze", b"__obedShape"):
         assert marker not in off
@@ -629,7 +669,7 @@ def test_handback_and_dissolve_anchors_sit_at_their_offsets_on_the_real_player(s
     # supported page may create an author shadow root: not the stock or patched player, the export pages, or the host.
     rendering = live_runtime.patch_rendering(player)
     players = {"stock": SHADOW_PINS["player"], "off": SHADOW_PINS["player"],
-               "on": sorted(SHADOW_PINS["player"] + SHADOW_PINS["patch"]), "rendering": sorted(SHADOW_PINS["player"] + SHADOW_PINS["patch"])}
+               "on": sorted(SHADOW_PINS["player"] + SHADOW_PINS["patch"]), "rendering": SHADOW_PINS["player"]}
     assert {name: _shadow_occurrences(data) for name, data in zip(players, (player, off, patched, rendering))} == players
     pages = sorted(OUTPUT_FIXTURES.rglob("index.html"))
     p2_page = FREEZE_DECKS["P2"].parent / "index.html"
@@ -651,8 +691,8 @@ SHADOW_ESCAPE = re.compile(r"\\u\{([0-9a-fA-F]+)\}|\\u([0-9a-fA-F]{4})|\\x([0-9a
 SHADOW_JOIN = re.compile(r"(['\"`])\s*\+\s*(['\"`])")
 SHADOW_CONTEXT = 12
 # Every `shadow`/`customelements` token on the supported pages, pinned per source with its normalised context:
-# `player` is each stock player (and `off`), `patch` what `on`/`rendering` add (the take's CSS reads and its single
-# `!n.shadowRoot&&(` refusal), the rest are host files under `src/`. Regenerate only after reading every new occurrence.
+# `player` is each stock player (`off` and `rendering` add none), `patch` what `on` adds (the take's CSS reads and its
+# single `!n.shadowRoot&&(` refusal), the rest are host files under `src/`. Regenerate only after reading every occurrence.
 # The host files are the ones whose JS reaches a supported page: the player patch and hook (`live_runtime.py`), the live
 # output page and its scripts (`live_host.py`, `live_continuity_js.py`, `live_gl_replay_js.py`) and the Build Preview page
 # (`html_preview.py`). Other modules never reach a page, so prose there ("shadow") is not scanned.
@@ -754,7 +794,7 @@ def test_opacity_handback_and_dissolve_replacements_compose_in_every_order(monke
     else:
         player = _synthetic_player()
         _pin(monkeypatch, player)
-    replacements = live_runtime._MM_OPACITY_REPLACEMENTS
+    replacements = live_runtime._RENDERING_REPLACEMENTS
     # No replacement's text contains any anchor, its own included, so none can be re-matched or reverted into another.
     for _, after in replacements:
         for before, _ in replacements:
@@ -1724,8 +1764,8 @@ function run(o){globalThis.devicePixelRatio=o.dpr||1;
   globalThis.getComputedStyle=(e,p)=>(tick(),p)?Object.assign({content:'none',position:'static'},(v=>typeof v==='string'?{content:v}:v)(e._pseudo&&e._pseudo[p])):(e._cs||BASE);globalThis.innerWidth=(o.viewport||[1920,1080])[0];globalThis.window=globalThis;globalThis.innerHeight=(o.viewport||[1920,1080])[1];
   const tuple=o.vf===undefined?['bt709','bt709','bt709',false]:o.vf;let vfOpened=0,vfClosed=0;
   if(tuple==='missing')delete globalThis.VideoFrame;else globalThis.VideoFrame=class{constructor(x){tick();if(tuple==='throws')throw new Error('vf');vfOpened++;this.colorSpace={primaries:tuple[0],transfer:tuple[1],matrix:tuple[2],fullRange:tuple[3]}}close(){vfClosed++}};
-  globalThis.performance={now:()=>clk};globalThis.__obedTakeMs=undefined;delete globalThis.__obedPlacement;
-  if(o.placement!==null)Object.defineProperty(globalThis,'__obedPlacement',{configurable:true,get:()=>o.placement===undefined?'snap':o.placement});
+  globalThis.performance={now:()=>clk};globalThis.__obedTakeMs=undefined;delete globalThis.__obedPlacement;let placementReads=0;
+  if(o.placement!==null)Object.defineProperty(globalThis,'__obedPlacement',{configurable:true,get:()=>{placementReads++;return o.placement===undefined?'snap':o.placement}});
   const E=o.cut?CUT:o.renamed?Object.assign({},EFF,{name:'apple:dissolve character'}):EFF,ev=o.event||0;
   const events=Array.from({length:ev+1},()=>({effects:[]}));if(!o.noEffect)events[ev]={effects:[E]};
   const U={script:o.throwScript?null:{slideWidth:1920,slideHeight:1080,events},playbackController:{kpfEvent:{baseLayer:{layerId:9}}},
@@ -1743,7 +1783,7 @@ function run(o){globalThis.devicePixelRatio=o.dpr||1;
   const holders=attached.map(h=>{const c=h.children[0],g=st=>[st.left,st.top,st.width,st.height].map(v=>r6(parseFloat(v))).join(',');
     return [h.style.position+'/'+h.style.overflow,g(h.style),c.width+'x'+c.height,c.style.position,g(c.style)]});
   return {taken,inWrap:wrap?raws['layer13-opacity'].children.filter(fresh).length:0,inLeaf:raws.layer13.children.filter(fresh).length,badHolders,placeChanged:place()!==place0,draws:draws.filter(d=>d[0]!=='vid'),holders,put,appends,kind:C.obedDissolve||null,
-    traces,work,treeChanged:snapshot()!==tree0,touched,ms:U.__obedTakeMs,windowMs:globalThis.__obedTakeMs,slotCleared:UC.__obedFrozen===null,clearedByTake,firstTaken,vfOpened,vfClosed,partialReads};
+    traces,work,treeChanged:snapshot()!==tree0,touched,ms:U.__obedTakeMs,windowMs:globalThis.__obedTakeMs,slotCleared:UC.__obedFrozen===null,clearedByTake,firstTaken,vfOpened,vfClosed,partialReads,placementReads};
 }
 const CASES=JSON.parse(require('fs').readFileSync(process.argv[2],'utf8'));const out={guardControl:guardControl(),callSites:callSites()};for(const k in CASES)out[k]=run(CASES[k]);console.log(JSON.stringify(out));
 """
@@ -1834,6 +1874,36 @@ def _snapped(vrect, clip=(0, 0, 1920, 1080), natural=(1920, 540), video="vid", d
     return holder, [["video", video, u0 - a0, v0 - b0, u1 - u0, v1 - v0], ["get", 0, 0, a1 - a0, b1 - b0]]
 
 
+def _fractional(vrect, clip=(0, 0, 1920, 1080), natural=(1920, 540), video="vid") -> tuple[list, list]:
+    holder, trace = _snapped(vrect, clip, natural, video)
+    f = min(vrect[2] / natural[0], vrect[3] / natural[1]) if natural else None
+    cw, ch = (natural[0] * f, natural[1] * f) if natural else vrect[2:]
+    cx, cy = vrect[0] + (vrect[2] - cw) / 2, vrect[1] + (vrect[3] - ch) / 2
+    u0, v0 = _round(cx), _round(cy)
+    a0, b0 = _round(max(clip[0], cx)), _round(max(clip[1], cy))
+    dx, dy = u0 - a0, v0 - b0
+    fx = dx + vrect[0] + _round(cx - vrect[0]) - u0
+    fy = dy + vrect[1] + _round(cy - vrect[1]) - v0
+    fw, fh = _round(cw), _round(ch)
+    snapped, scan = trace
+    ww, hh = scan[3:]
+    if fx > 0.5 or fy > 0.5 or fx + fw < ww - 0.5 or fy + fh < hh - 0.5:
+        return [], [snapped]
+    def r6(value: float) -> float:
+        return math.floor(value * 1e6 + 0.5) / 1e6
+
+    trace = [snapped, ["video", video, r6(fx), r6(fy), fw, fh], scan]
+    ex = [e for e in range(ww) if e < fx or e + 1 > fx + fw]
+    ey = [e for e in range(hh) if e < fy or e + 1 > fy + fh]
+    sx = [r6(max(0, min(natural[0] - 1, (e + 0.5 - fx) * natural[0] / fw - 0.5))) for e in ex]
+    sy = [r6(max(0, min(natural[1] - 1, (e + 0.5 - fy) * natural[1] / fh - 0.5))) for e in ey]
+    trace.extend([["video", video, 0, sy[i], natural[0], 1, r6(fx), e, fw, 1] for i, e in enumerate(ey)])
+    trace.extend([["video", video, sx[i], 0, 1, natural[1], e, r6(fy), 1, fh] for i, e in enumerate(ex)])
+    trace.extend([["video", video, sx[i], sy[j], 1, 1, x, y, 1, 1]
+                  for i, x in enumerate(ex) for j, y in enumerate(ey)])
+    return holder, trace
+
+
 def _redraw(element: str, rect, alpha=1, origin=(109, 795)) -> list:
     """A foreground canvas redrawn into its snapped rect, in canvas pixels from the holder's snapped origin."""
     l, t = _round(rect[0]), _round(rect[1])
@@ -1841,6 +1911,24 @@ def _redraw(element: str, rect, alpha=1, origin=(109, 795)) -> list:
 
 
 DEFAULT = _snapped([109, 795, 952, 268])
+FRAC_DEFAULT = _fractional([109, 795, 952, 268])
+FRAC_BOX = [109.3517074584961, 795.0361938476562, 951.53125, 267.60943603515625]
+FRAC = _fractional(FRAC_BOX)
+FRAC_CLIP = _fractional(FRAC_BOX, [300, 850, 500, 150])
+FRAC_OUTSIDE_CENTRE_BOX = [108.53, 795, 952.45, 267.6065625]
+FRAC_OUTSIDE_CENTRE = _fractional(FRAC_OUTSIDE_CENTRE_BOX)
+FRAC_RIGHT_BOTTOM_BOX = [108.7, 794.7, 952, 268]
+FRAC_RIGHT_BOTTOM = (
+    ["absolute/hidden", "109,795,952,268", "952x268", "absolute", "0,0,952,268"],
+    [
+        ["video", "vid", 0, 0, 952, 268],
+        ["video", "vid", -0.3, -0.3, 952, 268],
+        ["get", 0, 0, 952, 268],
+        ["video", "vid", 0, 539, 1920, 1, -0.3, 267, 952, 1],
+        ["video", "vid", 1919, 0, 1, 540, 951, -0.3, 1, 268],
+        ["video", "vid", 1919, 539, 1, 1, 951, 267, 1, 1],
+    ],
+)
 DPR2 = _snapped([109, 795, 952, 268], dpr=2)
 DPR15 = _snapped([109, 795, 952, 268], dpr=1.5)
 DPR15_FILL = _snapped([109, 795, 313, 263], natural=None, dpr=1.5)
@@ -1881,7 +1969,7 @@ def _hidden_parent(**effects) -> dict:
     return {"cs": {"visibility": "hidden", **effects}, "rect": [-300, 0, 200, 1080]}
 
 
-FREEZE_ROW_COUNT = 274
+FREEZE_ROW_COUNT = 286
 # name -> (stub options, expected take/attach count and target, redraws [id, alpha, x, y, w, h], writeback (none on any
 # path: identity tone), geometry).
 FREEZE_ROWS = {
@@ -2087,11 +2175,32 @@ FREEZE_ROWS = {
     "r9_baseHalfWidth": ({"baseRect": [0, 0, 960, 1080]}, FREEZE_SKIP),
     "r9_baseFractionalHeight": ({"baseRect": [0, 0, 1920, 1079.5]}, FREEZE_SKIP),
     "r9_fullSlide": ({}, dict(FREEZE_ADMIT, traces=[DEFAULT_TRACE])),
-    # Rev 17: the take proceeds only on the host's `snap` grant; an absent getter is the preview/raw page (patch_rendering).
+    # The getter is the sole grant input. `frac` keeps the snapped underlay and overlays the unsnapped quad at DPR 1.
     "gate_grantAbsent": ({"placement": None}, FREEZE_SKIP),
     "gate_grantInvalid": ({"placement": "invalid"}, FREEZE_SKIP),
-    "gate_grantFrac": ({"placement": "frac"}, FREEZE_SKIP),
+    "gate_grantFrac": ({"placement": "frac"}, dict(FREEZE_ADMIT, traces=[FRAC_DEFAULT[1]])),
     "gate_grantUpperSnap": ({"placement": "SNAP"}, FREEZE_SKIP),
+    "fracFractionalXY": ({"placement": "frac", "vrect": FRAC_BOX, "fg": _fg()},
+                           dict(FREEZE_ADMIT, holders=[FRAC[0]], draws=[FG_REDRAW[1:]],
+                                traces=[FRAC[1] + [FG_REDRAW]])),
+    "fracOutsidePixelCentre": ({"placement": "frac", "vrect": FRAC_OUTSIDE_CENTRE_BOX},
+                                dict(FREEZE_SKIP, traces=[FRAC_OUTSIDE_CENTRE[1]])),
+    "fracRightBottomRepair": ({"placement": "frac", "vrect": FRAC_RIGHT_BOTTOM_BOX},
+                                dict(FREEZE_ADMIT, holders=[FRAC_RIGHT_BOTTOM[0]],
+                                     traces=[FRAC_RIGHT_BOTTOM[1]])),
+    "fracAlphaRejected": ({"placement": "frac", "vrect": FRAC_BOX, "alphaAt": 0, "alphaVal": 0},
+                           dict(FREEZE_SKIP, traces=[FRAC[1][:3]])),
+    "fracClipNearXY": ({"placement": "frac", "vrect": FRAC_BOX,
+                         "layerCs": {"overflowX": "hidden", "overflowY": "hidden"}, "clip": [300, 850, 500, 150]},
+                        dict(FREEZE_ADMIT, holders=[FRAC_CLIP[0]], traces=[FRAC_CLIP[1]])),
+    "fracDpr15": ({"placement": "frac", "dpr": 1.5}, FREEZE_SKIP),
+    "fracDpr2": ({"placement": "frac", "dpr": 2}, FREEZE_SKIP),
+    "fracStageOriginX": ({"placement": "frac", "off": [0.5, 60], "viewport": [1921, 1200]}, FREEZE_SKIP),
+    "fracStageOriginY": ({"placement": "frac", "off": [0, 60.5], "viewport": [1920, 1201]}, FREEZE_SKIP),
+    "fracStageIntegerOrigin": ({"placement": "frac", "off": [10, 60], "viewport": [1940, 1200]},
+                               dict(FREEZE_ADMIT, traces=[FRAC_DEFAULT[1]])),
+    "fracBaseRectUnequal": ({"placement": "frac", "baseRect": [0, 0, 1920, 1079.5]}, FREEZE_SKIP),
+    "fracSceneLeftFractional": ({"placement": "frac", "layerCs": {"left": "0.5px"}}, FREEZE_SKIP),
     # Scene elements need integral computed `left`/`top` in px; sub-pixel offsets come only from transforms.
     "leftFractional": ({"layerCs": {"left": "0.5px"}}, FREEZE_SKIP),
     "topFractional": ({"layerCs": {"top": "10.25px"}}, FREEZE_SKIP),
@@ -2348,8 +2457,7 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
         # to 200, then rev 12's 26 r8 rows (exterior proof, top layer, geometry guard, opaque cover) and 8 r9 rows, then
         # impl r1's 26 (one exterior predicate at a time, the last backing pixel, a fractional x origin), then rev 13's 5
         # (DPR 1.25 and 3 skip, DPR 1.5 on the P2 box, the last backing pixel at DPR 1.5 and 2) and a DPR 2 quarter-pixel
-        # edge (y 795.25 snaps to 795.5 on the device grid, 795 on the CSS grid), then rev 17's 8 (grant absent or other
-        # than `snap`, fractional or `auto` scene `left`/`top`, a negative integer `left`).
+        # edge, rev 17's grant/scene-position rows, and the frac underlay/quad geometry and shared-guard rows.
         assert len(FREEZE_ROWS) == FREEZE_ROW_COUNT
         assert result.pop("guardControl") == FREEZE_GUARD_CONTROL
         assert result.pop("callSites") == FREEZE_CALL_SITES
@@ -2366,13 +2474,22 @@ def test_dissolve_real_patched_methods_on_node(tmp_path, sha, case):
             assert not row["placeChanged"] and row["badHolders"] == 0, name
             # The cost is the take's whole deterministic work (every style read, frame, draw, readback and redraw).
             assert row["ms"] == row["windowMs"] == row["work"], name
-            # Each snapshot canvas runs video draw -> whole-backing readback -> foreground redraws, in that order, and
-            # never writes pixels back (identity tone).
+            # Each snapshot canvas keeps the snapped/frac draws before the whole-backing readback. Frac repair draws
+            # follow a successful readback and precede foreground redraws; alpha rejection performs no repair draws.
             for trace in row["traces"]:
                 kinds = "".join({"video": "v", "get": "g", "put": "p", "fg": "f"}[op[0]] for op in trace)
-                assert re.fullmatch(r"(v(gf*)?)?", kinds), (name, kinds)
+                if name == "fracFractionalXY":
+                    assert kinds == "vvgvvvf", (name, kinds)
+                elif name == "fracRightBottomRepair":
+                    assert kinds == "vvgvvv", (name, kinds)
+                elif name == "fracAlphaRejected":
+                    assert kinds == "vvg", (name, kinds)
+                else:
+                    assert re.fullmatch(r"(v{1,2}(gf*)?)?", kinds), (name, kinds)
             assert row["put"] is None and row["partialReads"] == 0, name
             assert row["slotCleared"] and row["vfOpened"] == row["vfClosed"], name
+            if name.startswith(("gate_grant", "frac")) and name != "gate_grantAbsent":
+                assert row["placementReads"] == 1, name
             if name.startswith(("gate_", "ext_", "r9_")) and expected == FREEZE_SKIP:
                 assert row["vfOpened"] == 0, name
     else:

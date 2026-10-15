@@ -76,6 +76,31 @@ function MovieWarnings({ warnings, heading }: { warnings?: string[]; heading: st
   </div>;
 }
 
+function PlacementStatus({ snapshot, connected, disabledReason, onRecalibrate }: {
+  snapshot: LiveSnapshot;
+  connected: boolean;
+  disabledReason: string;
+  onRecalibrate: () => void;
+}) {
+  const placement = snapshot.output.placement;
+  const capability = snapshot.capabilities?.recalibrate;
+  let status = "Output not calibrated";
+  if (!connected || placement?.reason === "disconnected") status = "Waiting for connection to output host";
+  else if (placement?.state === "probing") {
+    status = placement.reason === "waiting-for-transition" ? "Waiting for the current transition to finish." : "Calibrating…";
+  } else if (placement?.state === "valid") status = "Output calibrated";
+  else if (placement?.automaticProbesDisabled) status = "Calibration paused. Recalibrate output to retry.";
+  else if (capability && !capability.supported && capability.reason === "Recalibration is available only for managed OBS output.") {
+    status = capability.reason;
+  } else if (placement && ![null, "not-calibrated", "stopped"].includes(placement.reason)) {
+    status = "Calibration unavailable. Movies use the standard transition.";
+  }
+  return <div className="live-continuity" aria-live="polite">
+    <span className="live-continuity-badge" data-mode={placement?.state || "unknown"}>{status}</span>
+    <p><button className="btn secondary" type="button" disabled={!!disabledReason} title={disabledReason} onClick={onRecalibrate}>Recalibrate output</button></p>
+  </div>;
+}
+
 export function LivePresenter({ client = liveClient, previewJobId = "", pollMs = 1000, enginePollMs = 2000 }: { client?: LiveClient; previewJobId?: string; pollMs?: number; enginePollMs?: number }) {
   const [snapshot, setSnapshot] = useState<LiveSnapshot | null>(null);
   const observed = useRef<LiveSnapshot | null>(null);
@@ -396,6 +421,7 @@ export function LivePresenter({ client = liveClient, previewJobId = "", pollMs =
             {current?.notes && <details className="live-notes"><summary>Presenter notes</summary><p>{current.notes}</p></details>}
           </section>
           <div className="live-playback-status">
+            <PlacementStatus snapshot={snapshot} connected={connected} disabledReason={disabledReason("recalibrate")} onRecalibrate={() => void send("recalibrate")} />
             <ContinuityStatus continuity={snapshot.continuity} />
             <MovieWarnings warnings={snapshot.output.codecWarnings} heading="Some movies may not play in this output" />
             <MovieWarnings warnings={snapshot.output.rateWarnings} heading="Some movies do not match the output rate" />

@@ -112,13 +112,13 @@ class LiveSessionService:
     def _disabled_capabilities() -> dict[str, dict[str, Any]]:
         return {
             operation: {"supported": False, "reason": "Not qualified by the player adapter."}
-            for operation in ("advance", "goTo", "hide", "show")
+            for operation in ("advance", "goTo", "hide", "show", "recalibrate")
         } | {"stop": {"supported": True}}
 
     def _apply_capabilities(self, session: _Session, caps: dict[str, dict[str, Any]]) -> None:
         session.state["capabilities"] = {
             operation: deepcopy(caps.get(operation, {"supported": False, "reason": "Not qualified by the player adapter."}))
-            for operation in ("advance", "goTo", "hide", "show")
+            for operation in ("advance", "goTo", "hide", "show", "recalibrate")
         }
         session.state["capabilities"]["stop"] = {"supported": True}
 
@@ -290,7 +290,7 @@ class LiveSessionService:
                 if previous[0] != payload:
                     return self._simple_reject(session.state, request_id, "Request ID was already used with a different command.")
                 return self._reply(session, request_id)
-            if operation not in ("advance", "goTo", "hide", "show", "stop"):
+            if operation not in ("advance", "goTo", "hide", "show", "recalibrate", "stop"):
                 return self._reject_now(session, request_id, payload, "Unknown operation.")
             if session.state["status"] == "stopped":
                 return self._reject_now(session, request_id, payload, "Session is stopped.")
@@ -374,14 +374,17 @@ class LiveSessionService:
                     return self._reject_now(session, request_id, payload, cap.get("reason") or "Operation is not supported.")
                 if operation in ("advance", "goTo") and session.state["status"] == "busy":
                     return self._reject_now(session, request_id, payload, "Player is busy.")
-                session.state["status"] = "busy"
-                session.state["revision"] += 1
                 if operation in ("advance", "goTo"):
+                    session.state["status"] = "busy"
+                    session.state["revision"] += 1
                     session.pending_navigation[request_id] = (
                         operation, slide, session.state["sceneId"], session.player_revision,
                     )
-                else:
+                elif operation in ("hide", "show"):
+                    session.state["status"] = "busy"
+                    session.state["revision"] += 1
                     session.pending_visibility[request_id] = operation == "show"
+                published_revision = session.state["revision"]
 
             with session.adapter_lock:
                 observed = adapter.execute(operation, slide)
@@ -394,6 +397,10 @@ class LiveSessionService:
                     raise ValueError("Player returned no observation for the command.")
                 self._apply_capabilities(session, caps)
                 self._apply(session, observed, executed_operation=operation)
+                if operation == "recalibrate":
+                    if session.state["revision"] == published_revision:
+                        session.state["revision"] += 1
+                    self._completed(session, request_id)
                 return self._reply(session, request_id)
 
         except PlayerCommandRejected as exc:

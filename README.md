@@ -253,18 +253,27 @@ unpatched player; `auto` keeps it on; any other value refuses to start.
 slide pops in under a Dissolve over fill-less textures, a cut shows both slides at
 once, and a playing movie jumps back to the opening frame baked into the outgoing slide
 (on, the cross-fade and clean cut apply on every output, raw export and Build Preview included).
-On, the movie instead freezes on its current frame and fades with the slide, but only on the
-HDMI/headless output host, when the host launched that Chrome itself, it is Chrome 154 with GPU
-compositing, the scale factor is 1, 1.5 or 2 and the stage is unscaled. Everywhere else the
-movie keeps that jump: under Keyer output (OBS's browser source, until a follow-up PR), in raw
-export and Build Preview, and on scaled stages (an output not 1920 CSS px wide). On GPU
-compositing the freeze shows a mid-tone step (identity tone, a known limit; Q5 open pending the
-W5 probe; `keynote_live_dissolve_crossfade.plan.md` §3.3, §12).
+On, the movie instead freezes on its current frame and fades with the slide on a qualified output:
+- **HDMI/headless output:** when the host launched that Chrome itself, it is Chrome 154 with GPU compositing, the scale
+  factor is 1, 1.5 or 2 and the stage is unscaled (`grant: snap`, granted from the browser's own report).
+- **Keyer output (managed OBS):** after the host calibrates OBS's browser source. It loads a probe page in a hidden Studio
+  Mode preview scene (`AK-Calibrate`, never on program), proves the capture is fresh, measures which rule OBS's renderer
+  uses, then removes everything it added and restores Studio Mode and preview. A pass grants `frac` (OBS 32.2.2 / CEF 127
+  draws the movie at its unsnapped position; the freeze redraws partly covered edge pixels from the movie and is refused
+  when an edge pixel's centre falls outside it) for 15 s, renewed while the connection, page, OBS launch, browser and scale
+  factor stay the same; DPR 1 and an integer stage origin only. Calibration runs when the output first connects and after a
+  reload or reconnect; the presenter's **Recalibrate output** retries it. A calibration that disturbs the program stops
+  automatic calibration until OBS restarts.
+Everywhere else the movie keeps that jump: before calibration or after it fails, on scaled stages (an output not 1920 CSS
+px wide), and in raw export and Build Preview, which carry the cross-fade and cut but no freeze code at all. On GPU
+compositing the freeze shows a mid-tone step (identity tone, a known limit; Q5 open pending the W5 probe;
+`keynote_live_dissolve_crossfade.plan.md` §3.3, §12; `keynote_live_cef_placement.plan.md`).
 `output.mmOpacity` reports `mode` (`on`/`off`) and the served player's `sha256`;
-`output.placement` reports whether the host granted the freeze (`grant`: `snap` or null) and
-why (`reason`: `granted`, `attached` (incl. managed OBS), `unqualified-version`,
-`software-compositing`, `version-unavailable`, `revoked-fingerprint`, or `channel-compromised`,
-which keeps the output hidden and refuses `show`).
+`output.placement` reports `state` (`invalid`/`probing`/`valid`), `grant` (`snap`, `frac` or null), `method`
+(`knowledge` for HDMI, `probe` for Keyer), lease fields, `automaticProbesDisabled` and `reason`. HDMI reasons are
+`granted`, `attached`, `unqualified-version`, `software-compositing`, `version-unavailable`, `revoked-fingerprint`;
+Keyer reasons include `calibrating`, `waiting-for-transition`, `probe-failed`, `program-disturbed`, `isolation-failed`,
+`cleanup-failed`, `leaseLapsed`. `channel-compromised` keeps the output hidden and refuses `show` on either.
 Build Preview serves the same drawing patch, without the live observation hook. Qualify it with
 `scripts/mm_opacity_probe.py`, `scripts/p2_recovery_html_adversarial.py --mm-opacity auto|off`
 and, under Keyer output, `scripts/managed_obs_qualify.py --arm mmo|mmo-cef`.
