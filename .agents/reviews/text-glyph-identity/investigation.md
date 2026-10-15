@@ -89,3 +89,19 @@ Offline, the labelled synthetic `F2/synthetic-glyph-i` (base i → `DF3DB700`) i
 5. **Acceptance:** implement and qualify on the synthetic row now, and leave "fixes the lost export" unverified until a capture or a waiver? (Rec: yes.)
 6. **Evidence:** was removing `F2-evidence-2026-10-14/` (plus `F2-78.key`, `author`, `live-c155`) intentional? Can it be restored read-only?
 7. **Go:** approve implementation (Sol high → Opus review → full suites → G1, then owner-run G2/G3)?
+
+## Reproducer captured (2026-10-15, after owner approval)
+I ran two serial exports of the unchanged F2.key (`f99a68ef…`, same hash before and after) with `export_html`. Keynote was free and peers had a "need window"; Keynote was quit after each run. Outputs are in `~/Desktop/StageT-text-glyph-evidence/2026-10-15/attempt-0{1,2}`, together with the logs, `tree-hashes.txt` and `detector.txt`.
+
+**Export is nondeterministic**: tree hashes `1c1291ef…` and `c6627004…` both differ from `c664279e…`. The recycled slide-3 ids `B37026D5` and `DF3DB700` land on different **base** letters each time. The effect copies always keep their natural ids.
+
+| Export | Base letter on `B37026D5` (357×235) | Base letter on `DF3DB700` | Hits |
+|---|---|---|---|
+| F2-html (`c664279e`) | none (base i on `B7E3456D`, fits) | none | map R1 + R6 |
+| attempt-01 (`1c1291ef`) | **i, 33×135 → R1** (the owner's refusal) | s (61×103 entry, corr 1.0 to its twin) | i R1; map R1 (176×205 on 61×103) + R6 |
+| attempt-02 (`c6627004`) | **s, 61×103 → R1** | i (33×135 entry, corr 1.0 to its twin) | s R1; map R1 (176×205 on 33×135) + R6 |
+
+- Each victim letter's effect twin keeps a natural, slide-unique id: i `9C60C2B5`, s `A7274F8D`. That is D1g's case.
+- The letter that wins the shared entry renders correctly.
+- The map victim each time is D2's existing route.
+- The "inferred" coverage claim in plan §1 is now **measured** on two real exports.

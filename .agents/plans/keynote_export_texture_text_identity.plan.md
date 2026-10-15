@@ -123,6 +123,7 @@ Every other G1 row keeps its outcome. Missing inputs or pin mismatches are INCON
 - OQ-2: minimal change first, as recommended.
 - OQ-3: refuse shared-id twins for now; revisit if it becomes a problem.
 - OQ-4: run the two-export check first; restorability of `6fea812c…` is unknown.
+  - **Result:** export is nondeterministic. Both new exports (`~/Desktop/StageT-text-glyph-evidence/2026-10-15/attempt-0{1,2}`) carry a real base-glyph collision: attempt-01 on the i (the owner's refusal), attempt-02 on the s. Each victim has a natural-id effect twin. They become pinned G1 rows `F2/attempt-01` and `F2/attempt-02`, each expecting D2×1 + D1g×1. They replace `F2/synthetic-glyph-i` as the positive control; the shared-id negative control `F2/synthetic-glyph-i-both` stays.
 - OQ-5: as recommended.
 - OQ-6: the removal was intentional; the folder is in the Trash and restorable.
 - Go: implement.
