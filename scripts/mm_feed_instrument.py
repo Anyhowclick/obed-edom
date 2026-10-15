@@ -69,7 +69,7 @@ INSTRUMENT_JS = r"""
   function moveFor(v){var state=decoderState.get(v);return state&&state.move||null}
   function mediaEvent(kind,v,extra){
     var move=moveFor(v),state=decoderState.get(v),current=scene();
-    if(kind==='pause'&&v.__obedPosterHeld){var pendingMoves=entries().filter(function(e){return e.atScene===current+1&&
+    if(kind==='pause'&&v.__obedPosterHeld&&!(move&&move.atScene===current+1)){var pendingMoves=entries().filter(function(e){return e.atScene===current+1&&
         (sameId(v.__obedInstance,e.objectId)||sameId(v.__obedInstance,e.dstObjectId))});
       if(pendingMoves.length===1){var next=entryState[pendingMoves[0].id]||{};move={serial:null,atScene:pendingMoves[0].atScene,
         entryId:pendingMoves[0].id,objectId:pendingMoves[0].objectId,generation:state&&state.generation,visit:(next.visit||0)+1}}
@@ -722,10 +722,17 @@ def _source_frame_duration(
         for a, b in zip(frames, frames[1:])
         if b["presentedFrames"] > a["presentedFrames"] and b["mediaTime"] > a["mediaTime"]
     ]
-    single = [delta for delta, presented in steps if presented == 1]
-    if len(single) < 2:
+    if not steps:
         return None
-    duration = 1 / float(source_fps) if _finite(source_fps) and source_fps > 0 else min(single)
+    single = [delta for delta, presented in steps if presented == 1]
+    if _finite(source_fps) and source_fps > 0:
+        duration = 1 / float(source_fps)
+    else:
+        if not single:
+            return None
+        duration = min(delta / presented for delta, presented in steps)
+        if not any(abs(delta - duration) <= duration * .2 for delta in single):
+            return None
     if not duration > 0:
         return None
 
@@ -733,7 +740,7 @@ def _source_frame_duration(
         multiple = round(delta / duration)
         return multiple >= 1 and abs(delta - multiple * duration) <= duration * .2
 
-    if sum(consistent(delta) for delta in single) < math.ceil(len(single) * .8):
+    if single and sum(consistent(delta) for delta in single) < math.ceil(len(single) * .8):
         return None
     return duration if all(consistent(delta) for delta, _presented in steps) else None
 
@@ -761,6 +768,7 @@ def _handback_record(
         and index in mapped and mapped[index] == stamp
         for index, stamp in endpoints
     )
+    duration_source = "fps" if _finite(source_fps) and source_fps > 0 else "rvfc"
     duration = _source_frame_duration(media, created_at=move.get("createdAt"), source_fps=source_fps)
     return {
         "complete": bool(isinstance(handback, dict) and handback.get("complete") is True and not handback.get("timedOut")
@@ -778,6 +786,7 @@ def _handback_record(
         },
         "presented": frames if isinstance(frames, list) else [],
         "sourceFrameDurationS": duration,
+        "durationSource": duration_source,
         "adjacentFrames": closed_index - last_index == 1
         if isinstance(closed_index, int) and isinstance(last_index, int) else None,
         "canvasLingerMs": closed_at - last_stamp if _finite(closed_at) and _finite(last_stamp) else None,
@@ -886,36 +895,49 @@ def score_handback_continuity(
 ) -> dict[str, Any]:
     if not isinstance(record, dict):
         return _verdict(None, "hand-back evidence is missing")
-    if record.get("complete") is not True:
-        return _verdict(None, "the three-frame hand-back read window is incomplete", timedOut=record.get("timedOut"))
-    if record.get("frameMappingComplete") is not True:
-        return _verdict(None, "the shared browser-frame mapping is incomplete")
     last, closed, presented = record.get("lastUpload"), record.get("closed"), record.get("presented")
-    if not isinstance(last, dict) or not isinstance(closed, dict) or not isinstance(presented, list) or len(presented) < 3:
-        return _verdict(None, "hand-back endpoints are missing")
+    last = last if isinstance(last, dict) else {}
+    closed = closed if isinstance(closed, dict) else {}
+    presented = presented if isinstance(presented, list) else []
     dom_values = [closed.get("dom"), *(row.get("dom") for row in presented[:3] if isinstance(row, dict))]
     dom_checks = [_dom_handback_ok(value) for value in dom_values]
     duration = record.get("sourceFrameDurationS")
+    duration_source = record.get("durationSource")
     first = presented[0] if presented else None
-    if not _finite(duration) or duration <= 0 or not _finite(last.get("mediaTime")) \
-            or not isinstance(first, dict) or not _finite(first.get("mediaTime")):
-        return _verdict(None, "hand-back media-time endpoints or source-frame duration are unreadable")
-    delta = first["mediaTime"] - last["mediaTime"]
-    source_frames = round(delta / duration)
+    media_readable = _finite(last.get("mediaTime")) and isinstance(first, dict) and _finite(first.get("mediaTime"))
+    delta = first["mediaTime"] - last["mediaTime"] if media_readable else None
+    duration_readable = _finite(duration) and duration > 0 and duration_source in ("fps", "rvfc")
+    source_frames = round(delta / duration) if _finite(delta) and duration_readable else None
+    last_index, closed_index = last.get("frameIndex"), closed.get("frameIndex")
     detail = {
-        "lastUploadMediaTime": last["mediaTime"], "firstPresentedMediaTime": first["mediaTime"],
-        "deltaS": delta, "sourceFrameDurationS": duration, "sourceFrames": source_frames,
+        "lastUploadMediaTime": last.get("mediaTime"),
+        "firstPresentedMediaTime": first.get("mediaTime") if isinstance(first, dict) else None,
+        "deltaS": delta, "sourceFrameDurationS": duration, "durationSource": duration_source,
+        "sourceFrames": source_frames,
         "maxSourceFrames": max_source_frames, "canvasLingerMs": record.get("canvasLingerMs"),
-        "frameGap": closed["frameIndex"] - last["frameIndex"], "dom": dom_values,
+        "frameGap": closed_index - last_index
+        if isinstance(closed_index, int) and isinstance(last_index, int) else None,
+        "dom": dom_values,
     }
-    if delta < -1e-6:
-        return _verdict(False, "hand-back media time moved backwards", **detail)
     if mode == "continuous" and record.get("adjacentFrames") is not True:
         if record.get("adjacentFrames") is False:
             return _verdict(False, "the last upload was not in the frame immediately before canvas removal", **detail)
-        return _verdict(None, "the upload/removal frame adjacency is unreadable", **detail)
     if any(value is False for value in dom_checks):
         return _verdict(False, "a static poster was exposed during DOM hand-back", **detail)
+    if _finite(delta) and delta < -1e-6:
+        return _verdict(False, "hand-back media time moved backwards", **detail)
+    if record.get("complete") is not True:
+        return _verdict(None, "the three-frame hand-back read window is incomplete",
+                        timedOut=record.get("timedOut"), **detail)
+    if record.get("frameMappingComplete") is not True:
+        return _verdict(None, "the shared browser-frame mapping is incomplete", **detail)
+    if not isinstance(record.get("lastUpload"), dict) or not isinstance(record.get("closed"), dict) \
+            or not isinstance(record.get("presented"), list) or len(presented) < 3:
+        return _verdict(None, "hand-back endpoints are missing", **detail)
+    if not media_readable or not duration_readable:
+        return _verdict(None, "hand-back media-time endpoints or source-frame duration are unreadable", **detail)
+    if mode == "continuous" and record.get("adjacentFrames") is not True:
+        return _verdict(None, "the upload/removal frame adjacency is unreadable", **detail)
     if len(dom_checks) != 4 or any(value is None for value in dom_checks):
         return _verdict(None, "DOM hand-back coverage is unreadable", **detail)
     return _verdict(source_frames <= max_source_frames,

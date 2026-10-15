@@ -1170,12 +1170,12 @@ def feed_fixture_required(args: argparse.Namespace) -> bool:
 def mm_feed_control_aggregate_problems(label: str, rows: Sequence[dict[str, Any]]) -> list[str]:
     handbacks = [row.get("handbackContinuity") for row in rows if isinstance(row, dict)]
     if label == "no-linger":
-        return [
-            f"row {index} no-linger sourceFrames {handback.get('sourceFrames')!r} is not > 2"
-            for index, handback in enumerate(handbacks)
-            if not isinstance(handback, dict) or not isinstance(handback.get("sourceFrames"), int)
-            or handback["sourceFrames"] <= 2
-        ]
+        problems = []
+        for index, handback in enumerate(handbacks):
+            source_frames = handback.get("sourceFrames") if isinstance(handback, dict) else None
+            if not isinstance(source_frames, int) or source_frames <= 2:
+                problems.append(f"row {index} no-linger sourceFrames {source_frames!r} is not > 2")
+        return problems
     if label != "interim-delay":
         return []
     problems = [

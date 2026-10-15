@@ -995,6 +995,7 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
             "frameMappingComplete": lambda v: isinstance(v, bool), "lastUpload": lambda v: isinstance(v, dict),
             "closed": lambda v: isinstance(v, dict), "presented": lambda v: isinstance(v, list),
             "sourceFrameDurationS": lambda v: v is None or _finite(v) and v > 0,
+            "durationSource": lambda v: v in ("fps", "rvfc"),
             "adjacentFrames": lambda v: v is None or isinstance(v, bool),
             "canvasLingerMs": lambda v: v is None or _finite(v) and v >= 0,
         })

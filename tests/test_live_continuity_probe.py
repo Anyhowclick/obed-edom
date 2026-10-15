@@ -11705,7 +11705,8 @@ def _handback_continuity(*, fps: int = 30, source_frames: float = 1.0) -> dict[s
         "presented": [{"mediaTime": 4.0 + source_frames / 30, "presentedFrames": 121, "dom": copy.deepcopy(dom)},
                       {"mediaTime": 4.0 + (source_frames + 1) / 30, "presentedFrames": 122, "dom": copy.deepcopy(dom)},
                       {"mediaTime": 4.0 + (source_frames + 2) / 30, "presentedFrames": 123, "dom": copy.deepcopy(dom)}],
-        "sourceFrameDurationS": 1 / 30, "adjacentFrames": True, "canvasLingerMs": period,
+        "sourceFrameDurationS": 1 / 30, "durationSource": "fps",
+        "adjacentFrames": True, "canvasLingerMs": period,
     }
 
 
@@ -11716,6 +11717,8 @@ def _handback_continuity(*, fps: int = 30, source_frames: float = 1.0) -> dict[s
     ("unreadable", 30, 1.0, "continuous", None),
     ("rounded-held-plus-two", 30, 2.49, "continuous", True),
     ("feed-off-no-adjacency", 30, 1.0, "departure", True),
+    ("continuous-no-adjacency-unreadable", 30, 1.0, "continuous", False),
+    ("backwards-unreadable-duration", 30, 1.0, "continuous", False),
 ])
 def test_handback_continuity_scorer(
     case: str, fps: int, source_frames: float, mode: str, expected: bool | None,
@@ -11723,6 +11726,7 @@ def test_handback_continuity_scorer(
     record = _handback_continuity(fps=fps, source_frames=source_frames)
     if case == "dom-exposure":
         record["closed"]["dom"]["afterCanvas"] = False
+        record["sourceFrameDurationS"] = None
     elif case == "hidden-post-closure":
         record["presented"][0]["dom"]["shown"] = False
     elif case == "unreadable":
@@ -11730,20 +11734,31 @@ def test_handback_continuity_scorer(
     elif case == "feed-off-no-adjacency":
         record["lastUpload"]["frameIndex"] = 2
         record["adjacentFrames"] = False
+    elif case == "continuous-no-adjacency-unreadable":
+        record["lastUpload"]["frameIndex"] = 2
+        record["adjacentFrames"] = False
+        record["sourceFrameDurationS"] = None
+    elif case == "backwards-unreadable-duration":
+        record["presented"][0]["mediaTime"] = record["lastUpload"]["mediaTime"] - 1 / 30
+        record["sourceFrameDurationS"] = None
     scored = probe.score_handback_continuity(record, mode=mode)
     assert scored["verdict"] is expected
     if expected is not None and case != "dom-exposure":
-        assert scored["frameGap"] == (7 if case == "feed-off-no-adjacency" else 1)
+        assert scored["frameGap"] == (
+            7 if case in ("feed-off-no-adjacency", "continuous-no-adjacency-unreadable") else 1
+        )
     if case == "nine-frame":
         assert scored["sourceFrames"] == 9
 
 
 @pytest.mark.parametrize(("source_fps", "rows", "expected"), [
     (60.0, [(1, 0.0), (2, 1 / 30), (3, 2 / 30), (4, 3 / 30)], 1 / 60),
+    (60.0, [(2, 0.0), (4, 1 / 30), (6, 2 / 30)], 1 / 60),
     (None, [(4, .1), (12, .433333), (13, .466666), (14, .5), (15, .533333)], 1 / 30),
+    (None, [(1, 0.0), (3, 1 / 30), (4, 2 / 30), (5, 3 / 30)], None),
 ])
 def test_source_frame_duration_uses_movie_fps_and_tolerates_page_load_catch_up(
-    source_fps: float | None, rows: list[tuple[int, float]], expected: float,
+    source_fps: float | None, rows: list[tuple[int, float]], expected: float | None,
 ) -> None:
     media = [
         {"kind": "videoFrame", "t": float(index), "presentedFrames": frame, "mediaTime": media_time}
@@ -11752,7 +11767,10 @@ def test_source_frame_duration_uses_movie_fps_and_tolerates_page_load_catch_up(
     actual = probe.mm_feed_instrument._source_frame_duration(
         media, created_at=1.0, source_fps=source_fps,
     )
-    assert actual == pytest.approx(expected, rel=.01)
+    if expected is None:
+        assert actual is None
+    else:
+        assert actual == pytest.approx(expected, rel=.01)
 
 
 def test_feed_control_aggregate_expectations_cover_no_linger_and_intermittent_interim_delay() -> None:
@@ -11764,6 +11782,9 @@ def test_feed_control_aggregate_expectations_cover_no_linger_and_intermittent_in
     no_linger = {"handbackContinuity": {"verdict": False, "sourceFrames": 9}}
     assert probe.mm_feed_control_aggregate_problems("interim-delay", [exposed, green, green]) == []
     assert probe.mm_feed_control_aggregate_problems("no-linger", [no_linger]) == []
+    assert probe.mm_feed_control_aggregate_problems("no-linger", [{}]) == [
+        "row 0 no-linger sourceFrames None is not > 2",
+    ]
     assert probe.mm_feed_control_aggregate_problems("interim-delay", [green])
     assert probe.mm_feed_control_aggregate_problems(
         "interim-delay", [{"handbackContinuity": {"verdict": None}}],
@@ -12153,7 +12174,7 @@ const holdMove=openContext('1-canvas'),holdTexture=posterTexture(holdMove,new Im
 location.hash='#5';for(const frame of [41,42,43])present(videos.killed,frame);videos.killed.__obedPosterHeld=true;videos.killed.pause();window.__OBED_MM_FEED__.once('killed');
 const killedMove=openContext('2-canvas'),killedTexture=posterTexture(killedMove,new ImageSource(100,100,8));drawHeld(killedMove,killedTexture,videos.killed,false);videos.killed.play();present(videos.killed,44);
 function runChain(atScene,startFrame,id,objectId,dstObjectId){location.hash='#'+(atScene-1);seam.claim(objectId);const move=openContext(id),texture=posterTexture(move,new ImageSource(100,100,8));location.hash='#'+atScene;for(let n=0;n<4;n++){present(videos.alpha,startFrame+n);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}videos.alpha.__obedInstance=dstObjectId}
-function runMidMoveStandDown(){location.hash='#13';for(const frame of [69,70])present(videos.alpha,frame);seam.claim('alpha-final');location.hash='#14';const move=openContext('5-canvas'),texture=posterTexture(move,new ImageSource(100,100,8));for(const frame of [71,72]){present(videos.alpha,frame);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}present(videos.alpha,73);seam.onStandDown('alpha-final','after-feed');videos.alpha.__obedPosterHeld=true;videos.alpha.pause();for(let n=0;n<2;n++){move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}window.__obedMmFeedProbe.report();videos.alpha.play();present(videos.alpha,74);videos.alpha.__obedInstance='alpha-end'}
+function runMidMoveStandDown(){location.hash='#13';for(const frame of [69,70])present(videos.alpha,frame);seam.claim('alpha-final');const move=openContext('5-canvas'),texture=posterTexture(move,new ImageSource(100,100,8));for(const frame of [71,72]){present(videos.alpha,frame);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}present(videos.alpha,73);seam.onStandDown('alpha-final','after-feed');videos.alpha.__obedPosterHeld=true;videos.alpha.pause();location.hash='#14';for(let n=0;n<2;n++){move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}window.__obedMmFeedProbe.report();videos.alpha.play();present(videos.alpha,74);videos.alpha.__obedInstance='alpha-end'}
 videos.broken.drawSource=null;runChain(10,51,'3-canvas','alpha','alpha-hop');location.hash='#10';videos.alpha.__obedPosterHeld=true;videos.alpha.pause();videos.alpha.__obedPosterHeld=false;videos.alpha.play();runChain(11,61,'4-canvas','alpha-hop','alpha-final');runMidMoveStandDown();
 window.__obedMmFeedProbe.report();videos.alpha.__obedInstance='dalpha';videos.broken.__obedInstance='dbroken';tick();
 console.log(JSON.stringify(window.__obedMmFeedProbe.report()));

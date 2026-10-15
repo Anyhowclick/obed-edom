@@ -444,3 +444,16 @@ def test_feed_verdict_contract_checks_applicable_nested_producer_generation() ->
     record["feed"].pop("canvasLingerMs")
     problems = [problem.split(" at ")[0] for problem in contract.feed_verdict_record(record)]
     assert "feedVerdict.canvasLingerMs" in problems and "feedVerdict.feed.canvasLingerMs" in problems
+
+
+def test_feed_verdict_contract_requires_handback_duration_source() -> None:
+    record = _feed_verdict_record()
+    record.update(evidenceVersion=2, handback={
+        "complete": True, "timedOut": False, "frameMappingComplete": True,
+        "lastUpload": {}, "closed": {}, "presented": [], "sourceFrameDurationS": 1 / 30,
+        "adjacentFrames": True, "canvasLingerMs": 16.0,
+    })
+    problems = [problem.split(" at ")[0] for problem in contract.feed_verdict_record(record)]
+    assert "feedVerdict.handback.durationSource:missing" in problems
+    record["handback"]["durationSource"] = "rvfc"
+    assert list(contract.feed_verdict_record(record)) == []
