@@ -107,18 +107,87 @@ Five distinct movies (11 files, with copies). `qt-faststart` (Homebrew ffmpeg 9.
    - The ~170 ms saving comes from starting the media pipeline once per page. Any earlier movie load gives it.
    - A product version would be a one-shot warm-up at deck load: e.g. a hidden, muted, detached `<video>` on the
      first referenced movie with `preload=auto` (or `load()`), released after readyState ≥ 2.
-   - This is an owner call. It changes runtime behaviour, not bytes. It needs a managed-OBS (CEF) A/B before
-     adoption; this is headless-only evidence.
-   - It would also shrink, but not remove, the remaining 1–2-frame entry gap that F3's `entryColdStart` would report.
-   - Not measured:
-     - warm-up at deck load vs. at the previous scene (this run warmed on hash `#3`, ~3.4 s before the slide-4 mount);
-     - whether the warm-up survives a long idle gap;
-     - a feed-on run with the paint verdict;
-     - OBS.
+   - This is an owner call. It changes runtime behaviour, not bytes. The managed-OBS A/B and the idle-gap check are
+     now done; see "Open items" below. Both hold.
+   - It would also shrink, but not remove, the remaining 1–3-frame entry gap that F3's `entryColdStart` would report.
+   - Still not measured: a feed-on run with the paint verdict.
 3. **Note, unchanged:** `preview_movies._encode_argv` (H.264 re-encode for non-H.264 sources) omits
    `-movflags +faststart`. Every instrument movie generator sets it (`binary_counter_movie.py`, `dissolve_probe.py`,
    `generate_placement_probe.py`, `maps_movie.py`, `maps_reveal.py`, `html_alpha_probe.py`). For an encode (not a
    remux), adding it is harmless to timing. Given the result above, it has no measured benefit here.
+
+## Open items: load-time warm-up in managed OBS, and across an idle gap (owner go, 21:30–22:19)
+
+The warm-up now has the product shape (`warm-load/index.html`):
+- at page parse, a detached, muted `<video preload=auto>` loads the deck's first movie (Untitled);
+- on `loadeddata` it is released (`src` removed, `load()`).
+
+It no longer waits for slide 3.
+
+**Real player, headless probe.** Same setup as above, but the code is `ed8e24e2` (`claude/stage-b-arch`), because the
+`16f6c9fa` scratch checkout was cleaned up. 5× control vs 5× warm, interleaved (`coldstart-load.jsonl`):
+
+| mount | control ×5 | warm at load ×5 |
+|---|---|---|
+| **id1 Untitled, slide-4 entry** | **214 / 217 ms (13/13)** | **28 / 34 ms (2/2)** |
+| id1 mount → playing | 281 | 83 |
+| every later mount | 17–50 ms (1–3) | 17–50 ms (1–3) |
+
+- The gap from warm-up to the slide-4 mount is ~21 s.
+- Verdicts are identical in both arms (`compare-load.jsonl`).
+
+**Idle gap, headless harness** (`gap/`, Chrome 155.0.8059.79):
+- A standalone page served with Range support over the same Alpha copy, the probe's Chrome flags, a fresh profile
+  per run.
+- After gap G it mounts a visible `Untitled-H264` video. The gap counts from page load for the controls and from the
+  warm-up's release for the warm arms.
+- Arms rotated in order, 3 runs each, one Chrome at a time:
+
+| arm | cold ms (3 runs) | median | not-decoded frames |
+|---|---|---|---|
+| control, G = 20 s | 205, 218, 226 | 218 | 11–12 |
+| control, G = 180 s | 215, 211, 212 | 212 | 10–11 |
+| warm, G = 1 s | 58, 37, 50 | 50 | 4 |
+| warm, G = 20 s | 32, 25, 29 | 29 | 3 |
+| warm, G = 60 s | 38, 47, 32 | 38 | 3–4 |
+| warm, G = 180 s | 27, 33, 44 | 33 | 3–4 |
+
+- Both validity checks pass: the controls reproduce the probe's ~210 ms, and warm-up at 1 s reproduces the short entry.
+- The benefit does not decay over 3 minutes of idle after the warm element is released.
+- The warm load itself takes 203–289 ms after page load. That is the cold start moved off-screen.
+- Longer idles (a 20-minute pre-service hold) are not measured.
+
+**Managed OBS** (OBS 32.2.2, hidden launch, `managed_obs_qualify.py --arm feed`, unedited, at `ed8e24e2`):
+- The pre-move capture is off via the same import-time patch (`tools/run_obs_ab.py`).
+- Order: control first, then W W C C W W C. Each run is a fresh OBS with two sessions in one CEF: `feed` first, then
+  `feed-off` (`obs/coldstart-obs.jsonl`).
+
+| mount | control ×4, `feed` (1st session) | warm ×4, `feed` (1st session) | control ×4, `feed-off` (2nd) | warm ×4, `feed-off` (2nd) |
+|---|---|---|---|---|
+| **id1 Untitled, slide-4 entry** | **280 / 313 ms (14/16)** | **56 / 72 ms (3/4)** | 49 / 64 ms (1.5/2) | 48 / 66 ms (1.5/2) |
+| id1 mount → playing | 300 | 136 | 134 | 133 |
+| id2–id6 | 20–100 ms (1–3) | 20–100 ms (1–3) | same | same |
+
+- CEF is colder than headless (280 vs 214 ms).
+- The load-time warm-up brings the first session down to the level of an already-warm second session. That
+  confirms the attempt-3 "feed-off decoded in 33 ms" as an order effect.
+- Gate verdicts are unchanged by the warm-up: 16 failing checks per run, one run per arm with 17. These are the known
+  Alpha b5to6..b7to8 rider/artwork/hand-back fails (alpha-b6to8 session).
+- OBS quit after every run.
+
+**Updated recommendation:**
+- A one-shot warm-up at deck load is worth taking forward as a product change, subject to the owner's call. It cuts
+  the slide-4 poster flash from ~14 frames to ~3 in CEF.
+- Shape: a detached, muted video on one H.264 movie the deck references, released on `loadeddata`. Any movie works.
+  It runs once per page load.
+- Where it would live:
+  - the injected runtime (`live_runtime` / the host's program injection), not `main.js`;
+  - or as a step in the live host's load path.
+- It touches no export bytes and no plan pins.
+- Its cost is one short fetch and decode at load, ~250 ms off-screen.
+- Before adoption:
+  - a feed-on paint-verdict run (b3to4 `not-decoded` should drop from ~12 to ≤ 3);
+  - a decision on decks with no H.264 movie, or only VP9: does a WebM warm-up also warm the pipeline? Not measured.
 
 ## Repro
 
@@ -127,4 +196,9 @@ Five distinct movies (11 files, with copies). `qt-faststart` (Homebrew ffmpeg 9.
   scratchpad and must be adapted.
 - `coldstart.py *.json` prints the per-mount table input.
 - The warm patches are `warm-index/index.html` and `warm-other/index.html`. Each is the unmodified index plus one
-  inline script that starts a detached video load on the first `#3` hash.
+  inline script that starts a detached video load on the first `#3` hash. `warm-load/index.html` is the load-time
+  version.
+- Idle gap: `gap/run_gap.py <export> gap/harness.html <out.jsonl> '<json plan>'`.
+- OBS: `obs_ab.sh NAME ctl|warm` (fixture folders: `html-player` plus an `html-unmodified` holding the control or
+  warm-load index), then `obs_coldstart.py <out dirs>`. Raw OBS run JSONs were not kept; per-run summaries are in
+  `obs/`.
