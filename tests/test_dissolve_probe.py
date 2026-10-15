@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import math
 import sys
+import time
+import types
+from itertools import cycle
 from pathlib import Path
 from typing import Any
 
@@ -1479,6 +1482,48 @@ def raw_navigate(ack: bool) -> tuple[str, int]:
         probe.ADVANCE_ACK_S = wait
 
 
+def preparation_cache_corruption(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, ...]:
+    calls = []
+
+    def encode(dest: Path, _frames: Any, *, encoding: str, size: tuple[int, int] = (binary.WIDTH, binary.HEIGHT),
+               fps: int = probe.FPS) -> dict[str, Any]:
+        calls.append((encoding, size, fps))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f"movie-{len(calls)}".encode())
+        return {"path": str(dest), "sha256": probe.sha256_file(dest), "encoding": encoding, "frames": 1, "fps": fps}
+
+    monkeypatch.setattr(probe, "encode_movie", encode)
+    cache = tmp_path / "prep-cache"
+    probe.set_preparation_cache(cache)
+    try:
+        first = probe.scratch_movie(tmp_path / "one", "counter", probe.DEFAULT_ENCODING, 1.0)
+        second = probe.scratch_movie(tmp_path / "two", "counter", probe.DEFAULT_ENCODING, 1.0)
+        cached = next(cache.rglob("asset"))
+        cached.chmod(0o644)
+        cached.write_bytes(b"corrupt")
+        third = probe.scratch_movie(tmp_path / "three", "counter", probe.DEFAULT_ENCODING, 1.0)
+        fourth = probe.scratch_movie(tmp_path / "four", "counter", probe.DEFAULT_ENCODING, 2.0)
+        return (len(calls), Path(first["path"]).read_bytes(), Path(second["path"]).read_bytes(),
+                Path(third["path"]).read_bytes(), Path(fourth["path"]).read_bytes(),
+                all(path.stat().st_mode & 0o222 == 0 for path in (Path(first["path"]), Path(second["path"]),
+                                                                  Path(third["path"]), Path(fourth["path"]))))
+    finally:
+        probe.set_preparation_cache(None)
+
+
+def run_image_cache(tmp_path: Path) -> tuple[Any, ...]:
+    for index in range(13):
+        Image.fromarray(np.full((2, 2, 4), index, np.uint8)).save(tmp_path / f"image-{index}.png")
+    images = probe.RunImages(tmp_path)
+    first = images["image-0"]
+    same = images["image-0"]
+    immutable = not first.flags.writeable
+    for index in range(1, 13):
+        images[f"image-{index}"]
+    images["image-0"]
+    return first is same, immutable, images.decode_count, len(images._cache)
+
+
 def pre_start_gap(kind: str) -> list[str]:
     """`raf_problems` on a dissolve whose first transition frame lands 70 ms after insertion (CEF), animations pending
     (no start, ct 0) until t 70: allowed only when the record ending the gap holds the declared initial values (incoming
@@ -1847,6 +1892,25 @@ CASES = [
               probe.ARMS["m-fg-cef"].expect.get("frozen_region"),
               probe.CEF_PLACEMENT.controls()["frozen_region"]),
      (True, True, "PASS", (("m-fg-cef",), ("m-hold-cef",)))),
+    ("placement DEV profiles are exact, non-vacuous and declare renderer omissions",
+     lambda: ({name: (len(profile.arms), profile.not_run, probe.profile_coverage_problems(profile),
+                      round_gate(None, "overall", profile=profile),
+                      round_gate(None, "cost", profile=profile))
+              for name, profile in probe.CEF_PLACEMENT_DEV_PROFILES.items()},
+              probe.profile_coverage_problems(probe.CEF_PLACEMENT),
+              probe.profile_coverage_problems(probe.replace(probe.CEF_PLACEMENT_DEV_HARNESS, not_run=("geometry",))),
+              probe.CEF_PLACEMENT_DEV_RENDERER.arms,
+              probe.CEF_PLACEMENT_DEV_HARNESS.arms[-6:]),
+     ({"renderer": (20, ("cost",), [], "PASS", "NOT RUN"),
+       "harness": (26, (), [], "PASS", "PASS")},
+      [],
+      ["not_run outside reported: ['geometry']"],
+      ("opaque-off", "off", "noblend", "on2", "on", "m-snap-cef", "m-snap-cef-twin",
+       "wrongrule-cef", "wrongrule-cef-twin", "perfect-shift", "m-tone-cef", "m-tone-cef-twin",
+       "m-geo-scale", "m-paused-cef", "m-off-cef", "m-fg-cef", "m-hold-cef", "m-fg-omit-cef",
+       "m-fg-swap-cef", "m-snap-cef-underlay-omit"),
+      ("m-snap-cef-nooffset-x", "m-snap-cef-nooffset-x-twin", "m-snap-cef-nooffset-y",
+       "m-snap-cef-nooffset-y-twin", "m-geo-base", "m-snap-cef-dsk"))),
     ("DX-1 m-raw-prod: the destination's movies after the hand-off do not empty the in-only class",
      lambda: arm_outcome("m-raw-prod", holder=False, mutate="dest-video"), "MATCH"),
     ("r17 m-raw-prod binding a holder", lambda: arm_check("m-raw-prod", "scope"), "PASS"),
@@ -1860,6 +1924,10 @@ CASES = [
       5, 6, 1000, 2000)),
     ("DX-1 raw page: one press, then wait for the hash to move", lambda: raw_navigate(True), ("reached", 1)),
     ("DX-1 raw page: a press the player never takes is refused, not re-pressed", lambda: raw_navigate(False), ("refused", 1)),
+    ("placement preparation cache keys inputs and regenerates a corrupted output", "preparation-cache",
+     (3, b"movie-1", b"movie-1", b"movie-2", b"movie-3", True)),
+    ("decoded run images are immutable and reused within an arm", "run-image-cache",
+     (True, True, 13, 13)),
     ("DX-1 raw page: the target lists the automatic scenes the readiness waits through",
      lambda: probe.find_target({"assets/header.json": {"slideList": ["a"], "loopSlideshow": 0}, "assets/a/a.json": {"events": [
          {"automaticPlay": True, "effects": []},
@@ -1885,6 +1953,145 @@ def test_dissolve_scorer(build, expected, monkeypatch, tmp_path):
         actual = dsk_counter_resolver(tmp_path, monkeypatch)
     elif build == "dsk-identity":
         actual = dsk_holder_identity(tmp_path, monkeypatch)
+    elif build == "preparation-cache":
+        actual = preparation_cache_corruption(tmp_path, monkeypatch)
+    elif build == "run-image-cache":
+        actual = run_image_cache(tmp_path)
     else:
         actual = build()
     assert actual == expected
+
+
+def test_drive_placement_is_opt_in_and_records_predicates(monkeypatch):
+    legacy = ({"legacy": True}, {"legacy": np.ones((1, 1, 4), np.uint8)})
+    monkeypatch.setattr(probe, "_drive_legacy", lambda *args, **kwargs: legacy)
+    assert probe.drive(object(), probe.ARMS["on"], {}, lambda: np.empty((0, 0, 4), np.uint8)) is legacy
+
+    readiness_arm = probe.Arm("fake", 1, strip=False, viewport=(2, 2), movies="counter")
+    readiness_target = {"scene": 1, "event": 0, "automatic": False, "sceneCount": 2,
+                        "hashBefore": "#1", "hashAfter": "#2"}
+
+    class Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    clock = Clock()
+    monkeypatch.setattr(probe, "time",
+                        types.SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep, time=time.time))
+
+    class ReadinessTransport:
+        def __init__(self, advancing: bool) -> None:
+            self.advancing = advancing
+            self.calls = 0
+
+        def evaluate(self, expression: str, **_kwargs: Any) -> Any:
+            assert expression == probe.POSITIONING_JS
+            self.calls += 1
+            frame = 10 + self.calls if self.advancing else 10
+            return {"runtime": {"sceneId": 1, "nextSceneId": 2, "playerState": "IdleAtInitialState",
+                                "ready": True, "slideNumberShowing": False},
+                    "hash": "#1", "videos": [{"hookId": 1, "elementId": "movie-video", "src": "movie.mov",
+                                                "currentSrc": "movie.mov", "currentTime": self.calls / 10,
+                                                "readyState": 4, "videoWidth": 2, "videoHeight": 2,
+                                                "totalFrames": frame, "presentedFrames": frame}],
+                    "continuity": None, "preservedStage": 0, "canvases": ["movie"], "holders": 0,
+                    "foreground": {}, "stage": True}
+
+    class ReadinessHost:
+        def __init__(self, advancing: bool) -> None:
+            self.transport = ReadinessTransport(advancing)
+
+        def _require_transport(self) -> ReadinessTransport:
+            return self.transport
+
+    frozen_captures = cycle((np.ones((2, 2, 4), np.uint8), np.full((2, 2, 4), 2, np.uint8)))
+    with pytest.raises(probe.ReadinessTimeout, match=r"\['advancingPresentation'\]"):
+        probe._capture_readiness(ReadinessHost(False), readiness_arm, readiness_target,
+                                 lambda: next(frozen_captures), paused=False, timeout_s=0.6)
+    clock.now = 0.0
+    captures = iter((np.ones((2, 2, 4), np.uint8), np.full((2, 2, 4), 2, np.uint8)))
+    ready, _, _ = probe._capture_readiness(ReadinessHost(True), readiness_arm, readiness_target,
+                                            lambda: next(captures), paused=False, timeout_s=1.0)
+    assert ready["predicates"]["advancingPresentation"]["passed"] is True
+    assert ready["predicates"]["advancingObs"]["passed"] is True
+
+    class PositionTransport:
+        def evaluate(self, expression: str, **_kwargs: Any) -> Any:
+            assert expression == probe.POSITIONING_JS
+            return {}
+
+    class PositionHost:
+        _last_goto_autoplay = None
+
+        def __init__(self) -> None:
+            self.transport = PositionTransport()
+
+        def _require_transport(self) -> PositionTransport:
+            return self.transport
+
+        def execute(self, *_args: Any) -> None:
+            return None
+
+    clock.now = 0.0
+    monkeypatch.setattr(probe, "navigate", lambda *_args, **_kwargs: 0)
+    with pytest.raises(probe.ReadinessTimeout):
+        probe._position(PositionHost(), readiness_arm, readiness_target)
+
+    image = np.ones((2, 2, 4), np.uint8)
+    arm = probe.Arm("fake", 1, strip=False, viewport=(2, 2))
+    target = {"scene": 1, "automatic": False, "sceneCount": 2, "previousS": 0.0, "beginS": 0.0,
+              "durationS": 0.1, "textures": ["in", "out"], "hashBefore": "#1", "hashAfter": "#2"}
+
+    class Transport:
+        def evaluate(self, expression: str, **_kwargs: Any) -> Any:
+            if expression == probe.STAGE_JS:
+                return {"stage": True}
+            if expression == probe.PLACEMENT_JS:
+                return "frac"
+            if expression == "devicePixelRatio":
+                return 1
+            if expression == "[innerWidth, innerHeight]":
+                return [2, 2]
+            if expression == "window.__obedDx.foreground()":
+                return {}
+            if expression == "String(location.hash||'')":
+                return "#2"
+            if expression.startswith("window.__obedDx.residue"):
+                return {"layers": 0, "rules": 0, "holders": 0}
+            raise AssertionError(expression)
+
+    class Host:
+        def __init__(self) -> None:
+            self.transport = Transport()
+
+        def _require_transport(self) -> Transport:
+            return self.transport
+
+        def execute(self, *_args: Any) -> None:
+            return None
+
+    predicates = {"correctScene": {"passed": True, "observed": "#1"}}
+    positioning = {"path": "goTo-slide+ordinary-builds", "fromSlide": 1, "ordinaryAdvances": 0,
+                   "durationMs": 1.0, "fallbackReasons": [], "predicates": predicates}
+    monkeypatch.setattr(probe, "_position", lambda *_args: positioning)
+    monkeypatch.setattr(probe, "_capture_readiness", lambda *_args, **_kwargs:
+                        ({"durationMs": 2.0, "predicates": predicates}, image, image))
+    monkeypatch.setattr(probe, "burst", lambda *_args, **_kwargs:
+                        ({"dump": {"first": {"layerIds": []}}, "shots": [], "actions": [], "cast": []}, {}))
+    monkeypatch.setattr(probe, "record_dsk_counter_timing", lambda *_args: None)
+    monkeypatch.setattr(probe, "_final_readiness", lambda *_args, **_kwargs:
+                        ({"durationMs": 3.0, "predicates": predicates}, image))
+    placement_reads = []
+    record, images = probe.drive(
+        Host(), arm, target, lambda: image, placement=True, placement_read=placement_reads.append)
+    assert placement_reads == ["frac"]
+    assert record["positioning"] == positioning
+    assert record["readiness"] == {"durationMs": 5.0,
+                                    "beforeCapture": {"durationMs": 2.0, "predicates": predicates},
+                                    "afterTransition": {"durationMs": 3.0, "predicates": predicates}}
+    assert set(images) == {"live-0", "live-1", "settled"}

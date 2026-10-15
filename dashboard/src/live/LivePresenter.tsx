@@ -70,7 +70,7 @@ function DeckReady({ qualification, onPrepareAgain, prepareDisabled }: {
       ? `Movie continuity on${count ? ` · ${count} move${count === 1 ? "" : "s"} not carried` : "."}`
       : `Movie continuity off for this deck${continuity.reason ? `: ${continuity.reason}` : "."}`}</p>
     <NotCarried entries={continuity.notCarried} />
-    {convertedMovies.length > 0 && <p className="note">Converted {convertedMovies.length} movie{convertedMovies.length === 1 ? "" : "s"} to H.264 for playback: {convertedMovies.map((movie) => `${movie.asset} (${movie.sourceCodec})`).join(", ")}.</p>}
+    {convertedMovies.length > 0 && <p className="note">Converted {convertedMovies.length} movie{convertedMovies.length === 1 ? "" : "s"} for playback: {convertedMovies.map((movie) => `${movie.asset} (${movie.sourceCodec} → ${movie.targetCodec})`).join(", ")}.</p>}
   </>;
 }
 

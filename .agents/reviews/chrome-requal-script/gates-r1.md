@@ -1,9 +1,9 @@
 # Gate record r1: one-command Chrome-major re-qualification (`scripts/chrome_requal.py`)
 
-**Date:** 2026-10-15. **Branch:** `claude/exciting-vaughan-75bbe4` (after #284; main merged in after #285).
+**Date:** 2026-10-15. **Landed:** PR #287 (`d8e8b066`).
 
 **Roles:**
-- Plan: Codex GPT-6 Astra high. Critique: Opus 5.5 high, 2 rounds (r1: 13 findings folded; r2: no blocker/major, 3 folded). Plan `.agents/plans/chrome_requal.plan.md` rev 2.
+- Plan: Codex GPT-6 Astra high. Critique: Opus 5.5 high, 2 rounds (r1: 13 findings folded; r2: no blocker/major, 3 folded). Plan rev 2, retired after merge; the design lives in the script, dissolve plan §13 and SKILL. Resolved in critique: no env var (a scoped `mock.patch.object` instead), 28 arms not 62, fixtures from `main_checkout()`, no identity launch (plist version before and after plus each arm's recorded product; `m-raw` records none and is excluded), resume on `record.json`, the bar as script constants.
 - Owner: approved rev 2 with the 28-arm default (DPR 1.5/2 and raw/preview-prod stay in full DX-1).
 - Implementation: Codex GPT-5.6 Sol high. Review: Opus 5.5 high. r1 asked for changes (2 medium, 4 low), all folded. r2 approved, and its 2 lows were folded by the coordinator.
 
@@ -28,7 +28,7 @@ QUALIFIED_SNAP_MAJORS = (154, 155)
 Chrome 155 is already qualified
 ```
 
-**Readings** (`verdict.json` sha256 `c1b6a697…316dd3`, committed as the test fixture above; the 240 MB of runs stay in the out dir):
+**Readings** (`verdict.json` sha256 `c1b6a697…316dd3`, committed as the test fixture above; the 240 MB of runs were trashed after merge):
 - **Gates:** handoff, frozen_frame, frozen_region, cost, grant and cvc PASS. Model, complement, no_dip, curve and monotone are also PASS.
 - **Core arms:** all 14 MATCH (grant-chrome, grant-attach, channel-predefined, life-grant-reload, opaque-off, off, noblend, on, on2, m-paused, m-off, m-on, m-hold, m-raw).
 - **DPR-1 cells:**

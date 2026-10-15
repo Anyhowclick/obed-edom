@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 import pytest
 
 from obed_edom.fixture_paths import fixture
-from obed_edom.live_codec import codec_family, movie_codec, movie_fps
+from obed_edom.live_codec import codec_family, movie_codec, movie_fps, webm_info
 
 # --- synthetic ISO-BMFF/QuickTime box builders --------------------------------------------
 
@@ -83,6 +84,37 @@ def movie_with_stsd_payload(payload: bytes) -> bytes:
     return ftyp() + box(b"moov", box(b"trak", box(b"mdia", mdia_body)))
 
 
+def ebml_size(value: int) -> bytes:
+    for length in range(1, 9):
+        if value < (1 << (7 * length)) - 1:
+            return ((1 << (7 * length)) | value).to_bytes(length, "big")
+    raise ValueError(value)
+
+
+def ebml(element_id: bytes, payload: bytes) -> bytes:
+    return element_id + ebml_size(len(payload)) + payload
+
+
+def webm_bytes(*, alpha: bool) -> bytes:
+    header = ebml(b"\x1a\x45\xdf\xa3", ebml(b"\x42\x82", b"webm"))
+    info = ebml(
+        b"\x15\x49\xa9\x66",
+        ebml(b"\x2a\xd7\xb1", (1_000_000).to_bytes(3, "big"))
+        + ebml(b"\x44\x89", struct.pack(">d", 2_640.0)),
+    )
+    video = ebml(b"\xe0", ebml(b"\xb0", (500).to_bytes(2, "big"))
+                 + ebml(b"\xba", (500).to_bytes(2, "big"))
+                 + (ebml(b"\x53\xc0", b"\x01") if alpha else b""))
+    entry = ebml(
+        b"\xae",
+        ebml(b"\x83", b"\x01") + ebml(b"\x86", b"V_VP9")
+        + ebml(b"\x23\xe3\x83", (40_000_000).to_bytes(4, "big")) + video,
+    )
+    tracks = ebml(b"\x16\x54\xae\x6b", entry)
+    cluster = ebml(b"\x1f\x43\xb6\x75", b"media bytes are not parsed")
+    return header + ebml(b"\x18\x53\x80\x67", info + tracks + cluster)
+
+
 # --- movie_codec ----------------------------------------------------------------------------
 
 
@@ -132,6 +164,32 @@ def test_unreadable_movie_has_no_codec(tmp_path, data):
 def test_missing_file_has_no_codec_or_fps(tmp_path):
     assert movie_codec(tmp_path / "does-not-exist.mov") is None
     assert movie_fps(tmp_path / "does-not-exist.mov") is None
+
+
+@pytest.mark.parametrize(
+    ("data", "expected_alpha", "expected_codec"),
+    [
+        (webm_bytes(alpha=True), True, "V_VP9"),
+        (webm_bytes(alpha=False), False, "V_VP9"),
+        (webm_bytes(alpha=True)[:70], None, None),
+    ],
+    ids=["vp9-alpha-under-mov-name", "opaque-vp9", "truncated-webm"],
+)
+def test_webm_metadata_under_a_mov_name(tmp_path, data, expected_alpha, expected_codec):
+    path = tmp_path / "movie.mov"
+    path.write_bytes(data)
+    info = webm_info(path)
+    assert movie_codec(path) == expected_codec
+    if expected_codec is None:
+        assert info is None
+        assert movie_fps(path) is None
+        return
+    assert info is not None
+    assert (info.width, info.height, info.duration_s, info.fps, info.alpha) == (
+        500, 500, pytest.approx(2.64), 25.0, expected_alpha,
+    )
+    assert codec_family(movie_codec(path)) == "vp9"
+    assert movie_fps(path) == 25.0
 
 
 @pytest.mark.parametrize(
@@ -353,6 +411,7 @@ def test_real_p2_fixture_movie_is_30_fps():
         ("ap4x", "prores"),
         ("av01", "av1"),
         ("vp09", "vp9"),
+        ("V_VP9", "vp9"),
         # vp08 is VP8, not VP9: it is unsupported either way, but must not be mislabelled.
         ("vp08", "other"),
         ("mp4v", "other"),

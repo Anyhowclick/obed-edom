@@ -223,16 +223,16 @@ def _mm_feed_renderer(version: Any) -> str | None:
     return None
 
 
-def _codec_supported(family: str, *, attach: bool, headless: bool) -> bool:
-    """h264 decodes everywhere. HEVC is attempted only in headful launch mode: OBS's
-    CEF (attach) and headless Chrome are not assumed to decode HEVC (untested either
-    way on the owner's Mac, so both fail closed rather than guessing). ProRes never
-    plays in Chrome; av1/vp9 decode support here is unverified, so they are kept
-    conservative and fail closed like any other unproven codec."""
+def _codec_supported(family: str, *, attach: bool, headless: bool, managed: bool = False) -> bool:
+    """h264 plays everywhere. HEVC plays only in headful launch; VP9 also in managed OBS
+    (CEF alpha probe 2026-10-15). Headless Chrome and external attach are unqualified, so they
+    warn. Everything else, including ProRes, is unsupported."""
     if family == "h264":
         return True
     if family == "hevc":
         return not attach and not headless
+    if family == "vp9":
+        return managed or (not attach and not headless)
     return False
 
 
@@ -1325,7 +1325,9 @@ class LiveOutputHost:
         warnings = [
             f"{entry['asset']} ({_codec_display(entry)}) may not play in this output"
             for entry in report
-            if not _codec_supported(entry["family"], attach=attach, headless=self.headless)
+            if not _codec_supported(
+                entry["family"], attach=attach, headless=self.headless, managed=self._managed_obs
+            )
         ]
         return report, warnings
 
@@ -1352,11 +1354,18 @@ class LiveOutputHost:
             asset = movie["assetKeys"][0]
             entry = codec_by_asset.get(asset)
             family = entry["family"] if entry is not None else "other"
-            if not _codec_supported(family, attach=attach, headless=self.headless):
+            if family == "vp9" or not _codec_supported(
+                family, attach=attach, headless=self.headless, managed=self._managed_obs
+            ):
                 display = _codec_display(entry)
                 if self._gl_replay_mode == "injected":
                     self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""
-                return "unsupported", f"movie codec is not playable in this output: {asset} ({display})", None
+                reason = (
+                    f"movie continuity does not support VP9 movies: {asset} ({display})"
+                    if family == "vp9"
+                    else f"movie codec is not playable in this output: {asset} ({display})"
+                )
+                return "unsupported", reason, None
         self._continuity_not_carried = not_carried(plan, self.slides)
         self._continuity_plan_sha256 = plan_signature(runtime)
         if self._attach_endpoint:

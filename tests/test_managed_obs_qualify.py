@@ -86,6 +86,75 @@ def test_main_refuses_while_the_mm_opacity_env_is_set(monkeypatch, tmp_path, cap
     assert "OBED_LIVE_MM_OPACITY is set" in capsys.readouterr().err
 
 
+def test_placement_cli_defaults_tiers_and_dev_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.delenv(q.GL_REPLAY_ENV, raising=False)
+    monkeypatch.delenv(q.MM_OPACITY_ENV, raising=False)
+    monkeypatch.setattr(q, "obs_running", lambda: False)
+    monkeypatch.setattr(q.binary_counter_movie, "verify_fixture", lambda _path: {})
+    preflights = []
+    monkeypatch.setattr(q, "placement_disk_preflight", lambda *args, **kwargs: preflights.append((args, kwargs)) or {})
+    preparation_caches = []
+    trash_calls = []
+
+    def set_preparation_cache(path: Path | None) -> None:
+        preparation_caches.append(path)
+        if path is not None:
+            path.mkdir(parents=True, exist_ok=True)
+
+    def trash(args: list[str], **kwargs: Any) -> types.SimpleNamespace:
+        assert args[0] == "/usr/bin/trash"
+        assert kwargs in ({"check": True}, {"capture_output": True, "text": True})
+        trash_calls.append(Path(args[1]))
+        if Path(args[1]) == tmp_path / "full" / "prep-cache" and "check" not in kwargs:
+            return types.SimpleNamespace(returncode=7, stderr="trash unavailable")
+        shutil.rmtree(args[1])
+        return types.SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(q.dissolve_probe, "set_preparation_cache", set_preparation_cache)
+    monkeypatch.setattr(q.subprocess, "run", trash)
+
+    class Awake:
+        def terminate(self) -> None: pass
+
+    monkeypatch.setattr(q.subprocess, "Popen", lambda *_args, **_kwargs: Awake())
+    calls = []
+
+    def run_take(arm, rate, take, _home, _out, args, _armed):
+        calls.append((arm, rate, take, args.tier, args.dev_profile))
+        return {"arm": arm, "rate": rate, "take": take, "ts": f"{rate}-{take}", "valid": True, "invalid": [],
+                "passed": args.tier == "full", **({"devPassed": True} if args.tier == "dev" else {}),
+                "gates": {}, "timingS": {}, "sessions": [], **q.placement_scope(args.tier, args.dev_profile)}
+
+    monkeypatch.setattr(q, "run_take", run_take)
+    monkeypatch.setattr(q, "placement_launch_record", lambda run: run)
+    monkeypatch.setattr(q, "placement_launch_set_check", lambda launches: {
+        "tier": launches[0]["tier"], "checks": [], "qualified": launches[0]["tier"] == "full",
+        "devPassed": launches[0]["tier"] == "dev"})
+    (tmp_path / "full" / "prep-cache").mkdir(parents=True)
+    assert q.main(["--arm", "placement", "--out", str(tmp_path / "full")]) == 0
+    assert calls == [("placement", 25, 1, "full", None), ("placement", 30, 1, "full", None)]
+    assert preparation_caches == [tmp_path / "full" / "prep-cache", None]
+    assert preflights[-1][1]["rates"] == q.MMO_RATES and preflights[-1][0][2] == 1
+    full_summary = json.loads(next((tmp_path / "full" / "runs").glob("summary-*.json")).read_text())
+    assert full_summary["prepCacheCleanup"] == {"returncode": 7, "stderr": "trash unavailable"}
+    calls.clear()
+    preparation_caches.clear()
+    (tmp_path / "dev" / "prep-cache").mkdir(parents=True)
+    assert q.main(["--arm", "placement", "--tier", "dev", "--out", str(tmp_path / "dev")]) == 10
+    assert calls == [("placement", 25, 1, "dev", "renderer")]
+    assert preparation_caches == [tmp_path / "dev" / "prep-cache", None]
+    assert trash_calls == [tmp_path / "full" / "prep-cache", tmp_path / "full" / "prep-cache",
+                           tmp_path / "dev" / "prep-cache", tmp_path / "dev" / "prep-cache"]
+    assert "DEV — NOT A QUALIFICATION PASS" in capsys.readouterr().out
+    q.print_run({"arm": "placement", "rate": 25, "take": 1, "valid": True, "invalid": [], "passed": False,
+                 "devPassed": True, "launch": "hidden", "kb": None, "sessions": [], "checks": [], "gates": {}},
+                tmp_path / "dev-run.json")
+    assert "DEV — NOT A QUALIFICATION PASS" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        q.main(["--arm", "placement", "--rate", "25", "--out", str(tmp_path / "bad")])
+    assert exc.value.code == 2
+
+
 @pytest.mark.parametrize("n, want", [
     (0.0, (4.0, 2.0, 252.0)),
     (1.3, (4.0, 4.0, 250.0)),
@@ -188,6 +257,11 @@ def test_placement_capture_retries_only_for_sole_coverage_shortage_and_scores_ev
     )
     assert scored["verdict"] == "INCONCLUSIVE"
     assert [row["outcome"] for row in scored["detail"]["attempts"]] == ["MATCH", "INCONCLUSIVE"]
+    monkeypatch.setattr(q.dissolve_probe, "score_arm", lambda *_args, **_kwargs: {
+        "outcome": "MISMATCH", "problems": [], "mismatch": ["cost"]})
+    assert q.score_placement_capture_attempts(
+        run_dir, q.dissolve_probe.ARMS["m-snap-cef-dsk"], q.dissolve_probe.Calibration(), None
+    )["verdict"] == "FAIL"
 
     problem_rows = iter((
         {"midFrames": threshold - 1, "fitted": [],
@@ -212,6 +286,66 @@ def test_placement_capture_retries_only_for_sole_coverage_shortage_and_scores_ev
                         lambda *_args: pytest.fail("single-attempt arms do not need coverage scoring"))
     single = q.placement_session("m-snap-cef", {"shots": tmp_path}, None)
     assert single["runDir"] == str(tmp_path / "runs" / "m-snap-cef")
+
+    def readiness_timeout(*_args: Any, **kwargs: Any) -> Any:
+        raise q.dissolve_probe.ReadinessTimeout(f"busy timeout placement={kwargs.get('placement')}")
+
+    with monkeypatch.context() as readiness_patch:
+        readiness_patch.setattr(q.dissolve_probe, "drive", readiness_timeout)
+        driven, images, failure = q._drive_placement(object(), q.dissolve_probe.ARMS["m-snap-cef"], {}, lambda: None)
+    assert driven == {} and images == {}
+    assert failure == {"verdict": "INCONCLUSIVE", "kind": "readiness",
+                       "message": "busy timeout placement=True"}
+
+
+@pytest.mark.parametrize(("mode", "error"), [
+    pytest.param("success", None, id="success"),
+    pytest.param("stall", "did not retain", id="duration-stall-still-stops"),
+    pytest.param("active", "remained active", id="still-active-after-stop"),
+    pytest.param("unreadable", "not readable", id="unreadable-output"),
+])
+def test_stop_record_verifies_tail_stop_and_output(
+        monkeypatch: pytest.MonkeyPatch, mode: str, error: str | None) -> None:
+    clock = [0.0]
+    calls = []
+
+    class FakeObsWebsocket:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            self.stopped = False
+            self.status_calls = 0
+
+        def __enter__(self) -> "FakeObsWebsocket":
+            return self
+
+        def __exit__(self, *_args: Any) -> bool:
+            return False
+
+        def request(self, name: str, _data: Any = None) -> dict[str, Any]:
+            calls.append(name)
+            if name == "StopRecord":
+                self.stopped = mode != "active"
+                return {"outputPath": "/tmp/program.mkv"}
+            self.status_calls += 1
+            duration = 100.0 if mode == "stall" or self.status_calls == 1 else 1000.0
+            return {"outputActive": not self.stopped, "outputDuration": duration}
+
+    monkeypatch.setattr(q, "ObsWebsocket", FakeObsWebsocket)
+    monkeypatch.setattr(q.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(q.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(q, "_recording_is_readable", lambda *_args: mode != "unreadable")
+    if error is None:
+        output, detail = q.stop_record(4455, "secret", fps=25.0, timeout_s=0.2)
+        assert output == "/tmp/program.mkv"
+        assert detail["postRestorationFramesComplete"] is True
+        assert detail["inactive"] is True and detail["readable"] is True
+        assert detail["durationS"] >= q.RECORD_TAIL_FRAMES / 25.0
+    else:
+        with pytest.raises(RuntimeError, match=error) as exc:
+            q.stop_record(4455, "secret", fps=25.0, timeout_s=0.2)
+        assert exc.value.detail["postRestorationFramesComplete"] is (mode != "stall")
+        assert exc.value.detail["inactive"] is (mode == "unreadable")
+        assert exc.value.detail["readable"] is False
+    assert "StopRecord" in calls
 
 
 @pytest.mark.parametrize("g2_mode, g2, missing", [("off", None, False), ("off", "IDLE", True), ("injected", "IDLE", False),
@@ -1313,8 +1447,8 @@ def test_run_session_passes_mm_opacity_explicitly_and_the_logger_transport(monke
     monkeypatch.setattr(q, "make_export", lambda tag, fixture: (tmp_path / "x" / "html", []))
     monkeypatch.setattr(q, "start_log", lambda host: None)
     monkeypatch.setattr(q.mm_opacity_probe, "square_player", lambda active: squares.append(active) or __import__("contextlib").nullcontext())
-    ctx = {"fixture": q.FIXTURE, "tag": "t", "endpoint": "http://127.0.0.1:9", "target": "x", "rate": 25, "creds": (1, "p"),
-           "shots": tmp_path, "engineState": lambda: {}}
+    ctx = {"fixture": q.FIXTURE, "tag": "t", "endpoint": "http://127.0.0.1:9", "target": "x", "rate": 25,
+           "canvasFps": 25.0, "creds": (1, "p"), "shots": tmp_path, "engineState": lambda: {}}
     out = q.run_session("s", lambda s: None, ctx, **kwargs)
     made = FakeHost.made[0]
     assert {k: made[k] for k in want} == want
@@ -1340,7 +1474,8 @@ def test_run_session_installs_feed_instrument_before_managed_host_start(monkeypa
     monkeypatch.setattr(q.mm_opacity_probe, "square_player",
                         lambda active: __import__("contextlib").nullcontext())
     ctx = {"fixture": q.FIXTURE, "tag": "t", "endpoint": "http://127.0.0.1:9", "target": "x", "rate": 25,
-           "creds": (1, "p"), "shots": tmp_path, "engineState": lambda: {}, "feedFacts": {"verdicts": []}}
+           "creds": (1, "p"), "shots": tmp_path, "engineState": lambda: {}, "canvasFps": 25.0,
+           "feedFacts": {"verdicts": []}}
     q.run_session("feed", lambda session: None, ctx)
     assert FakeHost.made[0]["pre_navigation_scripts"] == ("instrument",)
     assert events[:2] == ["build", "start"]
@@ -1352,8 +1487,8 @@ def test_run_session_enters_the_alpha_squared_splice_for_sq(monkeypatch, tmp_pat
     monkeypatch.setattr(q, "make_export", lambda tag, fixture: (tmp_path / "x" / "html", []))
     monkeypatch.setattr(q, "start_log", lambda host: None)
     monkeypatch.setattr(q.mm_opacity_probe, "square_player", lambda active: squares.append(active) or __import__("contextlib").nullcontext())
-    ctx = {"fixture": q.FIXTURE, "tag": "t", "endpoint": "e", "target": "x", "rate": 25, "creds": (1, "p"), "shots": tmp_path,
-           "engineState": lambda: {}}
+    ctx = {"fixture": q.FIXTURE, "tag": "t", "endpoint": "e", "target": "x", "rate": 25, "canvasFps": 25.0,
+           "creds": (1, "p"), "shots": tmp_path, "engineState": lambda: {}}
     out = q.run_session("s", lambda s: None, ctx, square=True)
     assert squares == [True] and out["square"] is True
 
@@ -1685,12 +1820,18 @@ class TestPrecheckA:
 class TestTiming:
     def test_timing_summary_keys(self) -> None:
         run = {"arm": "soak", "take": 1, "timingS": {"launch": 4.2, "quit": 3.1, "total": 400.0},
-               "sessions": [{"session": "soak", "timingS": {"script": 330.5, "decode": 20.25}},
-                            {"session": "soak-off", "timingS": {"script": 20.0, "decode": 0.0}}]}
+               "sessions": [{"session": "soak", "timingS": {"script": 330.5, "decode": 20.25, "preparation": 2.5}},
+                            {"session": "soak-off", "timingS": {"attempts": [
+                                {"script": 12.0, "recordingAnalysis": 1.25},
+                                {"script": 8.0, "recordingAnalysis": 0.75}], "decode": 0.0}}]}
         summary = q.timing_summary(run)
-        assert summary == {"arm": "soak", "take": 1, "launch": 4.2, "script": 350.5, "quit": 3.1, "decode": 20.25,
-                           "total": 400.0, "sessions": {"soak": {"script": 330.5, "decode": 20.25},
-                                                        "soak-off": {"script": 20.0, "decode": 0.0}}}
+        assert {key: summary[key] for key in ("arm", "take", "launch", "script", "quit", "obsRelease", "decode",
+                                               "preparation", "preparationNested", "recordingAnalysis", "total",
+                                               "exclusiveUnattributed")} == {
+            "arm": "soak", "take": 1, "launch": 4.2, "script": 350.5, "quit": 3.1, "obsRelease": 3.1,
+            "decode": 20.25, "preparation": None, "preparationNested": 2.5, "recordingAnalysis": 2.0,
+            "total": 400.0, "exclusiveUnattributed": 392.7}
+        assert summary["sessions"]["soak-off"]["attempts"][1]["script"] == 8.0
 
     def test_timing_summary_of_a_run_that_never_launched(self) -> None:
         summary = q.timing_summary({"arm": "g2", "take": 1, "timingS": {"quit": 0.5}, "sessions": []})
@@ -1737,6 +1878,18 @@ def _wired_score_mmo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     return result["verdict"], [reason.split(":")[0] for reason in result["invalid"]]
 
 
+def _wired_placement_invalid(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    monkeypatch.setattr(q, "contract_problem", lambda _run: None)
+    monkeypatch.setattr(q, "placement_gates", lambda *_args, **_kwargs: {
+        "CEF-placement": {"verdict": "INVALID", "invalid": "placement INCONCLUSIVE: unreadable"}})
+    invalid: list[str] = []
+    gates = q.arm_gates(
+        "placement", {"sessions": []},
+        types.SimpleNamespace(decision=None, tier="full", dev_profile=None), None, invalid)
+    gate_ok = all(gate["verdict"] in ("PASS", "INVALID") for gate in gates.values())
+    return gates["CEF-placement"]["verdict"], not invalid and gate_ok
+
+
 def _wired_n1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     check = "fail-zone: painting movie count == off"
     return _failsafe_checks()[check]["ok"], _failsafe_checks(zone_painting={"error": "unavailable"})[check]["ok"]
@@ -1750,6 +1903,7 @@ def _wired_n3(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 @pytest.mark.parametrize(("ingest", "outcome"), [
     pytest.param(_wired_arm_gates, ["evidence contract"], id="7-arm_gates-invalid"),
     pytest.param(_wired_score_mmo, ("INVALID", ["evidence contract"]), id="7-score_mmo-invalid"),
+    pytest.param(_wired_placement_invalid, ("INVALID", False), id="invalid-placement-gate-does-not-pass"),
     pytest.param(_wired_n1, (True, False), id="N1-an-error-painting-read-is-no-count"),
     pytest.param(_wired_n3, (True, False), id="N3-fail-bogus-needs-a-readable-note-list"),
 ])
@@ -1872,6 +2026,10 @@ def _placement_calibration(tmp_path: Path, backend: str, *, omit: str | None = N
         "drivePlacement": {"state": "valid", "grant": result.verdict.value, "method": "probe",
                            "tone": {"observed": result.tone_map.value if result.tone_map else None, "applied": "identity"}},
     }
+    if omit == "recording-stop":
+        telemetry["recordingError"] = "RuntimeError: recording remained active after StopRecord"
+        telemetry["recordingStop"] = {
+            "postRestorationFramesComplete": True, "inactive": False, "readable": False}
     telemetry_ref = q.write_placement_json(run_dir, "telemetry", telemetry)
     stock = next(iter(live_runtime.SUPPORTED_PLAYERS))
     record = q.placement_record(
@@ -1930,6 +2088,8 @@ def _placement_control(tmp_path: Path, name: str, *, host_reason: bool = True) -
                  id="ownership-error-does-not-mask-isolation-failure"),
     pytest.param("cef", False, "ownership-program-failed", "FAIL", "iso-obs-preview",
                  id="ownership-error-does-not-mask-program-failure"),
+    pytest.param("cef", False, "recording-stop", "INCONCLUSIVE", "program-wire-integrity",
+                 id="recording-stop-verification-failed"),
 ])
 def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: str,
                                                        gpu: bool, omit: str | None, verdict: str, gate: str) -> None:
@@ -1943,6 +2103,18 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
         tone = q.probe_tone_rows(decoded["input"], classified)
         assert (len(tone["ramp"]), len(tone["patches"]), tone["problems"]) == (16, 8, [])
         if decoded["transaction"] is not None:
+            original_classifier = placement_probe.classify_probe
+            classification_calls = []
+            with monkeypatch.context() as cache_patch:
+                cache_patch.setattr(
+                    placement_probe, "classify_probe",
+                    lambda value: classification_calls.append(value) or original_classifier(value))
+                pure_scores = {}
+                q.score_placement_calibration(calibration, tmp_path / backend, pure_scores=pure_scores)
+                first_call_count = len(classification_calls)
+                q.score_placement_calibration(calibration, tmp_path / backend, pure_scores=pure_scores)
+            assert first_call_count > 0 and len(classification_calls) == first_call_count
+
             non_authoritative_root = tmp_path / "non-authoritative"
             non_authoritative_root.mkdir()
             non_authoritative, _ = _placement_calibration(non_authoritative_root, "cef")
@@ -2169,7 +2341,10 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 (destination / "record.json").write_text(json.dumps({"placementCalibration": encoded}))
             for name in q.PLACEMENT_CONTROL_SESSIONS:
                 _placement_control(offline / "take-controls" / "runs", name)
-            assert q.score_placement_runs(offline) == 0
+            assert q.score_placement_runs(offline) == 1
+            offline_report = json.loads(max(offline.glob("placement-rescore-*.json")).read_text())
+            assert offline_report["qualified"] is False
+            assert checks_of({"checks": offline_report["launchSet"]["checks"]})["every placement launch complete"]["ok"] is False
             rgba = np.zeros((4, 4, 4), np.uint8)
             rgba[0, 0] = (255, 128, 0, 128)
             rgba_paths = []
@@ -2317,6 +2492,20 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 gate_patch.setattr(q.dissolve_probe, "score_runs", lambda *_args, **_kwargs: {
                     "gates": {}, "arms": {name: "MATCH" for name in q.PLACEMENT_ARMS}, "overall": "PASS"})
                 placement_gate = q.placement_gates({"sessions": gate_sessions}, None)["CEF-placement"]
+                readiness_path = gate_root / "on" / "record.json"
+                readiness_record = json.loads(readiness_path.read_text())
+                readiness_record["integrityFailure"] = {
+                    "kind": "readiness", "message": "OBS paint timeout"}
+                readiness_path.write_text(json.dumps(readiness_record))
+                readiness_gate = q.placement_gates({"sessions": gate_sessions}, None)["CEF-placement"]
+                opaque = next(session for session in gate_sessions if session["session"] == "opaque-off")
+                opaque_calibration = opaque["calibration"]
+                opaque["calibration"] = {"n": 5, "model": "INCONCLUSIVE", "calibration": None}
+                readiness_without_calibration = q.placement_gates(
+                    {"sessions": gate_sessions}, None)["CEF-placement"]
+                opaque["calibration"] = opaque_calibration
+                readiness_record.pop("integrityFailure")
+                readiness_path.write_text(json.dumps(readiness_record))
                 missing_chrome_record = [dict(session) for session in gate_sessions]
                 next(session for session in missing_chrome_record
                      if session["session"] == "probe-chrome-gpu")["runDir"] = str(gate_root / "missing-chrome")
@@ -2330,6 +2519,10 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
                 gate_patch.chdir(empty_cwd)
                 q.placement_gates({"sessions": missing_run_dir}, None)
             assert placement_gate["verdict"] == "PASS"
+            assert readiness_gate["verdict"] == "INCONCLUSIVE"
+            assert "OBS paint timeout" in readiness_gate["invalid"]
+            assert "calibration opaque-off n 5" in readiness_without_calibration["invalid"]
+            assert "OBS paint timeout" in readiness_without_calibration["invalid"]
             assert checks_of(placement_gate)["every placement session ran"]["ok"] is True
             assert checks_of(placement_gate)["probe-chrome-gpu: classifier"]["value"] == "PASS"
             assert checks_of(placement_gate)["probe-chrome-software: classifier"]["value"] == "PASS"
@@ -2342,10 +2535,50 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             assert not (empty_cwd / "record.json").exists()
             q.finalize_placement_persistence([{"session": "control-without-run-dir"}], tmp_path / "missing-collection.json")
 
+            quit_root = tmp_path / "quit-reuse"
+            sessions = []
+            run_dirs = []
+            calibrations = []
+            for name in ("clean", "leftover"):
+                source = quit_root / name
+                source.mkdir(parents=True)
+                encoded, _ = _placement_calibration(source, "cef")
+                run_dir = source / "cef"
+                (run_dir / "record.json").write_text(json.dumps({"placementCalibration": encoded}))
+                sessions.append({"session": name, "runDir": str(run_dir)})
+                run_dirs.append(run_dir)
+                calibrations.append(encoded)
+            leftover_ref = calibrations[1]["persistence"]["baseline"]
+            leftover_path = run_dirs[1] / leftover_ref["path"]
+            leftover = json.loads(leftover_path.read_text())
+            leftover["unremovedProbe"] = True
+            leftover_path.write_text(json.dumps(leftover))
+            calibrations[1]["persistence"]["baseline"] = q.dissolve_probe.placement_file_ref(
+                leftover_path, run_dirs[1], mtime_ns=leftover_ref["mtimeNs"], saved_by_obs=True)
+            (run_dirs[1] / "record.json").write_text(json.dumps({"placementCalibration": calibrations[1]}))
+            collection_path = quit_root / "engine" / "AK.json"
+            collection_path.parent.mkdir()
+            collection_path.write_bytes((run_dirs[0] / calibrations[0]["persistence"]["quit"]["path"]).read_bytes())
+            (collection_path.parent / "AK.json.bak").write_bytes(collection_path.read_bytes())
+            (collection_path.parent / "AK.json.bak1").write_bytes(collection_path.read_bytes())
+            finalized = q.finalize_placement_persistence(sessions, collection_path)
+            finalized_records = [json.loads((run_dir / "record.json").read_text()) for run_dir in run_dirs]
+            persistence_verdicts = [record["placementCalibration"]["gates"]["persistence-worker"]["verdict"]
+                                    for record in finalized_records]
+            assert persistence_verdicts == ["PASS", "FAIL"]
+            quit_refs = [record["placementCalibration"]["persistence"]["quit"] for record in finalized_records]
+            assert len({ref["sha256"] for ref in quit_refs}) == 1
+            assert len(finalized["quitDigests"]["backups"]) == 2
+            backup_names = [[Path(ref["path"]).name for ref in
+                             record["placementCalibration"]["persistence"]["backup"]]
+                            for record in finalized_records]
+            assert backup_names == [["AK.json.bak", "AK.json.bak1"], ["AK.json.bak", "AK.json.bak1"]]
+
             monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=10 ** 15))
             disk = q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
-            assert disk["recordings"] == (len(q.PLACEMENT_ARMS) + 2) * len(q.MMO_RATES) * 2
-            assert disk["retainedBytes"] == 0
+            assert disk["acquisitionPath"] == "anchors+injection"
+            assert disk["recordings"] == len(q.PLACEMENT_ANCHORS) * len(q.MMO_RATES) * 2
+            assert disk["requiredOutBytes"] == 2 * q.PLACEMENT_RECORDING_ESTIMATE_BYTES
             monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=1))
             with pytest.raises(RuntimeError, match="placement needs about"):
                 q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
@@ -2353,3 +2586,366 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             large.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
             large_ref = q.dissolve_probe.placement_file_ref(large, tmp_path)
             assert q.dissolve_probe._placement_ref_bytes(large_ref, tmp_path, load=False) == b""
+
+
+def test_placement_injection_renews_aborts_on_binding_change_and_always_revokes() -> None:
+    class Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def unix(self) -> float:
+            return 1_000.0 + self.now
+
+    class Transport:
+        def __init__(self) -> None:
+            self.value = "invalid"
+            self.revokes = 0
+
+        def evaluate_in(self, _context: str, expression: str, **_kwargs: Any) -> Any:
+            if expression == q.dissolve_probe.PLACEMENT_JS:
+                return self.value
+            if expression == q.live_host._placement_renew_expr(
+                    "token", "frac", q.PLACEMENT_INJECTION_LEASE_MS):
+                if self.value != "frac":
+                    return None
+                return self.value
+            if "__obedGrant" in expression:
+                if '"invalid"' in expression:
+                    self.value = "invalid"
+                    self.revokes += 1
+                elif '"frac"' in expression:
+                    self.value = "frac"
+                return True
+            raise AssertionError(expression)
+
+    engine = managed_obs.EngineIdentity(41, 42.0, 3)
+
+    class Host:
+        _placement_token = "token"
+        _connection_generation = 7
+
+        def __init__(self) -> None:
+            self.transport = Transport()
+            self.context = "context-1"
+            self.fingerprint = ("CEF", 1.0, 1920, 1080)
+
+        def _require_transport(self) -> Transport:
+            return self.transport
+
+        def _program_context(self) -> str:
+            return self.context
+
+        def _probe_fingerprint_read(self, context: str) -> tuple[str, float, int, int] | None:
+            return self.fingerprint if context == self.context else None
+
+    clock = Clock()
+    host = Host()
+    injection = q.PlacementInjection(
+        host, lambda: engine, "target-1", "frac", monotonic=clock.monotonic, unix_time=clock.unix)
+    try:
+        injection.start(renewal=False)
+        for _ in range(3):
+            clock.now += q.PLACEMENT_INJECTION_RENEW_S
+            assert injection.renew_once() is True
+        clock.now += 0.25
+        injection.take_read("frac")
+        host.context = "context-2"
+        clock.now += q.PLACEMENT_INJECTION_RENEW_S
+        assert injection.renew_once() is False
+        assert injection.failure == "placement injection binding changed"
+    finally:
+        record = injection.stop_and_revoke()
+    assert set(record) == {"schemaVersion", "value", "leaseMs", "engine", "targetId",
+                           "uniqueContextId", "commits", "takeRead", "revoke"}
+    commit_times = [row["at"] for row in record["commits"]]
+    assert all(b - a <= 3.0 for a, b in zip(commit_times, commit_times[1:]))
+    assert record["takeRead"]["value"] == "frac"
+    assert record["revoke"]["read"] == "invalid"
+    assert host.transport.revokes >= 2
+
+    late_clock = Clock()
+    late = q.PlacementInjection(
+        Host(), lambda: engine, "target-1", "frac",
+        monotonic=late_clock.monotonic, unix_time=late_clock.unix)
+    late.start(renewal=False)
+    late_clock.now += 3.1
+    assert late.renew_once() is False
+    assert late.failure == "placement injection renewal was late"
+    late.stop_and_revoke()
+
+    fresh = q.PlacementInjection(
+        Host(), lambda: engine, "target-1", "frac",
+        monotonic=late_clock.monotonic, unix_time=late_clock.unix)
+    fresh.start(renewal=False)
+    with pytest.raises(RuntimeError, match="take readback failed"):
+        fresh.take_read("invalid")
+    fresh.stop_and_revoke()
+
+    revive_clock = Clock()
+    revive_host = Host()
+    revive = q.PlacementInjection(
+        revive_host, lambda: engine, "target-1", "frac",
+        monotonic=revive_clock.monotonic, unix_time=revive_clock.unix)
+    revive.start(renewal=False)
+    revive_host.transport.value = "invalid"
+    revive_clock.now += q.PLACEMENT_INJECTION_RENEW_S
+    assert revive.renew_once() is False and revive_host.transport.value == "invalid"
+    revive.stop_and_revoke()
+
+    retry_clock = Clock()
+    retry_host = Host()
+    retry = q.PlacementInjection(
+        retry_host, lambda: engine, "target-1", "frac",
+        monotonic=retry_clock.monotonic, unix_time=retry_clock.unix)
+    retry.start(renewal=False)
+    retry_host.fingerprint = None
+    retry_clock.now += q.PLACEMENT_INJECTION_RENEW_S
+    assert retry.renew_once() is False and retry.failure is None
+    retry_host.fingerprint = ("CEF", 1.0, 1920, 1080)
+    assert retry.renew_once() is True
+    retry.stop_and_revoke()
+
+
+def test_placement_rescore_launch_matrix_and_dev_relocation(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from test_dissolve_probe import H as SCORER_H, W as SCORER_W, media_run
+
+    monkeypatch.setattr(q.dissolve_probe, "VIEWPORT", (SCORER_W, SCORER_H))
+    score_calls: list[Path] = []
+
+    def score_control(_control: Any, run_dir: Path) -> dict[str, Any]:
+        return {"verdict": "PASS", "problems": [], "detail": {}}
+
+    def score_calibration(_calibration: Any, run_dir: Path, **_kwargs: Any) -> dict[str, Any]:
+        score_calls.append(Path(run_dir) / "record.json")
+        classification = _calibration.get("testClassification", "frac") if isinstance(_calibration, dict) else "frac"
+        return {"overall": "PASS", "classification": {"verdict": classification},
+                "gates": {"probe-chrome-harness": {"verdict": "PASS"}}, "problems": []}
+
+    monkeypatch.setattr(q, "score_placement_control", score_control)
+    monkeypatch.setattr(q, "score_placement_calibration", score_calibration)
+
+    def write_record(folder: Path, body: dict[str, Any], images: dict[str, np.ndarray] | None = None) -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, image in (images or {}).items():
+            Image.fromarray(image).save(folder / f"{name}.png")
+        (folder / "record.json").write_text(json.dumps(body))
+
+    def build(root: Path, rate: int, token: int, *, tier: str = "full", dev_profile: str | None = None,
+              legacy: bool = False, launch_id: str | None = None, skip: tuple[str, ...] = (),
+              child_override: tuple[str, dict[str, Any]] | None = None, missing_dsk_attempt: bool = False,
+              valid: bool = True, renderer_images: bool = False, dev_passed: bool = True,
+              injection_fault: tuple[str, str] | None = None,
+              anchor_classification: tuple[str, str] | None = None,
+              mixed_mode: str | None = None) -> None:
+        ts = f"{root.name}-{rate}-{token}"
+        launch = launch_id or f"{ts}:target-{token}"
+        profile = q.placement_profile(tier, dev_profile)
+        names = (*q.PLACEMENT_CONTROL_SESSIONS, "probe-chrome-gpu", "probe-chrome-software",
+                 *(name for name in q.PLACEMENT_ARMS if name in profile.arms))
+        runs = root / "shots" / f"placement-{ts}" / "runs"
+        scope = {} if legacy else q.placement_scope(tier, dev_profile)
+        acquisition = {} if legacy else {"acquisition": {
+            "launchId": launch, "rate": rate, "take": 1, **scope}}
+        engine = {"pid": token, "launch_date": float(token), "ready_generation": 1}
+        for name in names:
+            if name in skip:
+                continue
+            folder = runs / name
+            body: dict[str, Any] = {**scope, **acquisition}
+            images = None
+            if name in q.PLACEMENT_CONTROL_SESSIONS:
+                body["placementControl"] = {"session": name}
+            elif name.startswith("probe-chrome-"):
+                telemetry = folder / "placement" / "telemetry.json"
+                telemetry.parent.mkdir(parents=True, exist_ok=True)
+                telemetry.write_text(json.dumps({"chromeGpu": name.endswith("gpu")}))
+                body["placementCalibration"] = {
+                    "backend": "chrome-harness", "input": {"identity": {"target_id": f"{name}-{token}"}},
+                    "integrity": {"telemetry": q.dissolve_probe.placement_file_ref(telemetry, folder)},
+                }
+            else:
+                if renderer_images:
+                    body, images = media_run(name)
+                    body.update(scope)
+                    body.update(acquisition)
+                value = q.dissolve_probe.ARMS[name].placement_value or profile.placement
+                if legacy or name in q.PLACEMENT_ANCHORS:
+                    body.update(arm=name, placementCalibration={
+                        "backend": "cef", "engine": engine,
+                        "request": {"program_context_id": f"context-anchor-{name}-{token}"},
+                        **({"testClassification": anchor_classification[1]}
+                           if anchor_classification and name == anchor_classification[0] else {}),
+                    })
+                else:
+                    body.update(arm=name, placement=value, placementInjection={
+                        "schemaVersion": 1, "value": value, "leaseMs": 15_000, "engine": engine,
+                        "targetId": f"target-{token}", "uniqueContextId": f"context-{name}-{token}",
+                        "commits": [
+                            {"at": 100.0, "committed": True, "read": value},
+                            {"at": 102.5, "committed": True, "read": value},
+                            {"at": 105.0, "committed": True, "read": value},
+                        ],
+                        "takeRead": {"at": 107.0, "value": value},
+                        "revoke": {"at": 108.0, "read": "invalid"},
+                    })
+                    if injection_fault and name == injection_fault[0]:
+                        fault = injection_fault[1]
+                        injection = body["placementInjection"]
+                        if fault == "expired":
+                            injection["commits"] = [injection["commits"][0]]
+                            injection["takeRead"]["at"] = 120.0
+                        elif fault == "readback":
+                            injection["commits"][1]["read"] = "invalid"
+                        elif fault == "binding":
+                            injection["uniqueContextId"] = f"context-anchor-opaque-off-{token}"
+                        elif fault == "duplicate-context":
+                            injection["uniqueContextId"] = f"context-on2-{token}"
+                        elif fault == "revoke":
+                            injection["revoke"]["read"] = value
+                        elif fault == "engine":
+                            injection["engine"] = {**engine, "pid": 999}
+                        elif fault == "value":
+                            injection["value"] = "frac" if value == "snap" else "snap"
+                        elif fault == "missing":
+                            body.pop("placementInjection")
+                        else:
+                            raise AssertionError(fault)
+                if mixed_mode == name:
+                    body.pop("placementInjection", None)
+                    body["placementCalibration"] = {"backend": "cef", "engine": engine}
+                if q.dissolve_probe.ARMS[name].counter_strip == "distinct":
+                    attempt = folder / "attempt-1"
+                    parent = {"arm": name, **scope, **acquisition,
+                              "captureAttempts": [{"attempt": 1, "record": "attempt-1/record.json"}]}
+                    write_record(folder, parent)
+                    if not missing_dsk_attempt:
+                        write_record(attempt, body, images)
+                    continue
+            if child_override and name == child_override[0]:
+                body.update(child_override[1])
+            write_record(folder, body, images)
+        (root / "runs").mkdir(parents=True, exist_ok=True)
+        metadata = {"arm": "placement", "rate": rate, "take": 1, "ts": ts, "valid": valid,
+                    "invalid": [] if valid else ["not lossless: x"], "checks": [],
+                    "passed": valid and tier == "full", **({"devPassed": dev_passed} if tier == "dev" else {}),
+                    **({} if legacy else {"placementLaunchId": launch, **scope}),
+                    "decision": {"L": "identity"}}
+        (root / "runs" / f"placement-{ts}.json").write_text(json.dumps(metadata))
+
+    def aborted_summary(root: Path) -> None:
+        (root / "runs").mkdir(parents=True, exist_ok=True)
+        (root / "runs" / "placement-aborted.json").write_text(json.dumps({
+            "arm": "placement", "rate": 25, "take": 1, "ts": "aborted", "tier": "full",
+            "placementLaunchId": "aborted", "valid": False, "passed": False, "invalid": ["aborted"],
+            "checks": [],
+        }))
+
+    pair = ((25, 1), (30, 2))
+
+    def score_case(name: str, builds: list[dict[str, Any]], expected: int) -> Path:
+        root = tmp_path / name
+        for spec in builds:
+            build(root, **spec)
+        assert q.score_placement_runs(root) == expected
+        return root
+
+    score_case("complete-pair", [{"rate": rate, "token": token} for rate, token in pair], 0)
+    score_case("legacy-pair", [{"rate": rate, "token": token, "legacy": True} for rate, token in pair], 0)
+
+    def inconclusive_case(name: str, **fault: Any) -> None:
+        root = score_case(name, [
+            {"rate": 25, "token": 1}, {"rate": 30, "token": 2, **fault},
+        ], 1)
+        report = json.loads(max(root.glob("placement-rescore-*.json")).read_text())
+        session = ((fault.get("injection_fault") or (None,))[0]
+                   or fault.get("mixed_mode") or "noblend")
+        assert any(row["session"] == session and row["overall"] == "INCONCLUSIVE"
+                   for row in report["results"])
+
+    inconclusive_case("expired-renewal", injection_fault=("noblend", "expired"))
+    inconclusive_case("failed-injection-readback", injection_fault=("noblend", "readback"))
+    inconclusive_case("changed-injection-binding", injection_fault=("noblend", "binding"))
+    inconclusive_case("duplicate-injection-context", injection_fault=("noblend", "duplicate-context"))
+    inconclusive_case("missing-injection", injection_fault=("noblend", "missing"))
+    inconclusive_case("unverified-injection-revoke", injection_fault=("noblend", "revoke"))
+    inconclusive_case("injection-engine-mismatch", injection_fault=("noblend", "engine"))
+    inconclusive_case("anchor-not-frac", anchor_classification=("off", "snap"))
+    inconclusive_case("wrong-injection-value", injection_fault=("noblend", "value"))
+    inconclusive_case("mixed-evidence-modes", mixed_mode="noblend")
+    score_case("missing-rate", [{"rate": 25, "token": 1}], 1)
+    score_case("duplicate-launch-id", [
+        {"rate": 25, "token": 1, "launch_id": "duplicate"},
+        {"rate": 30, "token": 2, "launch_id": "duplicate"},
+    ], 1)
+    score_case("missing-chrome-gpu", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2, "skip": ("probe-chrome-gpu",)},
+    ], 1)
+    score_case("dev-child-in-full", [
+        {"rate": 25, "token": 1},
+        {"rate": 30, "token": 2, "child_override": ("on", {"tier": "dev", "devProfile": "renderer"})},
+    ], 1)
+    score_case("dev-launch-and-full-pair", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2},
+        {"rate": 25, "token": 3, "tier": "dev", "dev_profile": "renderer"},
+    ], 1)
+    aborted = score_case("summary-only-aborted", [{"rate": rate, "token": token} for rate, token in pair], 0)
+    aborted_summary(aborted)
+    assert q.score_placement_runs(aborted) == 1
+    score_case("missing-dsk-attempt", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2, "missing_dsk_attempt": True},
+    ], 1)
+    invalid = score_case("invalid-run", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2, "valid": False},
+    ], 1)
+    invalid_report = json.loads(max(invalid.glob("placement-rescore-*.json")).read_text())
+    assert invalid_report["productControlPassed"] is True and invalid_report["qualified"] is False
+    score_case("two-takes-one-invocations", [
+        {"rate": 25, "token": 1}, {"rate": 30, "token": 2},
+        {"rate": 25, "token": 3}, {"rate": 30, "token": 4},
+    ], 0)
+
+    def pass_renderer_round(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {"gates": {}, "arms": {}, "overall": "PASS", "missing": [], "profile": "test"}
+
+    monkeypatch.setattr(q.dissolve_probe, "score_runs", pass_renderer_round)
+    score_calls.clear()
+    dev = score_case("dev-single", [{
+        "rate": 25, "token": 1, "tier": "dev", "dev_profile": "renderer", "renderer_images": True,
+    }], 10)
+    assert len(score_calls) == len(set(score_calls))
+    dev_rescored = score_case("dev-recorded-fail-rescore-pass", [{
+        "rate": 25, "token": 1, "tier": "dev", "dev_profile": "renderer", "renderer_images": True,
+        "dev_passed": False,
+    }], 10)
+    dev_rescored_report = json.loads(max(dev_rescored.glob("placement-rescore-*.json")).read_text())
+    assert dev_rescored_report["renderer"][0]["recordedDevPassed"] is False
+    assert dev_rescored_report["devPassed"] is True and dev_rescored_report["qualified"] is False
+    relocated = tmp_path / "dev-relocated"
+    shutil.move(dev, relocated)
+    score_calls.clear()
+    assert q.score_placement_runs(relocated) == 10
+    assert len(score_calls) == len(set(score_calls))
+    renderer_dir = relocated / "shots" / "placement-dev-single-25-1" / "runs" / "opaque-off"
+    renderer_record = json.loads((renderer_dir / "record.json").read_text())
+    required_renderer_png = renderer_dir / f"{renderer_record['shots'][0]['name']}.png"
+    required_renderer_png.unlink()
+    assert q.score_placement_runs(relocated) == 1
+    report = json.loads(max(relocated.glob("placement-rescore-*.json")).read_text())
+    assert report["renderer"][0]["verdict"] == "INCONCLUSIVE" and report["qualified"] is False
+
+    dev_rates = score_case("dev-across-rates", [
+        {"rate": 25, "token": 1, "tier": "dev", "dev_profile": "renderer", "renderer_images": True},
+        {"rate": 30, "token": 2, "tier": "dev", "dev_profile": "renderer", "renderer_images": True},
+    ], 10)
+    assert json.loads(max(dev_rates.glob("placement-rescore-*.json")).read_text())["qualified"] is False
+
+    dev_fallback = tmp_path / "dev-mixed-profile-no-summary"
+    build(dev_fallback, 25, 1, tier="dev", dev_profile="renderer",
+          child_override=("on", {"devProfile": "harness"}))
+    next((dev_fallback / "runs").glob("placement-*.json")).unlink()
+    assert q.score_placement_runs(dev_fallback) == 1
+    fallback_report = json.loads(max(dev_fallback.glob("placement-rescore-*.json")).read_text())
+    assert fallback_report["tier"] == "dev" and fallback_report["qualified"] is False

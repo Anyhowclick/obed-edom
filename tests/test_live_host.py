@@ -1259,6 +1259,12 @@ def hevc_movie_bytes() -> bytes:
     return _movie_bytes(b"hvc1")
 
 
+def vp9_movie_bytes() -> bytes:
+    from tests.test_live_codec import webm_bytes
+
+    return webm_bytes(alpha=True)
+
+
 def _layer_state(x: float, y: float, w: float, h: float) -> dict[str, Any]:
     return {
         "affineTransform": [1, 0, 0, 1, 0, 0],
@@ -2014,6 +2020,20 @@ def test_h264_movie_qualifies_with_no_codec_warning(tmp_path, monkeypatch):
     assert output.output["codecs"] == [{"asset": "movie.mov", "codec": "avc1", "family": "h264", "files": 2}]
 
 
+@pytest.mark.parametrize(
+    ("attach", "headless", "managed", "supported"),
+    [
+        (False, False, False, True),
+        (False, True, False, False),
+        (True, False, False, False),
+        (True, False, True, True),
+    ],
+    ids=["headful-launch", "headless-launch", "external-attach", "managed-obs"],
+)
+def test_vp9_ordinary_playback_support_is_mode_based(attach, headless, managed, supported):
+    assert live_host._codec_supported("vp9", attach=attach, headless=headless, managed=managed) is supported
+
+
 def test_unplanned_hevc_movie_does_not_block_continuity_but_warns(tmp_path, monkeypatch):
     # The extra movie only appears (single-instance) on slide 2, so it never enters the
     # runtime's movie table; the planned movie is still plain h264, so continuity must
@@ -2048,6 +2068,24 @@ def test_planned_hevc_attach_mode_is_unsupported(tmp_path, monkeypatch):
     output.observe()
     assert output._continuity_mode == "unsupported"
     assert output.output["continuity"]["reason"] == "movie codec is not playable in this output: movie.mov (hvc1)"
+
+
+def test_planned_vp9_refuses_continuity_and_cleans_up_g2_in_headful_launch(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_host, "CONTINUITY_VERSION", 5)
+    output = host_with_continuity(
+        tmp_path, monkeypatch, headless=False, gl_replay="auto", movie_bytes=vp9_movie_bytes()
+    )
+    fake_plan_pair(monkeypatch)
+    output.observe()
+
+    assert output.output["codecWarnings"] == []
+    assert output._continuity_mode == "unsupported"
+    assert output.output["continuity"]["reason"] == (
+        "movie continuity does not support VP9 movies: movie.mov (V_VP9)"
+    )
+    assert output._server.continuity_script == ""
+    assert output.output["continuity"]["glReplay"]["mode"] == "unavailable"
+    assert output.output["continuity"]["glReplay"]["reason"] == "continuity unsupported"
 
 
 def test_unreadable_planned_movie_is_unsupported(tmp_path, monkeypatch):

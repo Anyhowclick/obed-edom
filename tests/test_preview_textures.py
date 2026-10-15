@@ -206,6 +206,59 @@ def _d3_slides():
     ]
 
 
+def _glyph_slides(bad="base", variant=None):
+    rects = [(100, 100, 40, 60), (180, 100, 40, 60)]
+    base = ["BASE_I", "BASE_A"]
+    effect = ["EFFECT_I", "EFFECT_A"]
+    if bad == "base":
+        base[0] = "BAD"
+    else:
+        effect[0] = "BAD"
+    if variant == "both":
+        effect[0] = "BAD"
+    elif variant == "donor-hit":
+        effect[0] = "DONOR_BAD"
+    elif variant == "donor-reused":
+        effect[1] = effect[0]
+    wrapper = {
+        "initialState": _state(0, 0, *CANVAS),
+        "objectID": "GLYPHS",
+        "layers": [],
+    }
+    for texture, rect in zip(base, rects, strict=True):
+        leaf = _leaf(texture, rect[2], rect[3])
+        leaf["initialState"] = _state(*rect)
+        wrapper["layers"].append(leaf)
+    effect_wrappers = []
+    for texture, rect in zip(effect, rects, strict=True):
+        effect_wrappers.append({"initialState": _state(*rect), "layers": [_leaf(texture, rect[2], rect[3])]})
+    if variant == "rect":
+        effect_wrappers[0]["initialState"] = _state(rects[0][0] + 1, *rects[0][1:])
+    if variant == "textured-rectangle":
+        effect_wrappers[0]["layers"][0]["texturedRectangle"]["variant"] = "other"
+    glyph_effect = {
+        "name": "apple:any-per-glyph-build",
+        "type": "buildIn",
+        "objectID": "GLYPHS",
+        "baseLayer": {
+            "initialState": _state(0, 0, *CANVAS),
+            "objectID": "GLYPHS",
+            "layers": effect_wrappers,
+        },
+    }
+    textures = {
+        "BAD": (400, 300, "T"),
+        "BASE_I": (40, 60, "L"),
+        "BASE_A": (40, 60, "T"),
+        "EFFECT_I": (40, 60, "L"),
+        "EFFECT_A": (40, 60, "T"),
+    }
+    if variant == "donor-hit":
+        textures["DONOR_BAD"] = (300, 400, "L")
+    slot = {"initialState": _state(0, 0, *CANVAS), "layers": [wrapper]}
+    return [("S1", textures, [_event([slot], [glyph_effect])])]
+
+
 def _d2_slides():
     landed = (150, 100, 100, 20)
     return [
@@ -385,6 +438,65 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
             id="D3-poster-by-objectID",
         ),
         pytest.param(
+            lambda: _glyph_slides("base"),
+            {
+                "ordinal": 1,
+                "rule": "D1g",
+                "from": "BAD",
+                "to": "EFFECT_I",
+                "donor": None,
+                "verify": {
+                    "objectID": "GLYPHS",
+                    "glyph": 0,
+                    "twin": "0/effects/0/baseLayer/layers/0/layers/0",
+                },
+                "leaf": "0/baseLayer/layers/0/layers/0/layers/0",
+            },
+            id="D1g-base-glyph-uses-effect-twin",
+        ),
+        pytest.param(
+            lambda: _glyph_slides("effect"),
+            {
+                "ordinal": 1,
+                "rule": "D1g",
+                "from": "BAD",
+                "to": "BASE_I",
+                "donor": None,
+                "verify": {
+                    "objectID": "GLYPHS",
+                    "glyph": 0,
+                    "twin": "0/baseLayer/layers/0/layers/0/layers/0",
+                },
+                "leaf": "0/effects/0/baseLayer/layers/0/layers/0",
+            },
+            id="D1g-effect-glyph-uses-base-twin",
+        ),
+        pytest.param(
+            lambda: _glyph_slides("base", "both"),
+            {"refused": "slide 1 (40×60 text): its texture is mis-mapped and no verified replacement exists"},
+            id="D1g-refuses-shared-bad-id",
+        ),
+        pytest.param(
+            lambda: _glyph_slides("base", "rect"),
+            {"refused": "slide 1 (40×60 text): its texture is mis-mapped and no verified replacement exists"},
+            id="D1g-refuses-twin-rect-mismatch",
+        ),
+        pytest.param(
+            lambda: _glyph_slides("base", "textured-rectangle"),
+            {"refused": "slide 1 (40×60 text): its texture is mis-mapped and no verified replacement exists"},
+            id="D1g-refuses-textured-rectangle-mismatch",
+        ),
+        pytest.param(
+            lambda: _glyph_slides("base", "donor-hit"),
+            {"refused": "slide 1 (40×60 text): its texture is mis-mapped and no verified replacement exists"},
+            id="D1g-refuses-donor-hit",
+        ),
+        pytest.param(
+            lambda: _glyph_slides("base", "donor-reused"),
+            {"refused": "slide 1 (40×60 text): its texture is mis-mapped and no verified replacement exists"},
+            id="D1g-refuses-donor-used-by-another-glyph",
+        ),
+        pytest.param(
             _d2_slides,
             {"ordinal": 2, "rule": "D2", "from": "BIG", "to": D2_ID, "donor": {"uuid": "S1", "id": "TO", "page": 2}},
             id="D2-graft-magic-move-landing",
@@ -464,6 +576,14 @@ D2_ID = hashlib.sha256(b"S2:S1:TO").hexdigest()[:32].upper()
 def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, monkeypatch, build, expected):
     slides = _export(tmp_path, build())
     expected = dict(expected)
+    expected_leaf = expected.pop("leaf", "0/baseLayer/layers/0/layers/0/layers/0")
+    unchanged_payload = None
+    unchanged_pdf = None
+    if expected.get("rule") == "D1g":
+        uuid = slides[expected["ordinal"] - 1]["exportedUuid"]
+        folder = tmp_path / "assets" / uuid
+        unchanged_payload = json.loads((folder / f"{uuid}.json").read_text())["assets"]
+        unchanged_pdf = (folder / "assets" / f"{uuid}.pdf").read_bytes()
     kwargs = {}
     source_case = expected.pop("source", None)
     if source_case is not None:
@@ -488,8 +608,8 @@ def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, monkeypa
 
     [entry] = record["repaired"]
     assert {k: entry[k] for k in expected} == expected
-    assert entry["leaves"][0] == "0/baseLayer/layers/0/layers/0/layers/0"
-    assert set(entry["verify"]) <= {"ocr", "corr", "object", "sourceObject", "data"}
+    assert entry["leaves"][0] == expected_leaf
+    assert set(entry["verify"]) <= {"ocr", "corr", "object", "sourceObject", "data", "objectID", "glyph", "twin"}
     assert lines[-1] == "Repaired 1 mis-mapped texture"
     assert pt.json_hits(tmp_path, slides) == []
 
@@ -498,7 +618,10 @@ def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, monkeypa
     payload = json.loads((folder / f"{uuid}.json").read_text())
     jsonp = (folder / f"{uuid}.jsonp").read_text()
     assert jsonp == f"local_slide( {json.dumps({'name': uuid, 'json': payload}, separators=(',', ':'))} )"
-    assert payload["events"][0]["baseLayer"]["layers"][0]["layers"][0]["layers"][0]["texture"] == expected["to"]
+    actual_leaf = payload["events"]
+    for part in expected_leaf.split("/"):
+        actual_leaf = actual_leaf[int(part)] if part.isdigit() else actual_leaf[part]
+    assert actual_leaf["texture"] == expected["to"]
     pdf = folder / "assets" / f"{uuid}.pdf"
     if expected["rule"] == "D2":
         assert payload["assets"][D2_ID] == {
@@ -511,6 +634,9 @@ def test_repair_picks_the_rule_and_writes_a_consistent_export(tmp_path, monkeypa
         assert payload["assets"]["BIG"]["index"] == 0
     else:
         assert record["pdfs"] == []
+    if expected["rule"] == "D1g":
+        assert payload["assets"] == unchanged_payload
+        assert pdf.read_bytes() == unchanged_pdf
 
 
 def test_refusal_names_every_unrepairable_object_and_writes_nothing(tmp_path):
