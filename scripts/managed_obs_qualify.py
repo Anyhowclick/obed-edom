@@ -92,7 +92,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 from obed_edom.fixture_paths import fixture  # noqa: E402
-from obed_edom import live_gl_replay_js, live_runtime, managed_obs, mm_handback_score, obs_websocket, placement_probe  # noqa: E402
+from obed_edom import live_gl_replay_js, live_host, live_runtime, managed_obs, mm_handback_score, obs_websocket, placement_probe  # noqa: E402
 from obed_edom.html_preview import cache_dir  # noqa: E402
 from obed_edom.live_continuity import Unsupported, plan_signature  # noqa: E402
 from obed_edom.live_host import GL_REPLAY_ENV, MM_OPACITY_ENV, ChromeCdp, LiveOutputHost, _ProgramGuard  # noqa: E402
@@ -205,6 +205,7 @@ _PLACEMENT_CONTROL_ARMS = tuple(dict.fromkeys(
 ))
 PLACEMENT_ARMS = (*_PLACEMENT_CONTROL_ARMS,
                   *(name for name in dissolve_probe.CEF_PLACEMENT.arms if name not in _PLACEMENT_CONTROL_ARMS))
+PLACEMENT_ANCHORS = ("opaque-off", "off", "m-snap-cef")
 PLACEMENT_DEV_PROFILES = dissolve_probe.CEF_PLACEMENT_DEV_PROFILES
 PLACEMENT_CONTROL_SESSIONS = (
     "startup-preview-on", "startup-offcanvas-on", "failed-preview-off", "failed-offcanvas-on",
@@ -220,6 +221,9 @@ PLACEMENT_CONTROL_SPECS = {
     "probe-frozen-video": ("preview", False, "frozen-video"),
 }
 PLACEMENT_RECORDING_ESTIMATE_BYTES = 500 * 1024 * 1024
+PLACEMENT_INJECTION_LEASE_MS = 15_000
+PLACEMENT_INJECTION_RENEW_S = 2.5
+PLACEMENT_INJECTION_MAX_INTERVAL_S = 3.0
 DX2_TAU_MAX = 8.0
 DX2_COMPLEMENT_MAX = 6.0
 DX2_NO_DIP_MIN = 248.0
@@ -345,6 +349,199 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return [_jsonable(v) for v in value]
     return value
+
+
+class PlacementInjection:
+    """A launch-bound leased placement grant used only by the qualification harness."""
+
+    def __init__(
+            self, host: LiveOutputHost, engine_identity: Callable[[], managed_obs.EngineIdentity | None],
+            target_id: str, value: str, *, lease_ms: int = PLACEMENT_INJECTION_LEASE_MS,
+            renew_s: float = PLACEMENT_INJECTION_RENEW_S,
+            monotonic: Callable[[], float] = time.monotonic,
+            unix_time: Callable[[], float] = time.time,
+            ) -> None:
+        if value not in ("snap", "frac"):
+            raise ValueError(f"unsupported placement injection {value!r}")
+        if not isinstance(lease_ms, int) or isinstance(lease_ms, bool) or not 0 < lease_ms <= PLACEMENT_INJECTION_LEASE_MS:
+            raise ValueError(f"invalid placement injection lease {lease_ms!r}")
+        if not 0 < renew_s <= PLACEMENT_INJECTION_MAX_INTERVAL_S:
+            raise ValueError(f"invalid placement injection cadence {renew_s!r}")
+        self.host = host
+        self.engine_identity = engine_identity
+        self.target_id = target_id
+        self.value = value
+        self.lease_ms = lease_ms
+        self.renew_s = renew_s
+        self.monotonic = monotonic
+        self.unix_time = unix_time
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.lock = threading.RLock()
+        self.transport: Any = None
+        self.connection_generation: int | None = None
+        self.context: str | None = None
+        self.engine: managed_obs.EngineIdentity | None = None
+        self.fingerprint: tuple[str, float, int, int] | None = None
+        self.deadline: float | None = None
+        self.last_commit: float | None = None
+        self.failure: str | None = None
+        self.record: dict[str, Any] = {
+            "schemaVersion": 1, "value": value, "leaseMs": lease_ms, "engine": None,
+            "targetId": target_id, "uniqueContextId": None, "commits": [],
+            "takeRead": None, "revoke": None,
+        }
+
+    def _evaluate(self, expression: str) -> Any:
+        if self.transport is None or self.context is None:
+            raise RuntimeError("placement injection binding is unavailable")
+        return self.transport.evaluate_in(self.context, expression, deadline_s=1.0)
+
+    def _current_binding(self) -> tuple[Any, int, str | None, Any, Any]:
+        transport = self.host._require_transport()
+        context = self.host._program_context()
+        engine = self.engine_identity()
+        fingerprint = self.host._probe_fingerprint_read(context) if context is not None else None
+        return transport, self.host._connection_generation, context, engine, fingerprint
+
+    def _binding_matches(self) -> bool | None:
+        transport, generation, context, engine, fingerprint = self._current_binding()
+        if (
+            transport is not self.transport or generation != self.connection_generation
+            or context != self.context or engine != self.engine
+        ):
+            return False
+        if fingerprint is None:
+            return None
+        return fingerprint == self.fingerprint
+
+    def _revoke_original(self) -> str:
+        try:
+            return str(dissolve_probe.commit_grant(self._evaluate, self.host._placement_token, "invalid")["read"])
+        except Exception:
+            return "unreadable"
+
+    def _fail(self, reason: str) -> None:
+        if self.failure is None:
+            self.failure = reason
+        self.stop_event.set()
+        self._revoke_original()
+
+    def _check(self, phase: str) -> bool:
+        now = self.monotonic()
+        try:
+            binding_matches = self._binding_matches()
+        except Exception:
+            binding_matches = False
+        if binding_matches is False:
+            self._fail(f"placement injection binding changed{phase}")
+        elif self.deadline is None or now >= self.deadline:
+            self._fail(f"placement injection lease expired{phase}")
+        elif self.last_commit is None or now - self.last_commit > PLACEMENT_INJECTION_MAX_INTERVAL_S:
+            self._fail(f"placement injection renewal was late{phase}")
+        return binding_matches is True and self.failure is None
+
+    def _commit(self) -> bool | None:
+        with self.lock:
+            now = self.monotonic()
+            if self.failure is not None:
+                return False
+            first = self.last_commit is None
+            if first:
+                try:
+                    binding_matches = self._binding_matches()
+                except Exception:
+                    binding_matches = False
+                if binding_matches is not True:
+                    self._fail("placement injection binding changed" if binding_matches is False
+                               else "placement injection binding could not be verified")
+                    return False
+            elif not self._check(""):
+                return None if self.failure is None else False
+            at = self.unix_time()
+            try:
+                if first:
+                    result = dissolve_probe.commit_grant(
+                        self._evaluate, self.host._placement_token, self.value, self.lease_ms)
+                else:
+                    read = self._evaluate(live_host._placement_renew_expr(
+                        self.host._placement_token, self.value, self.lease_ms))
+                    result = {"committed": read == self.value, "read": read}
+            except Exception:
+                result = {"committed": False, "read": "unreadable"}
+            self.record["commits"].append({"at": at, "committed": result["committed"], "read": result["read"]})
+            if result["committed"] is not True or result["read"] != self.value:
+                self._fail("placement injection commit or readback failed")
+                return False
+            self.last_commit = now
+            self.deadline = now + self.lease_ms / 1000.0
+            return True
+
+    def start(self, *, renewal: bool = True) -> None:
+        with self.lock:
+            transport, generation, context, engine, fingerprint = self._current_binding()
+            if context is None or engine is None or fingerprint is None:
+                raise RuntimeError("placement injection binding is incomplete")
+            self.transport = transport
+            self.connection_generation = generation
+            self.context = context
+            self.engine = engine
+            self.fingerprint = fingerprint
+            self.record["engine"] = _jsonable(engine)
+            self.record["uniqueContextId"] = context
+        if self._commit() is not True:
+            raise RuntimeError(self.failure or "placement injection commit failed")
+        if renewal:
+            self.thread = threading.Thread(
+                target=self._renew_loop, name="obed-qualification-placement-renewal", daemon=True)
+            self.thread.start()
+
+    def _renew_loop(self) -> None:
+        while not self.stop_event.wait(max(0.0, (
+                self.last_commit if self.last_commit is not None else self.monotonic()
+                ) + self.renew_s - self.monotonic())):
+            renewed = self._commit()
+            if renewed is False:
+                return
+            if renewed is None and self.stop_event.wait(0.1):
+                return
+
+    def renew_once(self) -> bool:
+        return self._commit() is True
+
+    def take_read(self, value: Any) -> None:
+        with self.lock:
+            if not self._check(" at take") and self.failure is None:
+                self._fail("placement injection binding could not be verified at take")
+            if self.failure is None and value != self.value:
+                self._fail("placement injection take readback failed")
+            self.record["takeRead"] = {"at": self.unix_time(), "value": value}
+            if self.failure is not None:
+                raise RuntimeError(self.failure)
+
+    def ensure_valid(self) -> None:
+        with self.lock:
+            if not self._check(" before final capture completed") and self.failure is None:
+                self._fail("placement injection binding could not be verified before final capture completed")
+            if self.failure is None:
+                try:
+                    read = self._evaluate(dissolve_probe.PLACEMENT_JS)
+                except Exception:
+                    read = "unreadable"
+                if read != self.value:
+                    self._fail("placement injection readback failed before final capture completed")
+            if self.failure is not None:
+                raise RuntimeError(self.failure)
+
+    def stop_and_revoke(self) -> dict[str, Any]:
+        self.stop_event.set()
+        if self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join()
+        with self.lock:
+            self.record["revoke"] = {"at": self.unix_time(), "read": self._revoke_original()}
+            if self.record["revoke"]["read"] != "invalid" and self.failure is None:
+                self.failure = "placement injection revocation was not verified"
+            return json.loads(json.dumps(self.record))
 
 
 def _read_ref_json(ref: Any, run_dir: Path, *, collection: bool = False) -> Any:
@@ -779,6 +976,202 @@ def score_placement_calibration(calibration: Any, run_dir: Path, *,
                      "timingS": {"classification": round(classification_s, 6),
                                  "classifierControls": round(classifier_controls_s, 6),
                                  "persistence": round(persistence_s, 6)}})
+
+
+def placement_evidence_mode(records: list[tuple[str, dict[str, Any]]],
+                            profile: dissolve_probe.Profile) -> tuple[str, list[str]]:
+    modes = []
+    for name, record in records:
+        if name not in profile.arms:
+            continue
+        calibration = isinstance(record.get("placementCalibration"), dict)
+        injection = isinstance(record.get("placementInjection"), dict)
+        if calibration or injection:
+            modes.append((name, "both" if calibration and injection else
+                          "calibration" if calibration else "injection"))
+    if modes and all(mode == "calibration" for _name, mode in modes):
+        return "legacy", []
+    mismatches = list(dict.fromkeys(
+        name for name, mode in modes
+        if mode != ("calibration" if name in PLACEMENT_ANCHORS else "injection")))
+    if not mismatches:
+        return "anchors+injection", []
+    return "mixed", [f"mixed placement evidence modes: {mismatches}"]
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def placement_anchor_problems(
+        anchor_records: dict[str, dict[str, Any]], anchor_scores: dict[str, dict[str, Any]],
+        ) -> tuple[list[str], list[dict[str, Any]], dict[str, str]]:
+    problems = []
+    engines = []
+    contexts = {}
+    for name in PLACEMENT_ANCHORS:
+        record = anchor_records.get(name)
+        calibration = record.get("placementCalibration") if isinstance(record, dict) else None
+        score = anchor_scores.get(name)
+        if not isinstance(calibration, dict) or not isinstance(score, dict):
+            problems.append(f"anchor {name} calibration is missing")
+            continue
+        engine = calibration.get("engine")
+        if not isinstance(engine, dict):
+            problems.append(f"anchor {name} engine is missing")
+        else:
+            engines.append(engine)
+        request = calibration.get("request")
+        context = request.get("program_context_id") if isinstance(request, dict) else None
+        if not isinstance(context, str) or not context:
+            problems.append(f"anchor {name} unique context is missing")
+        else:
+            contexts[name] = context
+        classification = score.get("classification")
+        if score.get("overall") != "PASS":
+            problems.append(f"anchor {name} product gates did not pass")
+        if not isinstance(classification, dict) or classification.get("verdict") != "frac":
+            problems.append(f"anchor {name} did not classify frac")
+    return problems, engines, contexts
+
+
+def placement_launch_evidence(
+        records: list[tuple[str, Path, dict[str, Any]]], profile: dissolve_probe.Profile, *,
+        live_probe_controls: dict[str, Any] | None,
+        product_scores: dict[Path, dict[str, Any]] | None = None,
+        pure_scores: dict[tuple[Any, ...], Any] | None = None,
+        ) -> tuple[str, list[str], list[str], list[dict[str, Any]], dict[Path, dict[str, Any]]]:
+    evidence_mode, mode_problems = placement_evidence_mode(
+        [(name, record) for name, _path, record in records], profile)
+    anchor_scores = {}
+    anchor_records = {}
+    scores_by_path = {}
+    for name, path, record in records:
+        if name not in PLACEMENT_ANCHORS:
+            continue
+        anchor_records[name] = record
+        calibration = record.get("placementCalibration")
+        if not isinstance(calibration, dict):
+            continue
+        rescored = (product_scores or {}).get(path)
+        if rescored is None:
+            rescored = score_placement_calibration(
+                calibration, path.parent, live_probe_controls=live_probe_controls, pure_scores=pure_scores)
+            if product_scores is not None:
+                product_scores[path] = rescored
+        anchor_scores[name] = rescored
+        scores_by_path[path] = rescored
+    launch_problems, anchor_engines, anchor_contexts = placement_anchor_problems(
+        anchor_records, anchor_scores)
+    contexts: dict[str, list[str]] = {}
+    for name, context in anchor_contexts.items():
+        contexts.setdefault(context, []).append(name)
+    for name, path, record in records:
+        if name in PLACEMENT_ANCHORS:
+            continue
+        injection = record.get("placementInjection")
+        context = injection.get("uniqueContextId") if isinstance(injection, dict) else None
+        if isinstance(context, str) and context:
+            contexts.setdefault(context, []).append(f"{name} ({path.parent.name})")
+    launch_problems.extend(
+        f"placement unique context is shared by {', '.join(names)}"
+        for names in contexts.values() if len(names) > 1)
+    return evidence_mode, mode_problems, launch_problems, anchor_engines, scores_by_path
+
+
+def score_placement_injection(
+        injection: Any, record: dict[str, Any], arm: dissolve_probe.Arm,
+        profile: dissolve_probe.Profile, anchor_problems: list[str], anchor_engines: list[dict[str, Any]],
+        ) -> dict[str, Any]:
+    problems = list(anchor_problems)
+    required = {
+        "schemaVersion", "value", "leaseMs", "engine", "targetId", "uniqueContextId",
+        "commits", "takeRead", "revoke",
+    }
+    if not isinstance(injection, dict):
+        problems.append("placementInjection is missing")
+        return {"overall": "INCONCLUSIVE", "gates": {
+            "placement-injection": calibration_gate("INCONCLUSIVE", problems)}, "problems": problems}
+    missing = sorted(required - set(injection))
+    unsupported = sorted(set(injection) - required)
+    problems.extend(f"placementInjection missing {name}" for name in missing)
+    problems.extend(f"placementInjection has unsupported {name}" for name in unsupported)
+    expected = arm.placement_value or profile.placement
+    value = injection.get("value")
+    if injection.get("schemaVersion") != 1:
+        problems.append("placementInjection schemaVersion is not 1")
+    if value != expected or value not in ("snap", "frac"):
+        problems.append(f"placementInjection value {value!r} != {expected!r}")
+    lease_ms = injection.get("leaseMs")
+    if (not isinstance(lease_ms, int) or isinstance(lease_ms, bool)
+            or not 0 < lease_ms <= PLACEMENT_INJECTION_LEASE_MS):
+        problems.append("placementInjection leaseMs is invalid")
+        lease_s = None
+    else:
+        lease_s = lease_ms / 1000.0
+    if not isinstance(injection.get("targetId"), str) or not injection.get("targetId"):
+        problems.append("placementInjection targetId is invalid")
+    if not isinstance(injection.get("uniqueContextId"), str) or not injection.get("uniqueContextId"):
+        problems.append("placementInjection uniqueContextId is invalid")
+    engine = injection.get("engine")
+    if len(anchor_engines) != len(PLACEMENT_ANCHORS) or any(engine != anchor for anchor in anchor_engines):
+        problems.append("placementInjection engine does not match every anchor")
+    commits = injection.get("commits")
+    commit_times = []
+    if not isinstance(commits, list) or not commits:
+        problems.append("placementInjection commits are missing")
+    else:
+        previous = None
+        for index, commit in enumerate(commits, 1):
+            if not isinstance(commit, dict) or set(commit) != {"at", "committed", "read"}:
+                problems.append(f"placementInjection commit {index} is malformed")
+                continue
+            at = commit.get("at")
+            if not _finite_number(at):
+                problems.append(f"placementInjection commit {index} time is invalid")
+                continue
+            commit_times.append(float(at))
+            if commit.get("committed") is not True or commit.get("read") != value:
+                problems.append(f"placementInjection commit {index} failed or read back a different value")
+            if previous is not None:
+                gap = float(at) - previous
+                if gap < 0 or gap > PLACEMENT_INJECTION_MAX_INTERVAL_S:
+                    problems.append(f"placementInjection renewal {index} was late")
+                if lease_s is not None and gap >= lease_s:
+                    problems.append(f"placementInjection lease expired before renewal {index}")
+            previous = float(at)
+    take = injection.get("takeRead")
+    take_at = None
+    if not isinstance(take, dict) or set(take) != {"at", "value"} or not _finite_number(take.get("at")):
+        problems.append("placementInjection takeRead is malformed")
+    else:
+        take_at = float(take["at"])
+        if take.get("value") != value or record.get("placement") != take.get("value"):
+            problems.append("placementInjection takeRead does not match the pre-advance placement read")
+        preceding = [at for at in commit_times if at <= take_at]
+        if not preceding:
+            problems.append("placementInjection takeRead is outside the committed lease")
+        elif take_at - preceding[-1] > PLACEMENT_INJECTION_MAX_INTERVAL_S:
+            problems.append("placementInjection renewal was missing at take")
+        if preceding and lease_s is not None and take_at >= preceding[-1] + lease_s:
+            problems.append("placementInjection lease expired before takeRead")
+    revoke = injection.get("revoke")
+    if not isinstance(revoke, dict) or set(revoke) != {"at", "read"} or not _finite_number(revoke.get("at")):
+        problems.append("placementInjection revoke is malformed")
+    else:
+        if revoke.get("read") != "invalid":
+            problems.append("placementInjection revocation was not verified")
+        if take_at is not None and float(revoke["at"]) < take_at:
+            problems.append("placementInjection was revoked before takeRead")
+        if commit_times and float(revoke["at"]) - commit_times[-1] > PLACEMENT_INJECTION_MAX_INTERVAL_S:
+            problems.append("placementInjection renewal did not continue through final capture")
+        if commit_times and lease_s is not None and float(revoke["at"]) >= commit_times[-1] + lease_s:
+            problems.append("placementInjection lease expired before revocation")
+    if record.get("integrityFailure") is not None:
+        problems.append(f"placement injection integrity failure: {record['integrityFailure']}")
+    verdict = "PASS" if not problems else "INCONCLUSIVE"
+    return {"overall": verdict, "gates": {
+        "placement-injection": calibration_gate(verdict, problems)}, "problems": problems}
 
 
 def write_placement_json(run_dir: Path, name: str, value: Any) -> dict[str, Any]:
@@ -2332,17 +2725,118 @@ def score_placement_capture_attempts(run_dir: Path, arm: dissolve_probe.Arm,
 
 
 def _drive_placement(host: LiveOutputHost, arm: dissolve_probe.Arm, target: dict[str, Any],
-                     capture: Callable[[], np.ndarray]) -> tuple[dict[str, Any], dict[str, np.ndarray], dict[str, Any] | None]:
+                     capture: Callable[[], np.ndarray], *,
+                     placement_read: Callable[[Any], None] | None = None,
+                     ) -> tuple[dict[str, Any], dict[str, np.ndarray], dict[str, Any] | None]:
     try:
-        driven, images = dissolve_probe.drive(host, arm, target, capture, placement=True)
+        driven, images = dissolve_probe.drive(
+            host, arm, target, capture, placement=True, placement_read=placement_read)
         return driven, images, None
     except dissolve_probe.ReadinessTimeout as exc:
         return {}, {}, {"verdict": "INCONCLUSIVE", "kind": "readiness", "message": str(exc)}
 
 
+def _placement_injected_session_attempt(
+        name: str, ctx: dict[str, Any], decision: dict[str, Any] | None, *,
+        run_name: str, attempt: int | None = None,
+        ) -> tuple[dict[str, Any], dict[str, Any], dict[str, np.ndarray]]:
+    arm = dissolve_probe.ARMS[name]
+    scope = placement_scope(ctx.get("tier", "full"), ctx.get("devProfile"))
+    record: dict[str, Any] = {
+        "arm": name, "load": os.getloadavg()[0], "headlessBefore": mm_opacity_probe.headless_chromes(),
+        **scope, "acquisition": placement_acquisition(ctx),
+    }
+    timing = record["timingS"] = {"classification": 0.0, "recordingAnalysis": 0.0, "collectionCopy": 0.0}
+    if attempt is not None:
+        record["captureAttempt"] = attempt
+    images: dict[str, np.ndarray] = {}
+    host: LiveOutputHost | None = None
+    injection: PlacementInjection | None = None
+    started = time.monotonic()
+    run_dir = ctx["shots"] / "runs" / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        t = time.monotonic()
+        resolved = dissolve_probe.resolve(arm, ctx["shots"] / "scratch", decision, tag=name)
+        timing["preparation"] = round(time.monotonic() - t, 6)
+        record.update(resolved.fields())
+        acquisition_started = time.monotonic()
+        host = LiveOutputHost(
+            resolved.root, resolved.slides, resolver=resolved.resolver,
+            transport_factory=dissolve_probe.hooked_transport(before=PLACEMENT_ALPHA_JS),
+            attach_endpoint=ctx["endpoint"], attach_match=ctx["target"], bridge="obs-managed", output_rate=ctx["rate"],
+            continuity=arm.continuity, gl_replay="off", mm_opacity="auto" if arm.mode == "on" else "off",
+            calibration=None, placement_mode="probe",
+        )
+        with dissolve_probe.serving(arm.splice):
+            host.start()
+        value = arm.placement_value or dissolve_probe.CEF_PLACEMENT.placement
+        injection = PlacementInjection(host, ctx["calibration"].identity, ctx["target"], value)
+        injection.start()
+        transport = host._require_transport()
+        record["inputLiveS"] = await_input(transport)
+        transport.evaluate("(function(){var n=document.getElementById('obed-placement-alpha');if(n)n.remove()})()")
+        record["page"] = "alpha" if host.output.get("alpha") else "screen"
+        record["output"] = {k: host.output.get(k) for k in ("mmOpacity", "continuity", "placement")}
+        record["g2"] = ((transport.evaluate(GL_REPLAY_READ_JS) or {}).get("api") or {}).get("state")
+        with source_shots(*ctx["creds"]) as shot:
+            raw: dict[int, np.ndarray] = {}
+            driven, captured, integrity_failure = _drive_placement(
+                host, arm, resolved.target, lambda: raw.setdefault(id(image := shot()), image),
+                placement_read=injection.take_read)
+            images = {key: unpremultiply(value) if raw.get(id(value)) is value else value
+                      for key, value in captured.items()}
+        record.update(driven)
+        if integrity_failure is not None:
+            record["integrityFailure"] = integrity_failure
+        else:
+            injection.ensure_valid()
+        timing["acquisition"] = round(time.monotonic() - acquisition_started, 6)
+        missing = dissolve_evidence(record)
+        if integrity_failure is not None:
+            record["error"] = f"placement readiness INCONCLUSIVE: {integrity_failure['message']}"
+        elif missing:
+            record["error"] = f"placement evidence missing: {'; '.join(missing)}"
+    except Exception:
+        record["error"] = traceback.format_exc()
+    finally:
+        if injection is not None:
+            record["placementInjection"] = injection.stop_and_revoke()
+            if injection.failure is not None:
+                record["integrityFailure"] = {
+                    "verdict": "INCONCLUSIVE", "kind": "placement-injection", "message": injection.failure,
+                }
+        if host is not None:
+            try:
+                host.stop()
+            except Exception as exc:
+                record["stopError"] = str(exc)
+    timing["script"] = round(time.monotonic() - started, 6)
+    t = time.monotonic()
+    dissolve_probe.save_run(ctx["shots"], run_name, record, images)
+    timing["reportWrite"] = round(time.monotonic() - t, 6)
+    saved_path = run_dir / "record.json"
+    if saved_path.is_file():
+        saved = json.loads(saved_path.read_text())
+        saved["timingS"] = timing
+        saved_path.write_text(json.dumps(saved))
+    out: dict[str, Any] = {
+        "session": name, "runDir": str(run_dir), "page": record.get("page"), **scope,
+        "output": record.get("output"), "timingS": timing,
+    }
+    if record.get("integrityFailure"):
+        out["integrityFailure"] = record["integrityFailure"]
+    if record.get("error"):
+        out["fatal"] = str(record["error"])[-3000:]
+    return out, record, images
+
+
 def _placement_session_attempt(name: str, ctx: dict[str, Any], decision: dict[str, Any] | None, *,
                                run_name: str, attempt: int | None = None,
                                ) -> tuple[dict[str, Any], dict[str, Any], dict[str, np.ndarray]]:
+    if name not in PLACEMENT_ANCHORS:
+        return _placement_injected_session_attempt(
+            name, ctx, decision, run_name=run_name, attempt=attempt)
     arm = dissolve_probe.ARMS[name]
     scope = placement_scope(ctx.get("tier", "full"), ctx.get("devProfile"))
     record: dict[str, Any] = {"arm": name, "load": os.getloadavg()[0],
@@ -3517,6 +4011,23 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None, *,
             runs[name] = (json.loads(paths[-1].read_text()), dissolve_probe.RunImages(paths[-1].parent))
         except (OSError, json.JSONDecodeError):
             pass
+    evidence_records = []
+    for name, paths in run_paths.items():
+        if name not in profile.arms:
+            continue
+        for path in paths:
+            try:
+                evidence_records.append((name, path, json.loads(path.read_text())))
+            except (OSError, json.JSONDecodeError):
+                pass
+    evidence_mode, mode_problems, anchor_problems, anchor_engines, anchor_scores = placement_launch_evidence(
+        evidence_records, profile, live_probe_controls=control_rows["probe"],
+        product_scores=product_scores, pure_scores=pure_scores)
+    check(checks, "placement evidence composition", evidence_mode,
+          evidence_mode in ("legacy", "anchors+injection"), "legacy or anchors+injection")
+    integrity_problems.extend(mode_problems)
+    if evidence_mode == "anchors+injection":
+        integrity_problems.extend(anchor_problems)
     lut, lut_detail = dissolve_probe.launch_lut(runs, cal or dissolve_probe.Calibration(), profile=profile)
     check(checks, "CEF placement tone observation", lut_detail, lut is not None, "measured identity/analytic/table map")
     tone_summary = {"complete": False, "applied": "identity", "observed": lut_detail.get("kind"),
@@ -3554,16 +4065,29 @@ def placement_gates(run: dict[str, Any], decision: dict[str, Any] | None, *,
                     telemetry["toneRows"] = updated_tone
                     integrity["telemetry"] = write_placement_json(path.parent, "telemetry", telemetry)
                     telemetry_changed = True
-            rescored = None if telemetry_changed else (product_scores or {}).get(path)
-            if rescored is None:
+            rescored = None if telemetry_changed else (anchor_scores.get(path) or (product_scores or {}).get(path))
+            if evidence_mode == "mixed":
+                rescored = {"overall": "INCONCLUSIVE", "gates": {
+                    "placement-evidence": calibration_gate("INCONCLUSIVE", mode_problems)},
+                    "problems": mode_problems}
+            elif evidence_mode == "anchors+injection" and name not in PLACEMENT_ANCHORS:
+                rescored = score_placement_injection(
+                    record.get("placementInjection"), record, dissolve_probe.ARMS[name], profile,
+                    anchor_problems, anchor_engines)
+            elif rescored is None:
                 rescored = score_placement_calibration(
                     encoded, path.parent, live_probe_controls=control_rows["probe"], pure_scores=pure_scores)
-                if product_scores is not None:
-                    product_scores[path] = rescored
+            if product_scores is not None:
+                product_scores[path] = rescored
             if integrity_problem is not None:
                 rescored = {**rescored, "overall": "INCONCLUSIVE",
                             "problems": [*rescored.get("problems", []), integrity_problem]}
-            if write_updates and isinstance(encoded, dict):
+            if evidence_mode == "anchors+injection" and rescored.get("overall") == "INCONCLUSIVE":
+                evidence_problems = rescored.get("problems") or ["placement evidence was inconclusive"]
+                integrity_problems.extend(
+                    f"{name} attempt {attempt}: {problem}" for problem in evidence_problems
+                    if problem not in anchor_problems)
+            if write_updates and isinstance(record.get("placementCalibration"), dict):
                 encoded["gates"] = rescored["gates"]
             if write_updates:
                 path.write_text(json.dumps(record))
@@ -3651,11 +4175,12 @@ def placement_launch_record(run: dict[str, Any]) -> dict[str, Any]:
                 continue
             scopes.append((record.get("tier"), record.get("devProfile")))
             calibration = record.get("placementCalibration")
-            if not isinstance(calibration, dict):
-                continue
-            if calibration.get("backend") == "cef" and isinstance(calibration.get("engine"), dict):
+            injection = record.get("placementInjection")
+            if isinstance(calibration, dict) and calibration.get("backend") == "cef" and isinstance(calibration.get("engine"), dict):
                 cef_identities.add(json.dumps(calibration["engine"], sort_keys=True))
-            if calibration.get("backend") == "chrome-harness":
+            if isinstance(injection, dict) and isinstance(injection.get("engine"), dict):
+                cef_identities.add(json.dumps(injection["engine"], sort_keys=True))
+            if isinstance(calibration, dict) and calibration.get("backend") == "chrome-harness":
                 identity = (calibration.get("input") or {}).get("identity") or {}
                 target = identity.get("target_id")
                 telemetry = _telemetry(calibration, path)
@@ -4538,6 +5063,11 @@ def score_placement_runs(root: Path) -> int | None:
                     if name in PLACEMENT_CONTROL_SESSIONS]
         probe_controls = (placement_control_rows(controls)["probe"]
                           if {row["session"] for row in controls} == set(PLACEMENT_CONTROL_SESSIONS) else None)
+        evidence_records = [(name, path, record) for name, path, record, error in records
+                            if name in profile.arms and error is None]
+        evidence_mode, mode_problems, anchor_problems, anchor_engines, _anchor_scores = placement_launch_evidence(
+            evidence_records, profile, live_probe_controls=probe_controls,
+            product_scores=product_scores, pure_scores=pure_scores)
         product_ok = True
         for session_name, path, record, error in records:
             if error:
@@ -4549,15 +5079,27 @@ def score_placement_runs(root: Path) -> int | None:
                 rescored = {"overall": control["verdict"], "gates": {"placement-control": control},
                             "problems": control["problems"]}
                 backend = "control"
+            elif session_name in profile.arms and evidence_mode == "mixed":
+                rescored = {"overall": "INCONCLUSIVE", "gates": {
+                    "placement-evidence": calibration_gate("INCONCLUSIVE", mode_problems)},
+                    "problems": mode_problems}
+                backend = None
+            elif session_name in profile.arms and evidence_mode == "anchors+injection" and session_name not in PLACEMENT_ANCHORS:
+                rescored = score_placement_injection(
+                    record.get("placementInjection"), record, dissolve_probe.ARMS[session_name], profile,
+                    anchor_problems, anchor_engines)
+                backend = "harness-injection"
             elif isinstance(record.get("placementCalibration"), dict):
                 calibration = record["placementCalibration"]
-                rescored = score_placement_calibration(
-                    calibration, path.parent,
-                    live_probe_controls=probe_controls if calibration.get("backend") == "cef" else None,
-                    pure_scores=pure_scores)
+                rescored = product_scores.get(path)
+                if rescored is None:
+                    rescored = score_placement_calibration(
+                        calibration, path.parent,
+                        live_probe_controls=probe_controls if calibration.get("backend") == "cef" else None,
+                        pure_scores=pure_scores)
                 backend = calibration.get("backend")
             else:
-                problem = "placementCalibration missing"
+                problem = "placement evidence missing"
                 rescored = {"overall": "INCONCLUSIVE", "gates": {
                     "placement-evidence": calibration_gate("INCONCLUSIVE", [problem])}, "problems": [problem]}
                 backend = None
@@ -4780,7 +5322,8 @@ def _finalize_placement_persistence(
 def placement_disk_preflight(out_dir: Path, home: Path, takes: int, *,
                              profile: dissolve_probe.Profile = dissolve_probe.CEF_PLACEMENT,
                              rates: tuple[int, ...] = MMO_RATES) -> dict[str, Any]:
-    attempts = sum(3 if dissolve_probe.ARMS[name].counter_strip == "distinct" else 1 for name in profile.arms)
+    attempts = sum(3 if dissolve_probe.ARMS[name].counter_strip == "distinct" else 1
+                   for name in PLACEMENT_ANCHORS if name in profile.arms)
     recordings = attempts * len(rates) * takes * 2
     non_pass = recordings * PLACEMENT_RECORDING_ESTIMATE_BYTES
     working = 2 * PLACEMENT_RECORDING_ESTIMATE_BYTES
@@ -4796,7 +5339,7 @@ def placement_disk_preflight(out_dir: Path, home: Path, takes: int, *,
             f"free is {out_free / 1024 ** 3:.1f} GiB at {out_dir} and {home_free / 1024 ** 3:.1f} GiB at {home.parent}"
         )
     detail = {"profile": profile.name, "rates": list(rates), "takes": takes,
-              "acquisitionPath": "per-context-calibration", "recordings": recordings,
+              "acquisitionPath": "anchors+injection", "recordings": recordings,
               "nonPassRetentionBytes": non_pass, "workingBytes": working, "requiredOutBytes": required_out,
               "nonPassRetentionBytesPerSession": 2 * PLACEMENT_RECORDING_ESTIMATE_BYTES,
               "outFreeBytes": out_free, "homeFreeBytes": home_free}

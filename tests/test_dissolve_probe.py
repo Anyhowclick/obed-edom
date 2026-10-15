@@ -2086,7 +2086,10 @@ def test_drive_placement_is_opt_in_and_records_predicates(monkeypatch):
     monkeypatch.setattr(probe, "record_dsk_counter_timing", lambda *_args: None)
     monkeypatch.setattr(probe, "_final_readiness", lambda *_args, **_kwargs:
                         ({"durationMs": 3.0, "predicates": predicates}, image))
-    record, images = probe.drive(Host(), arm, target, lambda: image, placement=True)
+    placement_reads = []
+    record, images = probe.drive(
+        Host(), arm, target, lambda: image, placement=True, placement_read=placement_reads.append)
+    assert placement_reads == ["frac"]
     assert record["positioning"] == positioning
     assert record["readiness"] == {"durationMs": 5.0,
                                     "beforeCapture": {"durationMs": 2.0, "predicates": predicates},

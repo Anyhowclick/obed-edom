@@ -2526,7 +2526,8 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
 
             monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=10 ** 15))
             disk = q.placement_disk_preflight(tmp_path, tmp_path / "home", 1)
-            assert disk["recordings"] == (len(q.PLACEMENT_ARMS) + 2) * len(q.MMO_RATES) * 2
+            assert disk["acquisitionPath"] == "anchors+injection"
+            assert disk["recordings"] == len(q.PLACEMENT_ANCHORS) * len(q.MMO_RATES) * 2
             assert disk["requiredOutBytes"] == 2 * q.PLACEMENT_RECORDING_ESTIMATE_BYTES
             monkeypatch.setattr(q.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=1))
             with pytest.raises(RuntimeError, match="placement needs about"):
@@ -2535,6 +2536,126 @@ def test_placement_record_round_trip_and_offline_gates(monkeypatch: pytest.Monke
             large.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
             large_ref = q.dissolve_probe.placement_file_ref(large, tmp_path)
             assert q.dissolve_probe._placement_ref_bytes(large_ref, tmp_path, load=False) == b""
+
+
+def test_placement_injection_renews_aborts_on_binding_change_and_always_revokes() -> None:
+    class Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def unix(self) -> float:
+            return 1_000.0 + self.now
+
+    class Transport:
+        def __init__(self) -> None:
+            self.value = "invalid"
+            self.revokes = 0
+
+        def evaluate_in(self, _context: str, expression: str, **_kwargs: Any) -> Any:
+            if expression == q.dissolve_probe.PLACEMENT_JS:
+                return self.value
+            if expression == q.live_host._placement_renew_expr(
+                    "token", "frac", q.PLACEMENT_INJECTION_LEASE_MS):
+                if self.value != "frac":
+                    return None
+                return self.value
+            if "__obedGrant" in expression:
+                if '"invalid"' in expression:
+                    self.value = "invalid"
+                    self.revokes += 1
+                elif '"frac"' in expression:
+                    self.value = "frac"
+                return True
+            raise AssertionError(expression)
+
+    engine = managed_obs.EngineIdentity(41, 42.0, 3)
+
+    class Host:
+        _placement_token = "token"
+        _connection_generation = 7
+
+        def __init__(self) -> None:
+            self.transport = Transport()
+            self.context = "context-1"
+            self.fingerprint = ("CEF", 1.0, 1920, 1080)
+
+        def _require_transport(self) -> Transport:
+            return self.transport
+
+        def _program_context(self) -> str:
+            return self.context
+
+        def _probe_fingerprint_read(self, context: str) -> tuple[str, float, int, int] | None:
+            return self.fingerprint if context == self.context else None
+
+    clock = Clock()
+    host = Host()
+    injection = q.PlacementInjection(
+        host, lambda: engine, "target-1", "frac", monotonic=clock.monotonic, unix_time=clock.unix)
+    try:
+        injection.start(renewal=False)
+        for _ in range(3):
+            clock.now += q.PLACEMENT_INJECTION_RENEW_S
+            assert injection.renew_once() is True
+        clock.now += 0.25
+        injection.take_read("frac")
+        host.context = "context-2"
+        clock.now += q.PLACEMENT_INJECTION_RENEW_S
+        assert injection.renew_once() is False
+        assert injection.failure == "placement injection binding changed"
+    finally:
+        record = injection.stop_and_revoke()
+    assert set(record) == {"schemaVersion", "value", "leaseMs", "engine", "targetId",
+                           "uniqueContextId", "commits", "takeRead", "revoke"}
+    commit_times = [row["at"] for row in record["commits"]]
+    assert all(b - a <= 3.0 for a, b in zip(commit_times, commit_times[1:]))
+    assert record["takeRead"]["value"] == "frac"
+    assert record["revoke"]["read"] == "invalid"
+    assert host.transport.revokes >= 2
+
+    late_clock = Clock()
+    late = q.PlacementInjection(
+        Host(), lambda: engine, "target-1", "frac",
+        monotonic=late_clock.monotonic, unix_time=late_clock.unix)
+    late.start(renewal=False)
+    late_clock.now += 3.1
+    assert late.renew_once() is False
+    assert late.failure == "placement injection renewal was late"
+    late.stop_and_revoke()
+
+    fresh = q.PlacementInjection(
+        Host(), lambda: engine, "target-1", "frac",
+        monotonic=late_clock.monotonic, unix_time=late_clock.unix)
+    fresh.start(renewal=False)
+    with pytest.raises(RuntimeError, match="take readback failed"):
+        fresh.take_read("invalid")
+    fresh.stop_and_revoke()
+
+    revive_clock = Clock()
+    revive_host = Host()
+    revive = q.PlacementInjection(
+        revive_host, lambda: engine, "target-1", "frac",
+        monotonic=revive_clock.monotonic, unix_time=revive_clock.unix)
+    revive.start(renewal=False)
+    revive_host.transport.value = "invalid"
+    revive_clock.now += q.PLACEMENT_INJECTION_RENEW_S
+    assert revive.renew_once() is False and revive_host.transport.value == "invalid"
+    revive.stop_and_revoke()
+
+    retry_clock = Clock()
+    retry_host = Host()
+    retry = q.PlacementInjection(
+        retry_host, lambda: engine, "target-1", "frac",
+        monotonic=retry_clock.monotonic, unix_time=retry_clock.unix)
+    retry.start(renewal=False)
+    retry_host.fingerprint = None
+    retry_clock.now += q.PLACEMENT_INJECTION_RENEW_S
+    assert retry.renew_once() is False and retry.failure is None
+    retry_host.fingerprint = ("CEF", 1.0, 1920, 1080)
+    assert retry.renew_once() is True
+    retry.stop_and_revoke()
 
 
 def test_placement_rescore_launch_matrix_and_dev_relocation(
@@ -2549,7 +2670,9 @@ def test_placement_rescore_launch_matrix_and_dev_relocation(
 
     def score_calibration(_calibration: Any, run_dir: Path, **_kwargs: Any) -> dict[str, Any]:
         score_calls.append(Path(run_dir) / "record.json")
-        return {"overall": "PASS", "gates": {"probe-chrome-harness": {"verdict": "PASS"}}, "problems": []}
+        classification = _calibration.get("testClassification", "frac") if isinstance(_calibration, dict) else "frac"
+        return {"overall": "PASS", "classification": {"verdict": classification},
+                "gates": {"probe-chrome-harness": {"verdict": "PASS"}}, "problems": []}
 
     monkeypatch.setattr(q, "score_placement_control", score_control)
     monkeypatch.setattr(q, "score_placement_calibration", score_calibration)
@@ -2563,7 +2686,10 @@ def test_placement_rescore_launch_matrix_and_dev_relocation(
     def build(root: Path, rate: int, token: int, *, tier: str = "full", dev_profile: str | None = None,
               legacy: bool = False, launch_id: str | None = None, skip: tuple[str, ...] = (),
               child_override: tuple[str, dict[str, Any]] | None = None, missing_dsk_attempt: bool = False,
-              valid: bool = True, renderer_images: bool = False, dev_passed: bool = True) -> None:
+              valid: bool = True, renderer_images: bool = False, dev_passed: bool = True,
+              injection_fault: tuple[str, str] | None = None,
+              anchor_classification: tuple[str, str] | None = None,
+              mixed_mode: str | None = None) -> None:
         ts = f"{root.name}-{rate}-{token}"
         launch = launch_id or f"{ts}:target-{token}"
         profile = q.placement_profile(tier, dev_profile)
@@ -2595,7 +2721,51 @@ def test_placement_rescore_launch_matrix_and_dev_relocation(
                     body, images = media_run(name)
                     body.update(scope)
                     body.update(acquisition)
-                body.update(arm=name, placementCalibration={"backend": "cef", "engine": engine})
+                value = q.dissolve_probe.ARMS[name].placement_value or profile.placement
+                if legacy or name in q.PLACEMENT_ANCHORS:
+                    body.update(arm=name, placementCalibration={
+                        "backend": "cef", "engine": engine,
+                        "request": {"program_context_id": f"context-anchor-{name}-{token}"},
+                        **({"testClassification": anchor_classification[1]}
+                           if anchor_classification and name == anchor_classification[0] else {}),
+                    })
+                else:
+                    body.update(arm=name, placement=value, placementInjection={
+                        "schemaVersion": 1, "value": value, "leaseMs": 15_000, "engine": engine,
+                        "targetId": f"target-{token}", "uniqueContextId": f"context-{name}-{token}",
+                        "commits": [
+                            {"at": 100.0, "committed": True, "read": value},
+                            {"at": 102.5, "committed": True, "read": value},
+                            {"at": 105.0, "committed": True, "read": value},
+                        ],
+                        "takeRead": {"at": 107.0, "value": value},
+                        "revoke": {"at": 108.0, "read": "invalid"},
+                    })
+                    if injection_fault and name == injection_fault[0]:
+                        fault = injection_fault[1]
+                        injection = body["placementInjection"]
+                        if fault == "expired":
+                            injection["commits"] = [injection["commits"][0]]
+                            injection["takeRead"]["at"] = 120.0
+                        elif fault == "readback":
+                            injection["commits"][1]["read"] = "invalid"
+                        elif fault == "binding":
+                            injection["uniqueContextId"] = f"context-anchor-opaque-off-{token}"
+                        elif fault == "duplicate-context":
+                            injection["uniqueContextId"] = f"context-on2-{token}"
+                        elif fault == "revoke":
+                            injection["revoke"]["read"] = value
+                        elif fault == "engine":
+                            injection["engine"] = {**engine, "pid": 999}
+                        elif fault == "value":
+                            injection["value"] = "frac" if value == "snap" else "snap"
+                        elif fault == "missing":
+                            body.pop("placementInjection")
+                        else:
+                            raise AssertionError(fault)
+                if mixed_mode == name:
+                    body.pop("placementInjection", None)
+                    body["placementCalibration"] = {"backend": "cef", "engine": engine}
                 if q.dissolve_probe.ARMS[name].counter_strip == "distinct":
                     attempt = folder / "attempt-1"
                     parent = {"arm": name, **scope, **acquisition,
@@ -2634,6 +2804,27 @@ def test_placement_rescore_launch_matrix_and_dev_relocation(
 
     score_case("complete-pair", [{"rate": rate, "token": token} for rate, token in pair], 0)
     score_case("legacy-pair", [{"rate": rate, "token": token, "legacy": True} for rate, token in pair], 0)
+
+    def inconclusive_case(name: str, **fault: Any) -> None:
+        root = score_case(name, [
+            {"rate": 25, "token": 1}, {"rate": 30, "token": 2, **fault},
+        ], 1)
+        report = json.loads(max(root.glob("placement-rescore-*.json")).read_text())
+        session = ((fault.get("injection_fault") or (None,))[0]
+                   or fault.get("mixed_mode") or "noblend")
+        assert any(row["session"] == session and row["overall"] == "INCONCLUSIVE"
+                   for row in report["results"])
+
+    inconclusive_case("expired-renewal", injection_fault=("noblend", "expired"))
+    inconclusive_case("failed-injection-readback", injection_fault=("noblend", "readback"))
+    inconclusive_case("changed-injection-binding", injection_fault=("noblend", "binding"))
+    inconclusive_case("duplicate-injection-context", injection_fault=("noblend", "duplicate-context"))
+    inconclusive_case("missing-injection", injection_fault=("noblend", "missing"))
+    inconclusive_case("unverified-injection-revoke", injection_fault=("noblend", "revoke"))
+    inconclusive_case("injection-engine-mismatch", injection_fault=("noblend", "engine"))
+    inconclusive_case("anchor-not-frac", anchor_classification=("off", "snap"))
+    inconclusive_case("wrong-injection-value", injection_fault=("noblend", "value"))
+    inconclusive_case("mixed-evidence-modes", mixed_mode="noblend")
     score_case("missing-rate", [{"rate": 25, "token": 1}], 1)
     score_case("duplicate-launch-id", [
         {"rate": 25, "token": 1, "launch_id": "duplicate"},

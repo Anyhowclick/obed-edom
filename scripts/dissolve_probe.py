@@ -5103,7 +5103,9 @@ def _final_readiness(host: Any, arm: Arm, target: dict[str, Any], capture: Calla
 
 
 def _drive_placement(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.ndarray], *,
-                     screencast: Callable[[], Any] | None = None) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+                     screencast: Callable[[], Any] | None = None,
+                     placement_read: Callable[[Any], None] | None = None,
+                     ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     if arm.row is not None or arm.inject or arm.bridge:
         raise ValueError("placement driver does not support lifecycle, injection or bridge arms")
     transport = host._require_transport()
@@ -5115,6 +5117,8 @@ def _drive_placement(host: Any, arm: Arm, target: dict[str, Any], capture: Calla
         record["pauseId"] = evaluate(f"window.__obedDx.pause({PAUSE_FRAME}, {FPS})")
     record["stage"] = evaluate(STAGE_JS)
     record["placement"] = evaluate(PLACEMENT_JS)
+    if placement_read is not None:
+        placement_read(record["placement"])
     record["dsf"] = evaluate("devicePixelRatio")
     record["viewport"] = evaluate("[innerWidth, innerHeight]")
     foreground = evaluate("window.__obedDx.foreground()") or {}
@@ -5149,9 +5153,12 @@ def _drive_placement(host: Any, arm: Arm, target: dict[str, Any], capture: Calla
 
 
 def drive(host: Any, arm: Arm, target: dict[str, Any], capture: Callable[[], np.ndarray], *,
-          screencast: Callable[[], Any] | None = None, placement: bool = False) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+          screencast: Callable[[], Any] | None = None, placement: bool = False,
+          placement_read: Callable[[Any], None] | None = None,
+          ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     if placement:
-        return _drive_placement(host, arm, target, capture, screencast=screencast)
+        return _drive_placement(
+            host, arm, target, capture, screencast=screencast, placement_read=placement_read)
     return _drive_legacy(host, arm, target, capture, screencast=screencast)
 
 
