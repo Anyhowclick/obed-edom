@@ -23,8 +23,17 @@ from obed_edom.html_preview import (
     safe_export_file,
 )
 from obed_edom.live_runtime import RUNTIME_VERSION, SUPPORTED_PLAYERS
-from obed_edom.live_continuity import Unsupported
-from obed_edom.live_host import CONTINUITY_ENV, GL_REPLAY_ENV, derive_runtime, not_carried
+from obed_edom.live_continuity import Unsupported, codec_report
+from obed_edom.live_host import (
+    ATTACH_ENV,
+    CONTINUITY_ENV,
+    LiveHostError,
+    derive_runtime,
+    gl_replay_env_preference,
+    is_sixteen_nine,
+    movie_codec_refusal,
+    not_carried,
+)
 from obed_edom.live_session import LiveSessionService
 from obed_edom.settings import load_settings, save_settings
 
@@ -68,15 +77,26 @@ def _output_settings(settings: dict) -> dict:
 def _deck_qualification(root: Path, slides: list[dict], settings: dict) -> dict:
     if os.environ.get(CONTINUITY_ENV) == "off":
         return {"mode": "off", "reason": f"{CONTINUITY_ENV} is off.", "notCarried": []}
-    preference = os.environ.get(GL_REPLAY_ENV, "auto" if settings["akOutputMode"] == "keyer" else "off")
-    if preference not in ("auto", "off"):
-        return {"mode": "unsupported", "reason": "GL replay must be auto or off.", "notCarried": []}
+    keyer = settings["akOutputMode"] == "keyer"
+    try:
+        preference = gl_replay_env_preference(managed=keyer)
+    except LiveHostError as exc:
+        return {"mode": "unsupported", "reason": str(exc), "notCarried": []}
     derived = derive_runtime(root, slides, gl_replay=preference == "auto")
     if isinstance(derived, Unsupported) and preference == "auto":
         derived = derive_runtime(root, slides)
     if isinstance(derived, Unsupported):
         return {"mode": "unsupported", "reason": derived.reason, "notCarried": []}
-    return {"mode": "qualified", "reason": None, "notCarried": not_carried(derived[0], slides)}
+    plan, runtime = derived
+    try:
+        codecs = codec_report(root, slides)
+    except Exception:  # noqa: BLE001 - fail closed like the host
+        codecs = []
+    attach = keyer or bool((os.environ.get(ATTACH_ENV) or "").strip())
+    reason = movie_codec_refusal(runtime, codecs, attach=attach, headless=False, managed=keyer)
+    if reason is not None:
+        return {"mode": "unsupported", "reason": reason, "notCarried": []}
+    return {"mode": "qualified", "reason": None, "notCarried": not_carried(plan, slides)}
 
 
 def _converted_movies(manifest: dict) -> list[dict]:
@@ -143,7 +163,7 @@ def live_router(runner, *, service=None, host_factory=None, displays=None, engin
             raise ValueError("This player version is not supported for live controls.")
         header, _ = load_header(root)
         width, height = header.get("slideWidth", 0), header.get("slideHeight", 0)
-        if not width or not height or abs(width / height - 16 / 9) > 0.001:
+        if not width or not height or not is_sixteen_nine(width, height):
             raise ValueError("Live output currently requires a prepared 16:9 deck.")
         if header.get("showMode") != 0:
             raise ValueError("Live output requires manual presentation mode.")
