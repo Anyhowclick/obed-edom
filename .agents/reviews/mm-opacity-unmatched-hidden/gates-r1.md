@@ -67,7 +67,4 @@ Measurements:
 
 ## Evidence
 
-All of it is outside every `output/`:
-- Raw runs: in the session scratchpad.
-- The UH-1 driver and the trimmed result: under `uh1/`.
-- Source export: `~/Desktop/Convert wall to 16x9 CGs/F2-evidence-2026-10-14/F2-html-old-stock`, read-only and copied per arm.
+Pruned after merge (2026-10-15): raw run dirs, the UH-1 driver, the UH-0 changed-set script/JSON, the UH-2 logs and the old F2 evidence export (`F2-evidence-2026-10-14`) are gone; the numbers above are the record. The regression is held by the committed fixture `tests/fixtures/live_continuity/f2_slide3_mm_subtree.json`.

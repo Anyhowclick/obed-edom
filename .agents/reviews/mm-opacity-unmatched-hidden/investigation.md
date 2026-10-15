@@ -2,6 +2,8 @@
 
 **Investigator: GPT-6 Astra; 2026-10-15. Offline source/data investigation, then fix planning. No implementation or browser reproduction performed.**
 
+> Post-merge note (2026-10-15): `offline_scan.py`, `offline_evidence.json`, `runtime_read_snapshot.py` and the `F2-evidence-2026-10-14` exports cited below were pruned after #282 merged; the fix is in the plan and gate record.
+
 ## 1. Finding
 
 The two duplicates are source-slide leaves flattened into the Magic Move canvas. The stock renderer loses their zero-opacity wrappers, ignores their constant `opacity 0→0` tracks, and does not implement their `hidden` tracks. It therefore draws each at **Opacity 1 throughout the move, including its final draw**. The shipped opacity patch knows the ancestor product is zero but rejects the leaf's encoding, falling back to that stock draw. The final canvas remains until the next scene replaces it.
