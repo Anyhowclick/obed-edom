@@ -33,7 +33,7 @@ Branch `claude/suspicious-yalow-7eadf3`, cut from main `a70bbc0e`. Plan `.agents
 | Full suite, Python 3.10.10 floor | 11003 passed, 38 skipped, 1 xfailed |
 | Dashboard `test:ui` / `test:maps` | 330 passed (44 files) / 542 + 2 passed |
 | G2 live F2 prepare (owner) | pending |
-| G3 owner eye | pending. Repaired copies `~/Desktop/StageT-text-glyph-evidence/2026-10-15/attempt-0{1,2}-repaired` (trees `ea5a63b6…`, `5d63e95e…`; 0 hits after) beside the unrepaired `attempt-0{1,2}` controls. Check all eight Malaysia letters through the Twist & Scale build and the settled slide (i in 01, s in 02), and the 176×205 map. |
+| G3 owner eye | **PASS (owner, 2026-10-15): the repaired copies are correct.** Chrome via a local server, stock player. Repaired copies `~/Desktop/StageT-text-glyph-evidence/2026-10-15/attempt-0{1,2}-repaired` (trees `ea5a63b6…`, `5d63e95e…`; 0 hits after) beside the unrepaired `attempt-0{1,2}` controls. Check all eight Malaysia letters through the Twist & Scale build and the settled slide (i in 01, s in 02), and the 176×205 map. |
 
 G1 rows:
 
