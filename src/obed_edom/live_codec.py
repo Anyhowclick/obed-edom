@@ -1,12 +1,13 @@
-"""Detect a movie file's video codec from its ISO-BMFF/QuickTime box tree.
+"""Detect a movie file's video codec from its BMFF or WebM metadata.
 
-No ffprobe (not installed) and no third-party dependency: this reads only box
-headers, seeking past `mdat` payloads rather than loading them, and returns
-`None` on anything it cannot parse instead of raising.
+No ffprobe or third-party dependency: this reads only container metadata,
+seeking past media payloads, and returns `None` on anything it cannot parse.
 """
 
 from __future__ import annotations
 
+import math
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable, TypeVar
@@ -18,12 +19,35 @@ _VideoTrak = tuple[str, _Span, _Span, _Span, _Span]
 _HEADER_SIZE = 8
 _EXTENDED_HEADER_SIZE = 16
 _MAX_BOXES = 20_000
+_MAX_EBML_ELEMENTS = 20_000
 
 _H264_FOURCCS = frozenset({"avc1", "avc3"})
 _HEVC_FOURCCS = frozenset({"hvc1", "hev1"})
 _PRORES_FOURCCS = frozenset({"apch", "apcn", "apcs", "apco", "ap4h", "ap4x"})
 _AV1_FOURCCS = frozenset({"av01"})
-_VP9_FOURCCS = frozenset({"vp09"})
+_VP9_FOURCCS = frozenset({"vp09", "V_VP9"})
+
+_EBML = 0x1A45DFA3
+_DOCTYPE = 0x4282
+_SEGMENT = 0x18538067
+_INFO = 0x1549A966
+_TIMECODE_SCALE = 0x2AD7B1
+_DURATION = 0x4489
+_TRACKS = 0x1654AE6B
+_TRACK_ENTRY = 0xAE
+_TRACK_TYPE = 0x83
+_CODEC_ID = 0x86
+_DEFAULT_DURATION = 0x23E383
+_VIDEO = 0xE0
+_PIXEL_WIDTH = 0xB0
+_PIXEL_HEIGHT = 0xBA
+_ALPHA_MODE = 0x53C0
+_CLUSTER = 0x1F43B675
+_EBML_MASTERS = frozenset({_EBML, _SEGMENT, _INFO, _TRACKS, _TRACK_ENTRY, _VIDEO})
+_EBML_LEAVES = frozenset({
+    _DOCTYPE, _TIMECODE_SCALE, _DURATION, _TRACK_TYPE, _CODEC_ID,
+    _DEFAULT_DURATION, _PIXEL_WIDTH, _PIXEL_HEIGHT, _ALPHA_MODE,
+})
 
 
 def _read_box_header(f: BinaryIO, start: int, end: int) -> tuple[bytes, int, int] | None:
@@ -201,6 +225,131 @@ def _read_at(f: BinaryIO, start: int, end: int, offset: int, length: int) -> byt
     return raw if len(raw) == length else None
 
 
+def _read_ebml_vint(f: BinaryIO, pos: int, end: int, *, identifier: bool) -> tuple[int, int, bool] | None:
+    if pos >= end:
+        return None
+    f.seek(pos)
+    first_raw = f.read(1)
+    if len(first_raw) != 1 or first_raw[0] == 0:
+        return None
+    first = first_raw[0]
+    length = 1
+    mask = 0x80
+    while not first & mask:
+        length += 1
+        mask >>= 1
+    limit = 4 if identifier else 8
+    if length > limit or pos + length > end:
+        return None
+    rest = f.read(length - 1)
+    if len(rest) != length - 1:
+        return None
+    value = int.from_bytes(first_raw + rest, "big")
+    if identifier:
+        return value, length, False
+    value &= (1 << (7 * length)) - 1
+    return value, length, value == (1 << (7 * length)) - 1
+
+
+def _read_ebml_header(
+    f: BinaryIO, pos: int, end: int, budget: list[int]
+) -> tuple[int, int, int | None] | None:
+    if budget[0] <= 0:
+        return None
+    budget[0] -= 1
+    element_id = _read_ebml_vint(f, pos, end, identifier=True)
+    if element_id is None:
+        return None
+    size = _read_ebml_vint(f, pos + element_id[1], end, identifier=False)
+    if size is None:
+        return None
+    payload_start = pos + element_id[1] + size[1]
+    return element_id[0], payload_start, None if size[2] else payload_start + size[0]
+
+
+def _walk_ebml(
+    f: BinaryIO, start: int, end: int, budget: list[int], values: dict[int, bytes]
+) -> bool | None:
+    pos = start
+    while pos < end:
+        header = _read_ebml_header(f, pos, end, budget)
+        if header is None:
+            return None
+        element_id, payload_start, element_end = header
+        if element_end is None:
+            if element_id != _SEGMENT:
+                return None
+            element_end = end
+        if element_end > end:
+            return None
+        if element_id == _CLUSTER:
+            return True
+        if element_id in _EBML_MASTERS:
+            stopped = _walk_ebml(f, payload_start, element_end, budget, values)
+            if stopped is None or stopped:
+                return stopped
+        elif element_id in _EBML_LEAVES:
+            size = element_end - payload_start
+            if element_id in values or size > 64:
+                return None
+            f.seek(payload_start)
+            raw = f.read(size)
+            if len(raw) != size:
+                return None
+            values[element_id] = raw
+        pos = element_end
+    return False
+
+
+@dataclass(frozen=True)
+class WebMInfo:
+    width: int
+    height: int
+    duration_s: float
+    fps: float | None
+    alpha: bool
+
+
+def webm_info(path: Path) -> WebMInfo | None:
+    try:
+        with open(path, "rb") as f:
+            size = f.seek(0, 2)
+            values: dict[int, bytes] = {}
+            if _walk_ebml(f, 0, size, [_MAX_EBML_ELEMENTS], values) is None:
+                return None
+            required = {_DOCTYPE, _DURATION, _TRACK_TYPE, _CODEC_ID, _PIXEL_WIDTH, _PIXEL_HEIGHT}
+            if not required <= values.keys() or values[_DOCTYPE] != b"webm" or values[_CODEC_ID] != b"V_VP9":
+                return None
+            integer_ids = {
+                element_id for element_id in (
+                    _TIMECODE_SCALE, _TRACK_TYPE, _DEFAULT_DURATION,
+                    _PIXEL_WIDTH, _PIXEL_HEIGHT, _ALPHA_MODE,
+                ) if element_id in values
+            }
+            if any(not 1 <= len(values[element_id]) <= 8 for element_id in integer_ids):
+                return None
+            integers = {element_id: int.from_bytes(values[element_id], "big") for element_id in integer_ids}
+            scale = integers.get(_TIMECODE_SCALE, 1_000_000)
+            width, height = integers[_PIXEL_WIDTH], integers[_PIXEL_HEIGHT]
+            default_duration = integers.get(_DEFAULT_DURATION)
+            alpha = integers.get(_ALPHA_MODE, 0)
+            raw_duration = values[_DURATION]
+            if (
+                integers[_TRACK_TYPE] != 1 or not scale or not width or not height
+                or alpha not in (0, 1) or (default_duration is not None and not default_duration)
+                or len(raw_duration) not in (4, 8)
+            ):
+                return None
+            duration = struct.unpack(">f" if len(raw_duration) == 4 else ">d", raw_duration)[0]
+            duration_s = duration * scale / 1_000_000_000
+            if not math.isfinite(duration) or duration <= 0 or not math.isfinite(duration_s):
+                return None
+            fps = 1_000_000_000 / default_duration if default_duration else None
+            return WebMInfo(width, height, duration_s, fps, alpha == 1)
+    except (OSError, RecursionError):
+        return None
+
+
 def _header_duration(f: BinaryIO, start: int, end: int) -> int | None:
     """`mvhd`/`mdhd` duration, right after the timescale (4 bytes in version 0, 8 in version 1)."""
     version = _read_at(f, start, end, 0, 1)
@@ -326,14 +475,17 @@ def _probe_video_trak(path: Path, read: Callable[[BinaryIO, _VideoTrak, list[int
 
 
 def movie_codec(path: Path) -> str | None:
-    """First video sample entry's fourcc (e.g. `avc1`, `hvc1`), or `None` when the
-    file is unreadable or has no video track. Never raises."""
+    """First video codec (`avc1`, `hvc1`, `V_VP9`), or `None` when unreadable. Never raises."""
+    if webm_info(path) is not None:
+        return "V_VP9"
     return _probe_video_trak(path, lambda _f, video, _budget: video[0])
 
 
 def movie_fps(path: Path) -> float | None:
-    """Frame rate of the track `movie_codec` reads, from its `mdhd` timescale and `stts`
-    sample table, or `None` when either is missing, unreadable or zero. Never raises."""
+    """Frame rate from BMFF timing or WebM `DefaultDuration`, when readable. Never raises."""
+    info = webm_info(path)
+    if info is not None:
+        return info.fps
     return _probe_video_trak(path, lambda f, video, budget: _trak_fps(f, video[1], video[2], budget))
 
 
@@ -349,9 +501,7 @@ def movie_geometry(path: Path) -> MovieGeometry | None:
 
 
 def codec_family(fourcc: str | None) -> str:
-    """`av1`/`vp9` are kept as their own conservative families rather than folded
-    into `other`: Chrome's decode support for them is not verified in this host,
-    so they must fail closed exactly like any other unproven codec."""
+    """Map BMFF fourccs and the WebM VP9 codec id to playback families."""
     if fourcc in _H264_FOURCCS:
         return "h264"
     if fourcc in _HEVC_FOURCCS:

@@ -731,13 +731,16 @@ describe("Alpha Keynote intake and slide grid", () => {
     const qualification = vi.fn(async (previewJobId: string) => ({
       previewJobId, name: "Minimal.key", slides: 3, sourceDigest: "source", sourceState: "current" as const, sourcePath: "/Slides/Minimal.key", qualified: true,
       continuity: { mode: "unsupported" as const, reason, notCarried: [] },
-      convertedMovies: [{ asset: "untitled.mov", sourceCodec: "HEVC" }, { asset: "clip-10-1000001.mov", sourceCodec: "ProRes" }],
+      convertedMovies: [
+        { asset: "untitled.mov", sourceCodec: "HEVC", targetCodec: "H.264" },
+        { asset: "clip-10-1000001.mov", sourceCodec: "ProRes", targetCodec: "VP9 alpha" },
+      ],
     }));
     const api = client({ qualification });
     render(<LivePresenter client={api} pollMs={60_000} />);
     await screen.findByText("Deck ready");
     expect(screen.getByText(`Movie continuity off for this deck: ${reason}`)).toBeVisible();
-    expect(screen.getByText("Converted 2 movies to H.264 for playback: untitled.mov (HEVC), clip-10-1000001.mov (ProRes).")).toBeVisible();
+    expect(screen.getByText("Converted 2 movies for playback: untitled.mov (HEVC → H.264), clip-10-1000001.mov (ProRes → VP9 alpha).")).toBeVisible();
     await waitFor(() => expect(screen.getByRole("button", { name: "Start output session" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Start output session" }));
     await waitFor(() => expect(api.start).toHaveBeenCalledWith("prepared-1", "screen-2"));

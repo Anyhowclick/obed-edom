@@ -734,17 +734,22 @@ for the parked `iwa-surgical-write-generator` feature.
   yellow warning + **Prepare again** (re-prepares from `sourcePath`; a failure re-selects the stale deck) and `missing`
   a neutral note — both warning-only. The qualification response also carries `qualified: true`,
   `continuity: {mode: qualified|unsupported|off, reason, notCarried}` (from `_deck_qualification`) (`live_host.not_carried(plan, slides)`) and
-  `convertedMovies: [{asset, sourceCodec}]`; only `prepared_deck`'s playability checks (player digest, 16:9, manual
+  `convertedMovies: [{asset, sourceCodec, targetCodec}]`; only `prepared_deck`'s playability checks (player digest, 16:9, manual
   mode, unsupported media, no playable slides) block start.
 * **Prepare-time conversion.** `html_preview.apply_preview` runs `preview_movies.convert_movies` before writing the
-  manifest: every referenced `.mov`/`.mp4`/`.m4v` that is not H.264 is re-encoded in the cached export (never the
-  `.key`) with `dsk_movie_export._crop_encoder_args("h264")` + AAC 192k, one encode per group with identical `mdat`, timing and geometry,
-  verified by box reads (avc1; coded size, timescale, tkhd matrix, presented duration; stts count when the source has
-  no trimming edit list) before `os.replace`. Recorded as `manifest.movieConversion` (`encoder`, `converted[]`:
-  `path`, `asset`, `sourceCodec`, `sourceSha256`, `sha256`, `bytes`). Real transparency, HEVC whose transparency
-  cannot be checked, odd dimensions or unreadable timing fail the prepare (`PreviewError` naming every movie; fix:
-  replace it with an opaque movie); never flatten alpha. `load_cached` reuses a cache only when
-  `preview_movies.unconverted` is empty. The host codec gate stays for exports that bypass the prepare.
+  manifest: every referenced `.mov`/`.mp4`/`.m4v` that is not H.264 (or VP9 WebM declaring alpha) is re-encoded in the
+  cached export (never the `.key`), one encode per group with identical `mdat`, timing and geometry, verified before
+  `os.replace`. Opaque movies → H.264 with `dsk_movie_export._crop_encoder_args("h264")` + AAC 192k, verified by box
+  reads (avc1; coded size, timescale, tkhd matrix, presented duration; stts count when the source has no trimming edit
+  list). Silent real-alpha ProRes with identity matrix/edits → VP9-alpha WebM under the same name (`libvpx-vp9` crf20
+  `yuva420p`, `-f webm`; keynote_live_alpha_movies plan), verified by `live_codec.webm_info` (V_VP9, AlphaMode 1, size,
+  duration), a libvpx-decoded frame count and alpha PSNR ≥ 48 dB. Decode VP9 alpha with `-c:v libvpx-vp9` before `-i`:
+  ffmpeg's native vp9 decoder drops alpha. Recorded as `manifest.movieConversion` (`encoder`, `alphaEncoder`,
+  `converted[]`: `path`, `asset`, `sourceCodec`, `targetCodec` (absent = H.264), `sourceSha256`, `sha256`, `bytes`).
+  Non-ProRes alpha, alpha with rotation/edits or audio, HEVC whose transparency cannot be checked, odd dimensions or
+  unreadable timing fail the prepare (`PreviewError` naming every movie); never flatten alpha. `load_cached` reuses a
+  cache only when `preview_movies.unconverted` is empty. VP9 plays in headful launch and managed OBS (CEF alpha
+  probe 2026-10-15; warns elsewhere) and is refused for continuity. The host codec gate stays for exports that bypass the prepare.
 * **Prepare-time texture repair (Stage T).** `apply_preview` runs `preview_textures.repair_textures` right after
   `manifest_from_export`, before `convert_movies`, on the cached export only (never the `.key`). It fixes Keynote's
   per-slide texture-id mis-mapping (a leaf pointing at another object's page: R1/R1b JSON size checks, R4/R6 pixel
