@@ -18,7 +18,7 @@ the same bytes named `.mov`; negative controls opaque H.264 and opaque VP9 of th
 | Headless Chrome | Chrome 155.0.8059.79 | PASS ×6 | REJECT ×6 | 0 / 0 |
 | Headful Chrome (owner-approved window) | Chrome 155.0.8059.79 | PASS ×6 | REJECT ×6 | 0 / 0 |
 | Managed OBS 32.2.2, 25 fps | CEF Chrome/127.0.6533.120 | PASS ×6 | REJECT ×6 | 0 / 0 |
-| Managed OBS 32.2.2, 30 fps | PENDING | | | |
+| Managed OBS 32.2.2, 30 fps | CEF Chrome/127.0.6533.120 | PASS ×6 | REJECT ×6 | 0 / 0 |
 
 VP9-alpha numbers (identical on every output; CEF alpha bit-identical to headless Chrome): zero class ≤2 at
 100 % / 100 % / 99.998 %; opaque class ≥253 at 99.875 % (4,008 px) / 99.993 % (43,636 px) / — (no opaque pixels at
@@ -41,13 +41,15 @@ Scratch copy of `F2-html` under a scratch `OBED_EDOM_OUTPUT_ROOT`, `manifest_fro
 Blocked on the separate F2 slide-4 text-identity fix (owner D6). Managed-OBS physical fill/key eye rides on the
 DeckLink field test (owner D3).
 
-## AM-5 — suites
+## AM-5 — suites (rebased on origin/main 60c53c85, HEAD 62dde6c9)
 
-PENDING.
+- Python 3.13 worktree venv: 11027 passed, 38 skipped, 1 xfailed (252.8 s).
+- Python 3.10.10 floor: 11027 passed, 38 skipped, 1 xfailed (317.9 s).
+- Dashboard `npm run test:ui`: 44 files, 330 tests passed. `npm run test:maps`: 542 + 2 (perf) passed, 0 failed.
 
 ## Review log
 
 - R1 (Opus 5.5 high, d50eaf0e): changes requested — M1 per-copy probes, M2 misleading VP9 continuity reason, M3
   SKILL.md, M4 EBML reader size; L1–L9. All folded (d0b283e0; SKILL.md by the coordinator).
 - D3 follow-through (853e4a22): CEF probe passed → `_codec_supported(..., managed=)` admits VP9 in managed OBS.
-- R2 (Opus 5.5 high, d50eaf0e..853e4a22): approve; lows L-a/L-b folded (e7e81218), L-c = this record.
+- R2 (Opus 5.5 high, d50eaf0e..853e4a22): approve; lows L-a/L-b folded (e7e81218), L-c = this record, including the 30 fps CEF row.
