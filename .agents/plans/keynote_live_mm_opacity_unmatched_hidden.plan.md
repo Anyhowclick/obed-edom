@@ -41,7 +41,7 @@ Extend the existing real-method extraction checks in `tests/test_live_runtime.py
 - Existing pin/anchor checks cover both real players, on/off/rendering composition and failure on unsupported/corrupt input. Add cases to the existing checks rather than redundant tests.
 - Extend the existing corpus mirror with the new branch, but require agreement with the extracted real methods on the exact positive and boundary/negative fixtures. A Python mirror alone is not acceptance evidence.
 
-No pytest or suites are run for this investigation. Subsequent implementation uses focused existing checks and the gates below, consistent with the owner's minimal-test rule; it does not inherit a blanket full-suite gate from older plans.
+No pytest or suites were run for this investigation. Implementation keeps new tests minimal (owner's minimal-test rule) but, like every code PR, runs the **full suites** locally before the PR: Python on the 3.13 worktree venv and the 3.10 floor, plus the dashboard `test:ui`/`test:maps` suites (owner rule: no CI).
 
 ## 4. Gates
 
@@ -57,7 +57,7 @@ Missing evidence, wrong player/effect, a missed automatic-build window, unavaila
 
 UH-1 uses the `mm_opacity_probe.py` logger pattern with a small F2 driver, not that script's hardcoded P2 sequence. Sample from first draw, not only its existing settle window. Resolve actual texture/program/rect identity and capture cached uniform values. Record D0, Dlast, actual scene index, canvas removal, automatic build start and frame gaps; a generic sleep or final screenshot misses this short hold. Capture RGBA inside draws and correlate with page/compositor frames during the hold. Prove each target texture is nonempty in the known-bad arm.
 
-For UH-2, reuse `scripts/mm_opacity_probe.py` (headless MO-1/MO-4/MO-5, GL-on and forced stand-down), `scripts/mm_handback_probe.py` (HB-1/HB-2), and the fade plan's PF-1/PF-2 Alpha_DSK samples (6→7 slot 3; 7→8 slots 4/8 and stable slot 6). Preserve their established thresholds and controls; do not silently rebaseline a failure. Investigate failures at the renderer/recording boundary before changing any expectations. This patch does not justify new OBS qualification or blanket suites; a newly observed integration defect is a reason to revisit that scope, not preemptively broaden it.
+For UH-2, reuse `scripts/mm_opacity_probe.py` (headless MO-1/MO-4/MO-5, GL-on and forced stand-down), `scripts/mm_handback_probe.py` (HB-1/HB-2), and the fade plan's PF-1/PF-2 Alpha_DSK samples (6→7 slot 3; 7→8 slots 4/8 and stable slot 6). Preserve their established thresholds and controls; do not silently rebaseline a failure. Investigate failures at the renderer/recording boundary before changing any expectations. This patch does not justify new OBS qualification; a newly observed integration defect is a reason to revisit that scope, not preemptively broaden it. The full suites (3.13 + 3.10 floor + dashboard) still run before the PR.
 
 Pixel tolerances for a full-page repeat must be calibrated against fixed-vs-fixed capture noise and remain decisively below both known-bad map contributions. The more direct per-target-draw zero-contribution assertion has exact equality in the same framebuffer at Opacity 0; do not loosen it merely to make a page-level noise metric pass.
 
@@ -78,7 +78,7 @@ These are ownership boundaries for later execution, not a request to spawn agent
 ## 6. Owner questions (recorded; no response needed for these deliverables)
 
 - **OQ-1 — Admission breadth.** Recommend the exact never-visible opacity/hidden pair under an effective zero ancestor, MM only. Defer general constant-`forwards` tracks, hidden-animation evaluation, and arbitrary unknown subtrees until independently evidenced. It fixes both F2 leaves and changes no current fixture leaf.
-- **OQ-2 — Release bar.** Recommend headless reproduction with controls, existing MM/fade/hand-back regressions, Stage B composition, and owner eye on old F2 3→4 as blocking; no new OBS take or full suites for this small rendering admission change.
+- **OQ-2 — Release bar.** Recommend headless reproduction with controls, existing MM/fade/hand-back regressions, Stage B composition, full suites (3.13 + 3.10 floor + dashboard; owner rule for every code PR) and owner eye on old F2 3→4 as blocking; no new OBS take for this small rendering admission change.
 - **OQ-3 — Durable regression data.** Recommend retain a compact sanitized F2 subtree fixture in the existing test-fixture family and keep the old raw export read-only for the headless/eye gate. The edited export no longer contains the defect, so it cannot replace the positive fixture. Avoid committing the whole owner's deck.
 
 ## 7. Acceptance and rollback
