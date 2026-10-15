@@ -18,7 +18,7 @@
 - Pinned worktree at `9056168c`, using the handover recipe (`dx1_paced.py`).
 - Decision record `q0b-2026-10-11/runs/decision_record_q0b1.json`. It was measured on 154 and is reused here: tuple engagement is gated, and tone stays identity.
 
-**Arms run:** the recipe's 16 arms plus the 46-arm `m-snap` matrix (with twins). Scored with `dissolve_probe.py --score` (`dx1-score.log`, `dx1-verdict.json`).
+**Arms run:** the recipe's 16 arms plus the 46-arm `m-snap` matrix (with twins). Scored with `dissolve_probe.py --score` (raw score log and verdict pruned after merge; numbers below are the record).
 
 **Results:**
 - **PASS:** handoff, frozen_frame, frozen_region, cost, grant, cvc.
