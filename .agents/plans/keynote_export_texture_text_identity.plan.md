@@ -1,6 +1,6 @@
 # Keynote export texture repair: text-glyph twin identity (D1g)
 
-Rev 3 — folds Opus 5.5 high critiques r1–r3. Status: FINAL for owner review, 2026-10-15. Investigation only; no implementation, tests or owner acceptance.
+Rev 3 — folds Opus 5.5 high critiques r1–r3. Status: APPROVED by the owner 2026-10-15, 2026-10-15. Investigation only; no implementation, tests or owner acceptance.
 
 Anchors: functions in `src/obed_edom/preview_textures.py` (`pt`) by name; `hp` = `html_preview.py`; `tc` = `scripts/texture_repair_check.py`; `tests` = `tests/test_preview_textures.py`. Investigation: `.agents/reviews/text-glyph-identity/investigation.md`. Builds on `keynote_export_texture_repair_stage_t.plan.md` and `keynote_export_texture_identity.plan.md`.
 
@@ -117,6 +117,15 @@ Every other G1 row keeps its outcome. Missing inputs or pin mismatches are INCON
 **G3 owner eye.** Serve the persisted repaired synthetic copy and its unrepaired control. The owner watches all eight letters through the build and the settled slide, especially the i, and checks the map repair is intact.
 
 ## 7. Owner questions (recommendations)
+
+**Owner decisions 2026-10-15:**
+- OQ-1: any build of this shape, not just Twist & Scale.
+- OQ-2: minimal change first, as recommended.
+- OQ-3: refuse shared-id twins for now; revisit if it becomes a problem.
+- OQ-4: run the two-export check first; restorability of `6fea812c…` is unknown.
+- OQ-5: as recommended.
+- OQ-6: the removal was intentional; the folder is in the Trash and restorable.
+- Go: implement.
 
 - **OQ-1 scope.** Rec: D1g for any same-objectID base/effect per-component build, not just Twist & Scale. Alternative: Twist & Scale only (measured).
 - **OQ-2 donor trust.** Rec: accept the object/index twin plus a non-flat donor, on D1's premise, with no OCR or pixel oracle.
