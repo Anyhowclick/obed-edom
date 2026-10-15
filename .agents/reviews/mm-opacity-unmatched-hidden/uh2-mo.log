@@ -1,0 +1,17 @@
+off-on: ok
+off-off: ok
+off-off2: ok
+off-sq: ok
+auto-on: ok
+auto-off: ok
+auto-off2: ok
+auto-sq: ok
+auto-fsd: ok
+auto-fsdoff: ok
+auto MO-1: PASS 
+auto MO-5: PASS 
+auto MO-4: PASS 
+auto MO-4 stand-down: PASS 
+off MO-1: PASS 
+off MO-5: PASS 
+overall: PASS
