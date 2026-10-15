@@ -1,6 +1,6 @@
 # Stage B instrument restructure (plan r3: critique r1 folded by the planner, critique r2 folded by the coordinator)
 
-Owner scope approved 2026-10-15: **C6 → C1 → C2 → C3 + bounded C4 → C5 → C10 audit → verification → Q7 attempt 4 → Stage B closure**.
+**Plan r3 approved by the owner 2026-10-15 ("Approve").** Owner scope approved 2026-10-15: **C6 → C1 → C2 → C3 + bounded C4 → C5 → C10 audit → verification → Q7 attempt 4 → Stage B closure**.
 
 Planner: Codex GPT-6 Astra high (r1, r2). Critic: Opus 5.5 high.
 - r1 was **NOT READY** (6 major, 7 medium, 5 low). The planner folded all 18 into r2; none was refuted.
@@ -392,7 +392,7 @@ Owner questions are implementation decision points, **not questions for this non
 
    Freeze after fresh readable evidence.
 2. **Validity statistic and historical impact:** recommend the 8 ms cost proposal, subject to all-hook clean calibration. Cadence remains unresolved: clean scene medians reach 33.3 ms against 33.3333, maxima reach 133.3, and per-visit p95 is absent. Present fresh visit statistics and the historical impact list together; require demonstrated clean-null margin before selecting the general cadence statistic.
-3. **Alpha product blocker:** if gate 10 requires product work, choose known-failure Q7 recording or fix-before-Q7. Recommend **owner go before any product edit**, followed by a concrete minimal patch review and affected requalification; no failing gate becomes a pass.
+3. **Answered by the owner 2026-10-15: fix before Q7.** The `findMovieCanvas` hand-back anchor root cause is in `.agents/handovers/alpha-b6to8-placement-2026-10-15.md` (branch `claude/friendly-stonebraker-16d950`). The fix is folded by blind Opus + Fable peers and then orchestrated by that diagnostic session; it merges into this branch after C6 as a separately reviewed product checkpoint. Original question: **Alpha product blocker:** if gate 10 requires product work, choose known-failure Q7 recording or fix-before-Q7. Recommend **owner go before any product edit**, followed by a concrete minimal patch review and affected requalification; no failing gate becomes a pass.
 
 **11. Risks and rollback**
 
