@@ -362,7 +362,7 @@ MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
     "no-pause": {"posterHold": False},
     "mm-opacity-off": {"labelsOverFeed": False},
     "no-linger": {"handbackContinuity": False},
-    "interim-delay": {"handbackContinuity": False},
+    "interim-delay": {},
 }
 MM_FEED_STRIP_EXPECTATIONS = {
     (ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off"): (
@@ -1139,6 +1139,58 @@ def require_feed_fixture(export_root: Path, slides: list[dict[str, Any]]) -> dic
     return identity
 
 
+def bind_feed_source_fps(
+    facts: dict[str, Any], export_root: Path, slides: list[dict[str, Any]],
+) -> None:
+    targets = [
+        spec for spec in facts.get("verdicts") or []
+        if isinstance(spec, dict) and spec.get("underArtwork") is True
+    ]
+    if not targets or all(_finite_number(spec.get("sourceFps")) is not None for spec in targets):
+        return
+    reports = live_continuity_module.codec_report(export_root, slides, with_fps=True)
+    rates = {
+        canonical_asset_name(row.get("asset")): row.get("fps")
+        for row in reports if isinstance(row, dict) and _finite_number(row.get("fps")) is not None
+    }
+    for spec in targets:
+        spec["sourceFps"] = rates.get(canonical_asset_name(spec.get("asset")))
+
+
+def feed_fixture_required(args: argparse.Namespace) -> bool:
+    return bool(
+        args.mm_feed != "auto" or args.feed_tamper is not None or args.feed_variant is not None
+        or args.feed_dwell is not None or args.hold_upload_kill_switch or args.mm_opacity == "off"
+        or args.strip is not None or args.core_variant in {
+            "overlay-ride", "settle-on-stage", "no-pause", "interim-delay",
+        }
+    )
+
+
+def mm_feed_control_aggregate_problems(label: str, rows: Sequence[dict[str, Any]]) -> list[str]:
+    handbacks = [row.get("handbackContinuity") for row in rows if isinstance(row, dict)]
+    if label == "no-linger":
+        return [
+            f"row {index} no-linger sourceFrames {handback.get('sourceFrames')!r} is not > 2"
+            for index, handback in enumerate(handbacks)
+            if not isinstance(handback, dict) or not isinstance(handback.get("sourceFrames"), int)
+            or handback["sourceFrames"] <= 2
+        ]
+    if label != "interim-delay":
+        return []
+    problems = [
+        f"row {index} interim-delay handbackContinuity is unreadable"
+        for index, handback in enumerate(handbacks)
+        if not isinstance(handback, dict) or handback.get("verdict") is None
+    ]
+    exposed = [handback for handback in handbacks if isinstance(handback, dict)
+               and handback.get("verdict") is False
+               and handback.get("reason") == "a static poster was exposed during DOM hand-back"]
+    if not exposed:
+        problems.append("interim-delay did not expose a static poster in any hand-back row")
+    return problems
+
+
 def force_viewport(width: int, height: int) -> None:
     forced = OutputDisplay(0, 0, 0, width, height + _HEIGHT_PAD, True)
     live_host_module.choose_display = lambda *_a, **_k: forced
@@ -1855,6 +1907,7 @@ def feed_specs_for(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
             "id": spec["id"], "objectId": spec.get("srcObjectId"), "dstObjectId": spec.get("dstObjectId"),
             "atScene": spec.get("atScene"), "feed": spec.get("feed"), "draws": spec.get("feedDraws"),
             "artwork": spec.get("artworkAbove"), "dstRect": spec.get("dstRect"),
+            "sourceFps": spec.get("sourceFps"),
         }
         for spec in (facts or {}).get("verdicts") or []
         if spec.get("underArtwork") is True and isinstance(spec.get("feed"), dict)
@@ -3703,7 +3756,10 @@ def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
         return _inconclusive(record.get("reason") or "the under-artwork feed mode is unavailable")
     rider = score_no_rider_above_canvas(record.get("rider"))
     artwork = score_artwork_above(record.get("artwork"))
-    handback = score_handback_continuity(record.get("handback")) if record.get("evidenceVersion") == 2 else None
+    handback = (
+        score_handback_continuity(record.get("handback"), mode=mode)
+        if record.get("evidenceVersion") == 2 else None
+    )
     results: dict[str, Any] = {"noRiderAboveCanvas": rider, "artworkAbove": artwork}
     if handback is not None:
         results["handbackContinuity"] = handback
@@ -4466,6 +4522,9 @@ def run_arm(
     gl_replay: str = "off", facts_on: dict[str, Any] | None = None, census: bool = False,
 ) -> dict[str, Any]:
     force_viewport(*viewport)
+    bind_feed_source_fps(facts, export_root, slides)
+    if facts_on is not None:
+        bind_feed_source_fps(facts_on, export_root, slides)
     player = LiveOutputHost(
         export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs(facts_on or facts),
     )
@@ -4616,6 +4675,9 @@ def run_attach_arm(
 ) -> dict[str, Any]:
     # The live host forces attach mode to 1920x1080 by contract regardless of
     # `--viewport`; the attach arm stays pinned to that, never the CLI value.
+    bind_feed_source_fps(facts, export_root, slides)
+    if facts_on is not None:
+        bind_feed_source_fps(facts_on, export_root, slides)
     result: dict[str, Any] = {"arm": "attach", "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT}}
     with attach_chrome(scratch / "attach-chrome-profile", result) as port:
         with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
@@ -7331,15 +7393,12 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
     facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
-    fixture_identity = require_feed_fixture(export_plan, plan_slides) if feed_specs_for(facts) else None
     armed = gl_ground_truth(export_plan, plan_slides, facts)[1]["armed"]
     retire = facts["retire"]
     if not retire or retire["boundaryKey"] != armed["boundaryKey"]:
         raise SystemExit("a forced stand-down needs the flag-off plan to retire the armed boundary")
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
     result: dict[str, Any] = {"groundTruth": {"retire": retire, "armed": armed}, "visible": {}}
-    if fixture_identity is not None:
-        result["fixtureIdentity"] = fixture_identity
 
     v_sink: dict[str, Any] = {}
     export_v = prepare_export(args.fixture, args.original_index, root, "forced-v")
@@ -7464,7 +7523,7 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
     export_r = prepare_export(args.fixture, args.original_index, root, "red-arm")
     slides_r = load_slides(export_r)
-    if feed_specs_for(facts):
+    if feed_specs_for(facts) and feed_fixture_required(args):
         result["fixtureIdentity"] = require_feed_fixture(export_r, slides_r)
     patch = injected_core_variant(args.core_variant) if args.core_variant else stripped_runtime(*args.strip)
     with patch:
@@ -9331,7 +9390,7 @@ def run_cli(args: argparse.Namespace) -> None:
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
         facts = ground_truth_facts(plan, arrival=arrival_starts(export_a, slides_a, plan))
-        if feed_specs_for(facts):
+        if feed_specs_for(facts) and feed_fixture_required(args):
             result["fixtureIdentity"] = require_feed_fixture(export_a, slides_a)
         bind_dom_ids(facts, movie_nodes(export_a, slides_a))
         result["groundTruth"] = {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts}

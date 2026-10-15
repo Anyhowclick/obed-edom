@@ -734,7 +734,8 @@ check_mm_feed(){ local deck=$1 label=$2; shift 2; local n=$deck-$label rc=$(stat
   $PY - "$O/mm-feed-$n.json" "$rc" "$deck" "$label" <<'PYEOF' || fail "MM-FEED $deck $label"
 import json,sys
 sys.path.insert(0,"scripts")
-from live_continuity_probe import MM_FEED_GATE_EXPECTATIONS, MM_FEED_READ_EXPECTATIONS, MM_FEED_STRIP_EXPECTATIONS
+from live_continuity_probe import (MM_FEED_GATE_EXPECTATIONS, MM_FEED_READ_EXPECTATIONS,
+                                   MM_FEED_STRIP_EXPECTATIONS, mm_feed_control_aggregate_problems)
 path,rc,deck,label=sys.argv[1:]
 try: artifact=json.load(open(path))
 except Exception as exc: print(f"[MM-FEED {deck} {label}] no artifact ({exc}) exit={rc}"); sys.exit(1)
@@ -763,6 +764,7 @@ unique={json.dumps(row,sort_keys=True,default=str):(path,row) for path,row in ro
 rows=list(unique.values())
 problems=[]
 if not rows: problems.append("no under-artwork verdict records")
+problems.extend(mm_feed_control_aggregate_problems(label,[row for _,row in rows]))
 facts=[value for value in (artifact.get("groundTruth") or {}).get("verdicts") or [] if isinstance(value,dict)]
 first_feed_scene=min((value.get("atScene") for value in facts if isinstance(value.get("feed"),dict)),default=None)
 for path,row in rows:

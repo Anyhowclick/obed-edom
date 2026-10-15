@@ -69,6 +69,11 @@ INSTRUMENT_JS = r"""
   function moveFor(v){var state=decoderState.get(v);return state&&state.move||null}
   function mediaEvent(kind,v,extra){
     var move=moveFor(v),state=decoderState.get(v),current=scene();
+    if(kind==='pause'&&v.__obedPosterHeld){var pendingMoves=entries().filter(function(e){return e.atScene===current+1&&
+        (sameId(v.__obedInstance,e.objectId)||sameId(v.__obedInstance,e.dstObjectId))});
+      if(pendingMoves.length===1){var next=entryState[pendingMoves[0].id]||{};move={serial:null,atScene:pendingMoves[0].atScene,
+        entryId:pendingMoves[0].id,objectId:pendingMoves[0].objectId,generation:state&&state.generation,visit:(next.visit||0)+1}}
+      else if(pendingMoves.length>1)move={serial:null,atScene:current+1,entryId:null,generation:state&&state.generation,visit:null}}
     if(move&&move.atScene!==current&&move.atScene!==current+1)move=null;
     if(!move){var candidates=entries().filter(function(e){return (e.atScene===current||e.atScene===current+1)&&
         (sameId(v.__obedInstance,e.objectId)||sameId(v.__obedInstance,e.dstObjectId))});
@@ -80,7 +85,7 @@ INSTRUMENT_JS = r"""
       instance:v.__obedInstance==null?null:String(v.__obedInstance),elId:v.__obedElId==null?null:v.__obedElId,
       currentTime:v.currentTime,paused:!!v.paused,presentedFrames:v.__obedPresentedFrames==null?null:v.__obedPresentedFrames,
       mediaTime:v.__obedMediaTime==null?null:v.__obedMediaTime},extra||{}));
-    if(kind==='pause'&&v.__obedPosterHeld)S.departures.push({t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,
+    if(kind==='pause'&&v.__obedPosterHeld&&move.entryId)S.departures.push({t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,
       objectId:move.objectId||null,generation:move.generation==null&&state?state.generation:move.generation,
       visit:move.visit==null?(entryState[move.entryId]||{}).visit:move.visit});
   }
@@ -98,9 +103,9 @@ INSTRUMENT_JS = r"""
         Object.keys(state.entries).forEach(function(id){var e=state.entries[id],size=entryState[id].leafSize||e.feed&&e.feed.from&&e.feed.from.size;
           if(scene()===e.atScene){var dom=domRead(v,e),stamp=frameTime(),domFrame={now:now,t:performance.now(),frameIndex:browserFrame(stamp),
             frameTimestamp:stamp,mediaTime:meta.mediaTime,presentedFrames:meta.presentedFrames,dom:dom};
-            if(dom&&dom.shown){var domFrames=entryState[id].domFrames;domFrames.push(domFrame);if(domFrames.length>12)domFrames.shift();
-              S.handbacks.forEach(function(handback){if(handback.entryId===id&&handback.decoder===v&&!handback.complete&&!handback.timedOut&&domFrame.frameIndex>=handback.closedFrameIndex){
-                handback.frames.push(domFrame);if(handback.frames.length>=3)handback.complete=true}})}}
+            var domFrames=entryState[id].domFrames;domFrames.push(domFrame);if(domFrames.length>12)domFrames.shift();
+            S.handbacks.forEach(function(handback){if(handback.entryId===id&&handback.decoder===v&&!handback.complete&&!handback.timedOut&&domFrame.frameIndex>=handback.closedFrameIndex){
+              handback.frames.push(domFrame);if(handback.frames.length>=3)handback.complete=true}})}
           var current=scene(),move=state.move,moveLive=move&&move.entryId===id&&S.live.some(function(pair){return pair[1].serial===move.serial&&pair[1].frame});if(!size||!(current===e.atScene-1||moveLive))return;try{var ring=entryState[id].ring;ring.push({frame:meta.presentedFrames,mediaTime:meta.mediaTime,patches:capture(v,size,entryState[id])});if(ring.length>18)ring.shift()}catch(x){noteError('rVFC capture',x)}});
         S.costs.push(performance.now()-costStart);if(S.costs.length>1000)S.costs.shift();
         v.requestVideoFrameCallback(callback)};v.requestVideoFrameCallback(callback);
@@ -319,6 +324,7 @@ INSTRUMENT_JS = r"""
       delete row._reference;row.textures.forEach(function(t){if(t)delete t._poster});delete row._matrix;delete row._layerSize;
     });
     F.under.forEach(function(read){var after=pixelPatch(gl,read.under.rect),row=labelStats(read,after,laterQuads(F,read.draw));if(row)F.labels.push(row)});F.under=[];
+    F.riders=[];collectRiders(gl,G);
   }
   function finishFrame(gl,G){
     var F=G.frame;if(!F)return;
@@ -390,9 +396,9 @@ INSTRUMENT_JS = r"""
     G.entries.forEach(function(e){if(F.riders.some(function(r){return r.entryId===e.id}))return;var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
       opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})}
   function riderTick(stamp){
-    var index=browserFrame(finite(stamp)?stamp:frameTime());armSeam();installKillSwitch();entries().forEach(function(e){decoderForEntry(e)});
+    var frameStamp=frameTime(),index=browserFrame(frameStamp);armSeam();installKillSwitch();entries().forEach(function(e){decoderForEntry(e)});
     S.live.forEach(function(pair){collectRiders(pair[0],pair[1])});
-    S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G);if(!canvas||!canvas.isConnected)finishContext(G,stamp,index)});
+    S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G);if(!canvas||!canvas.isConnected)finishContext(G,frameStamp,index)});
     S.handbacks.forEach(function(h){if(!h.complete&&!h.timedOut&&performance.now()>=h.deadline)h.timedOut=true});settledArtwork();requestAnimationFrame(riderTick);
   }
   function rectMatchesFact(node,fact){for(var n=node;n&&n.nodeType===1;n=n.parentElement){var r=n.getBoundingClientRect&&n.getBoundingClientRect();if(r&&Math.abs(r.left-fact.x)<=2&&Math.abs(r.top-fact.y)<=2&&Math.abs(r.right-(fact.x+fact.w))<=2&&Math.abs(r.bottom-(fact.y+fact.h))<=2)return true}return false}
@@ -686,7 +692,7 @@ def _visit_record(
                        and r.get("atScene") == at_scene]
     handback = _handback_record(
         visit_handbacks[0] if len(visit_handbacks) == 1 else None,
-        media, last_upload_row, move, browser_frames,
+        media, last_upload_row, move, browser_frames, source_fps=entry.get("sourceFps"),
     )
     poster["complete"] = frames_complete and media_complete and departures_complete
     return {
@@ -705,23 +711,36 @@ def _rider_readable(row: Any) -> bool:
         and isinstance(row.get("intersectsCanvas"), bool)
 
 
-def _source_frame_duration(media: list[dict[str, Any]]) -> float | None:
+def _source_frame_duration(
+    media: list[dict[str, Any]], *, created_at: Any = None, source_fps: Any = None,
+) -> float | None:
     frames = [row for row in media if row.get("kind") == "videoFrame"
-              and _finite(row.get("mediaTime")) and _finite(row.get("presentedFrames"))]
+              and _finite(row.get("mediaTime")) and _finite(row.get("presentedFrames"))
+              and (not _finite(created_at) or _finite(row.get("t")) and row["t"] >= created_at)]
     steps = [
-        (b["mediaTime"] - a["mediaTime"]) / (b["presentedFrames"] - a["presentedFrames"])
+        (b["mediaTime"] - a["mediaTime"], b["presentedFrames"] - a["presentedFrames"])
         for a, b in zip(frames, frames[1:])
         if b["presentedFrames"] > a["presentedFrames"] and b["mediaTime"] > a["mediaTime"]
     ]
-    if len(steps) < 2:
+    single = [delta for delta, presented in steps if presented == 1]
+    if len(single) < 2:
         return None
-    duration = statistics.median(steps)
-    return duration if duration > 0 and max(abs(step - duration) for step in steps) <= duration * .2 else None
+    duration = 1 / float(source_fps) if _finite(source_fps) and source_fps > 0 else min(single)
+    if not duration > 0:
+        return None
+
+    def consistent(delta: float) -> bool:
+        multiple = round(delta / duration)
+        return multiple >= 1 and abs(delta - multiple * duration) <= duration * .2
+
+    if sum(consistent(delta) for delta in single) < math.ceil(len(single) * .8):
+        return None
+    return duration if all(consistent(delta) for delta, _presented in steps) else None
 
 
 def _handback_record(
     handback: dict[str, Any] | None, media: list[dict[str, Any]], last_upload: dict[str, Any] | None,
-    move: dict[str, Any], browser_frames: list[dict[str, Any]],
+    move: dict[str, Any], browser_frames: list[dict[str, Any]], *, source_fps: Any = None,
 ) -> dict[str, Any]:
     mapping_complete = bool(browser_frames) and all(
         row.get("index") == index and _finite(row.get("timestamp"))
@@ -742,7 +761,7 @@ def _handback_record(
         and index in mapped and mapped[index] == stamp
         for index, stamp in endpoints
     )
-    duration = _source_frame_duration(media)
+    duration = _source_frame_duration(media, created_at=move.get("createdAt"), source_fps=source_fps)
     return {
         "complete": bool(isinstance(handback, dict) and handback.get("complete") is True and not handback.get("timedOut")
                          and isinstance(frames, list) and len(frames) >= 3),
@@ -862,7 +881,9 @@ def _dom_handback_ok(value: Any) -> bool | None:
         and value["opacityProduct"] > 0
 
 
-def score_handback_continuity(record: Any, *, max_source_frames: int = 2) -> dict[str, Any]:
+def score_handback_continuity(
+    record: Any, *, mode: str = "continuous", max_source_frames: int = 2,
+) -> dict[str, Any]:
     if not isinstance(record, dict):
         return _verdict(None, "hand-back evidence is missing")
     if record.get("complete") is not True:
@@ -872,18 +893,8 @@ def score_handback_continuity(record: Any, *, max_source_frames: int = 2) -> dic
     last, closed, presented = record.get("lastUpload"), record.get("closed"), record.get("presented")
     if not isinstance(last, dict) or not isinstance(closed, dict) or not isinstance(presented, list) or len(presented) < 3:
         return _verdict(None, "hand-back endpoints are missing")
-    if record.get("adjacentFrames") is not True:
-        if record.get("adjacentFrames") is False:
-            return _verdict(False, "the last upload was not in the frame immediately before canvas removal",
-                            frameGap=closed.get("frameIndex") - last.get("frameIndex")
-                            if isinstance(closed.get("frameIndex"), int) and isinstance(last.get("frameIndex"), int) else None)
-        return _verdict(None, "the upload/removal frame adjacency is unreadable")
     dom_values = [closed.get("dom"), *(row.get("dom") for row in presented[:3] if isinstance(row, dict))]
     dom_checks = [_dom_handback_ok(value) for value in dom_values]
-    if any(value is False for value in dom_checks):
-        return _verdict(False, "a static poster was exposed during DOM hand-back", dom=dom_values)
-    if len(dom_checks) != 4 or any(value is None for value in dom_checks):
-        return _verdict(None, "DOM hand-back coverage is unreadable", dom=dom_values)
     duration = record.get("sourceFrameDurationS")
     first = presented[0] if presented else None
     if not _finite(duration) or duration <= 0 or not _finite(last.get("mediaTime")) \
@@ -899,6 +910,14 @@ def score_handback_continuity(record: Any, *, max_source_frames: int = 2) -> dic
     }
     if delta < -1e-6:
         return _verdict(False, "hand-back media time moved backwards", **detail)
+    if mode == "continuous" and record.get("adjacentFrames") is not True:
+        if record.get("adjacentFrames") is False:
+            return _verdict(False, "the last upload was not in the frame immediately before canvas removal", **detail)
+        return _verdict(None, "the upload/removal frame adjacency is unreadable", **detail)
+    if any(value is False for value in dom_checks):
+        return _verdict(False, "a static poster was exposed during DOM hand-back", **detail)
+    if len(dom_checks) != 4 or any(value is None for value in dom_checks):
+        return _verdict(None, "DOM hand-back coverage is unreadable", **detail)
     return _verdict(source_frames <= max_source_frames,
                     "hand-back exceeded the source-frame tolerance" if source_frames > max_source_frames else None,
                     **detail)

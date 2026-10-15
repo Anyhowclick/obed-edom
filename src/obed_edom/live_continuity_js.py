@@ -1768,6 +1768,9 @@ PRESERVE_CORE_JS = r"""
     }
     if (v.__obedRemountEpoch === -1 || v.ended) return;
     if (keepThroughBridge(v) || keepThroughPin(v)) return;
+    const pendingCarry = nextEntry(instanceOf(v));
+    if (pendingCarry && pendingCarry.underArtwork === true && currentHashNum() === pendingCarry.atScene
+        && v.__obedHold !== pendingCarry) return;
     if (v.__obedParent && document.contains(v.__obedParent)) {
       try {
         const anchor = (v.__obedNextSibling && v.__obedNextSibling.parentNode === v.__obedParent)
@@ -2123,13 +2126,13 @@ PRESERVE_CORE_JS = r"""
       keyed = takeScene;
       cands = interimCandidates(takeScene);
     }
+    if (!cands.length) return;
     note('interim-scan', {scene: scene, takeScene: takeScene, takeAgoMs: take && take.lastAt != null
       ? performance.now() - take.lastAt : null, keyed: keyed, observedAt: observedAt,
       roots: roots.map(function(r) { return r.id || null; }), candidates: cands.map(function(v) { return v.__obedElId; }),
       glCanvases: Array.prototype.filter.call(document.querySelectorAll('canvas'), function(c) {
         return /^\d+-canvas$/.test(String(c.id || ''));
       }).length});
-    if (!cands.length) return;
     if (roots.length !== 1) {
       note('interim-refused', {reason: 'roots', roots: roots.length});
       return;

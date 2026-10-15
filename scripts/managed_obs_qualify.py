@@ -113,6 +113,7 @@ from live_continuity_probe import (  # noqa: E402
     _movie_entries,
     _notes,
     armed_evidence,
+    bind_feed_source_fps,
     combine_verdicts,
     forced_fail_seed,
     ground_truth_facts,
@@ -407,6 +408,7 @@ def feed_fixture_facts(fixture: Path) -> dict[str, Any]:
         facts = ground_truth_facts(ground_truth_plan(dest, slides))
         if not any(spec.get("underArtwork") is True for spec in facts.get("verdicts") or []):
             raise SystemExit("feed fixture derives no under-artwork carries")
+        bind_feed_source_fps(facts, dest, slides)
         facts["fixtureIdentity"] = identity
         return facts
     finally:

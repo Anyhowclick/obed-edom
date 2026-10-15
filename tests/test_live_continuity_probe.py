@@ -11709,21 +11709,65 @@ def _handback_continuity(*, fps: int = 30, source_frames: float = 1.0) -> dict[s
     }
 
 
-@pytest.mark.parametrize(("case", "fps", "source_frames", "expected"), [
-    ("pass-25", 25, 1.0, True), ("pass-30", 30, 1.0, True),
-    ("nine-frame", 30, 9.0, False), ("dom-exposure", 30, 1.0, False),
-    ("unreadable", 30, 1.0, None), ("rounded-held-plus-two", 30, 2.49, True),
+@pytest.mark.parametrize(("case", "fps", "source_frames", "mode", "expected"), [
+    ("pass-25", 25, 1.0, "continuous", True), ("pass-30", 30, 1.0, "continuous", True),
+    ("nine-frame", 30, 9.0, "continuous", False), ("dom-exposure", 30, 1.0, "continuous", False),
+    ("hidden-post-closure", 30, 1.0, "continuous", False),
+    ("unreadable", 30, 1.0, "continuous", None),
+    ("rounded-held-plus-two", 30, 2.49, "continuous", True),
+    ("feed-off-no-adjacency", 30, 1.0, "departure", True),
 ])
-def test_handback_continuity_scorer(case: str, fps: int, source_frames: float, expected: bool | None) -> None:
+def test_handback_continuity_scorer(
+    case: str, fps: int, source_frames: float, mode: str, expected: bool | None,
+) -> None:
     record = _handback_continuity(fps=fps, source_frames=source_frames)
     if case == "dom-exposure":
         record["closed"]["dom"]["afterCanvas"] = False
+    elif case == "hidden-post-closure":
+        record["presented"][0]["dom"]["shown"] = False
     elif case == "unreadable":
         record["frameMappingComplete"] = False
-    scored = probe.score_handback_continuity(record)
+    elif case == "feed-off-no-adjacency":
+        record["lastUpload"]["frameIndex"] = 2
+        record["adjacentFrames"] = False
+    scored = probe.score_handback_continuity(record, mode=mode)
     assert scored["verdict"] is expected
     if expected is not None and case != "dom-exposure":
-        assert scored["frameGap"] == 1
+        assert scored["frameGap"] == (7 if case == "feed-off-no-adjacency" else 1)
+    if case == "nine-frame":
+        assert scored["sourceFrames"] == 9
+
+
+@pytest.mark.parametrize(("source_fps", "rows", "expected"), [
+    (60.0, [(1, 0.0), (2, 1 / 30), (3, 2 / 30), (4, 3 / 30)], 1 / 60),
+    (None, [(4, .1), (12, .433333), (13, .466666), (14, .5), (15, .533333)], 1 / 30),
+])
+def test_source_frame_duration_uses_movie_fps_and_tolerates_page_load_catch_up(
+    source_fps: float | None, rows: list[tuple[int, float]], expected: float,
+) -> None:
+    media = [
+        {"kind": "videoFrame", "t": float(index), "presentedFrames": frame, "mediaTime": media_time}
+        for index, (frame, media_time) in enumerate(rows, 1)
+    ]
+    actual = probe.mm_feed_instrument._source_frame_duration(
+        media, created_at=1.0, source_fps=source_fps,
+    )
+    assert actual == pytest.approx(expected, rel=.01)
+
+
+def test_feed_control_aggregate_expectations_cover_no_linger_and_intermittent_interim_delay() -> None:
+    green = {"handbackContinuity": {"verdict": True, "sourceFrames": 1}}
+    exposed = {"handbackContinuity": {
+        "verdict": False, "sourceFrames": 1,
+        "reason": "a static poster was exposed during DOM hand-back",
+    }}
+    no_linger = {"handbackContinuity": {"verdict": False, "sourceFrames": 9}}
+    assert probe.mm_feed_control_aggregate_problems("interim-delay", [exposed, green, green]) == []
+    assert probe.mm_feed_control_aggregate_problems("no-linger", [no_linger]) == []
+    assert probe.mm_feed_control_aggregate_problems("interim-delay", [green])
+    assert probe.mm_feed_control_aggregate_problems(
+        "interim-delay", [{"handbackContinuity": {"verdict": None}}],
+    )
 
 
 @pytest.mark.parametrize(("rows", "expected"), [
@@ -12069,7 +12113,7 @@ const simpleDraws={drawCount:1,draws:[{draw:1,layerSize:[100,100],labelBoxOpacit
 entries.push({id:'carry-hold',objectId:'hold',dstObjectId:'dhold',atScene:4,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 entries.push({id:'carry-killed',objectId:'killed',dstObjectId:'dkilled',atScene:6,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 entries.push({id:'chain-10',objectId:'alpha',dstObjectId:'alpha-hop',atScene:10,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
-entries.push({id:'chain-12',objectId:'alpha-hop',dstObjectId:'alpha-final',atScene:12,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'chain-11',objectId:'alpha-hop',dstObjectId:'alpha-final',atScene:11,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 entries.push({id:'chain-14',objectId:'alpha-final',dstObjectId:'alpha-end',atScene:14,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 const boundaries=entries.map(e=>({atScene:e.atScene,underArtwork:true,src:{objectId:e.objectId},dst:{objectId:e.dstObjectId},feed:e.feed}));
 global.__OBED_CONTINUITY_INFO__={authoredWidth:1920,authoredHeight:540};
@@ -12108,9 +12152,9 @@ location.hash='#3';for(const frame of [31,32,33])present(videos.hold,frame);seam
 const holdMove=openContext('1-canvas'),holdTexture=posterTexture(holdMove,new ImageSource(100,100,8));drawHeld(holdMove,holdTexture,videos.hold,true);videos.hold.play();present(videos.hold,34);
 location.hash='#5';for(const frame of [41,42,43])present(videos.killed,frame);videos.killed.__obedPosterHeld=true;videos.killed.pause();window.__OBED_MM_FEED__.once('killed');
 const killedMove=openContext('2-canvas'),killedTexture=posterTexture(killedMove,new ImageSource(100,100,8));drawHeld(killedMove,killedTexture,videos.killed,false);videos.killed.play();present(videos.killed,44);
-function runChain(atScene,startFrame,id,objectId,dstObjectId){location.hash='#'+(atScene-1);seam.claim(objectId);location.hash='#'+atScene;const move=openContext(id),texture=posterTexture(move,new ImageSource(100,100,8));for(let n=0;n<4;n++){present(videos.alpha,startFrame+n);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}videos.alpha.__obedInstance=dstObjectId}
+function runChain(atScene,startFrame,id,objectId,dstObjectId){location.hash='#'+(atScene-1);seam.claim(objectId);const move=openContext(id),texture=posterTexture(move,new ImageSource(100,100,8));location.hash='#'+atScene;for(let n=0;n<4;n++){present(videos.alpha,startFrame+n);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}videos.alpha.__obedInstance=dstObjectId}
 function runMidMoveStandDown(){location.hash='#13';for(const frame of [69,70])present(videos.alpha,frame);seam.claim('alpha-final');location.hash='#14';const move=openContext('5-canvas'),texture=posterTexture(move,new ImageSource(100,100,8));for(const frame of [71,72]){present(videos.alpha,frame);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}present(videos.alpha,73);seam.onStandDown('alpha-final','after-feed');videos.alpha.__obedPosterHeld=true;videos.alpha.pause();for(let n=0;n<2;n++){move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}window.__obedMmFeedProbe.report();videos.alpha.play();present(videos.alpha,74);videos.alpha.__obedInstance='alpha-end'}
-videos.broken.drawSource=null;runChain(10,51,'3-canvas','alpha','alpha-hop');runChain(12,61,'4-canvas','alpha-hop','alpha-final');runMidMoveStandDown();
+videos.broken.drawSource=null;runChain(10,51,'3-canvas','alpha','alpha-hop');location.hash='#10';videos.alpha.__obedPosterHeld=true;videos.alpha.pause();videos.alpha.__obedPosterHeld=false;videos.alpha.play();runChain(11,61,'4-canvas','alpha-hop','alpha-final');runMidMoveStandDown();
 window.__obedMmFeedProbe.report();videos.alpha.__obedInstance='dalpha';videos.broken.__obedInstance='dbroken';tick();
 console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
 """
@@ -12127,7 +12171,7 @@ console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
     continuous_entries.extend({
         "id": f"chain-{scene}", "objectId": object_id, "dstObjectId": dst_id, "atScene": scene,
         "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
-    } for scene, object_id, dst_id in ((10, "alpha", "alpha-hop"), (12, "alpha-hop", "alpha-final")))
+    } for scene, object_id, dst_id in ((10, "alpha", "alpha-hop"), (11, "alpha-hop", "alpha-final")))
     stand_entry = [{
         "id": "chain-14", "objectId": "alpha-final", "dstObjectId": "alpha-end", "atScene": 14,
         "feed": {"draw": 1, "from": {"upload": 1, "size": [100, 100]}, "to": None},
@@ -12144,7 +12188,7 @@ console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
     assert records["carry-broken"]["feed"]["continuousCoverage"] is True
     assert probe.score_feed_live(records["carry-counter"]["feed"])["verdict"] is True
     assert probe.score_feed_live(records["chain-10"]["feed"])["verdict"] is True
-    assert probe.score_feed_live(records["chain-12"]["feed"])["verdict"] is True
+    assert probe.score_feed_live(records["chain-11"]["feed"])["verdict"] is True
     assert probe.score_feed_live(stand_records["chain-14"]["feed"])["verdict"] is False
     assert probe.score_no_rider_above_canvas(records["carry-alpha"]["rider"])["verdict"] is True
     assert probe.score_labels_over_feed(records["carry-alpha"]["labels"])["verdict"] is True
@@ -12167,11 +12211,11 @@ console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
                          for row in frame["rows"] if row["entryId"] == "carry-alpha")["textures"][0]
     assert alpha_texture["size"] == [100, 100] and alpha_texture["uploadedSize"] == [160, 90]
     assert [(row["entryId"], row["serial"]) for row in report["claims"]] == [
-        ("carry-alpha", 1), ("carry-broken", 1), ("carry-counter", 1), ("chain-10", 4), ("chain-12", 5),
+        ("carry-alpha", 1), ("carry-broken", 1), ("carry-counter", 1), ("chain-10", 4), ("chain-11", 5),
         ("chain-14", 6),
     ]
     assert [(row["entryId"], row["serial"]) for row in report["departures"]] == [
-        ("carry-hold", 2), ("carry-killed", 3), ("chain-14", 6),
+        ("carry-hold", 2), ("carry-killed", 3), ("chain-11", 5), ("chain-14", 6),
     ]
     hold_departure = next(row for row in report["departures"] if row["entryId"] == "carry-hold")
     hold_context = next(row for row in report["contexts"] if row["serial"] == 2)
@@ -12377,8 +12421,12 @@ def test_repaired_full_alpha_runtime_plan_is_pinned() -> None:
     assert probe.plan_signature(runtime) == probe.ALPHA_DSK_PLAN_SHA256
 
 
+ORIGINAL_D7 = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Continuity/q7-fixtures/D7-unrepaired/html-player")
+
+
+@pytest.mark.skipif(not ORIGINAL_D7.is_dir(), reason="the external unrepaired D7 refusal fixture is absent")
 def test_original_d7_feed_fixture_is_refused_with_slide_and_leaf_diagnostics() -> None:
-    root = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Continuity/q7-fixtures/D7-unrepaired/html-player")
+    root = ORIGINAL_D7
     slides = probe.load_slides(root)
     with pytest.raises(RuntimeError, match=r"feed fixture refused.*slide 3 0/baseLayer/layers/4/layers/0/layers/0"):
         probe.require_feed_fixture(root, slides)
@@ -12408,6 +12456,7 @@ def test_ground_truth_feed_facts_are_keyed_by_scene_and_destination_object(monke
 
 
 def test_feed_control_cli_registers_both_tampers_and_kill_switch() -> None:
+    ordinary = probe.parse_args([])
     after = probe.parse_args(["--feed-tamper", "after-feed", "--feed-tamper-scene", "10",
                               "--skip-arms", "B,C,V,Voff,attach"])
     no_linger = probe.parse_args(["--feed-tamper", "no-linger", "--skip-arms", "B,C,V,Voff,attach"])
@@ -12417,3 +12466,7 @@ def test_feed_control_cli_registers_both_tampers_and_kill_switch() -> None:
     assert no_linger.feed_tamper == "no-linger"
     assert killed.hold_upload_kill_switch is True and killed.mm_feed == "off" and killed.feed_dwell == 12
     assert variant.feed_variant == "from-only" and variant.mm_opacity == "off"
+    assert probe.feed_fixture_required(ordinary) is False
+    assert all(probe.feed_fixture_required(args) for args in (after, no_linger, killed, variant))
+    with pytest.raises(SystemExit):
+        probe.parse_args(["--feed-tamper", "no-linger", "--feed-variant", "from-only"])

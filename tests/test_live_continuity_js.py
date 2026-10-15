@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "d45156048ab3dfc4ac9ca30d9d0049b5a7cc70f7c70686ce5a3f1963d34ad77e"
+PINNED_CORE_SHA256 = "4c917be4d1d495c59dbbb2e388597c8a61a55e5e8180aaddc70f440741664eef"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -222,16 +222,19 @@ def test_install_outcome(plan, kwargs, expected):
 
 
 @pytest.mark.parametrize(
-    ("stop", "expected_runs", "expected_reason"),
+    ("stop", "expected_runs", "expected_starts", "expected_reason"),
     [
-        pytest.param("refusal", 3, "admission", id="refusal"),
-        pytest.param("cancel", 3, "take", id="cancel-linger"),
-        pytest.param("reschedule", 3, "rescheduled", id="callback-re-request"),
-        pytest.param("generation", 2, "admission", id="generation-bump"),
-        pytest.param("throw", 3, "error", id="callback-throw"),
+        pytest.param("absent", 2, 0, None, id="module-absent"),
+        pytest.param("refusal", 3, 1, "admission", id="refusal"),
+        pytest.param("cancel", 3, 1, "take", id="cancel-linger"),
+        pytest.param("reschedule", 3, 1, "rescheduled", id="callback-re-request"),
+        pytest.param("generation", 2, 1, "admission", id="generation-bump"),
+        pytest.param("throw", 3, 1, "error", id="callback-throw"),
     ],
 )
-def test_feed_only_plan_extends_the_same_callback_until_each_stop(stop, expected_runs, expected_reason):
+def test_feed_only_plan_extends_the_same_callback_until_each_stop(
+    stop, expected_runs, expected_starts, expected_reason
+):
     plan_js = json.dumps(_FEED_ONLY_PLAN)
     harness = f"""
 const window = {{__OBED_CONTINUITY__: {plan_js}, addEventListener(){{}}, removeEventListener(){{}}}};
@@ -256,10 +259,12 @@ const feed = P.feed;
 native.splice(0).forEach((cb) => cb(0));
 const tokens = [], callbackTokens = [];
 let checks = 0, allow = true, runs = 0;
-window.__OBED_MM_FEED__ = {{
-  linger(token) {{ tokens.push(token); checks += 1; return allow && ('{stop}' !== 'refusal' || checks <= 2); }},
-  lingerWhy() {{ return 'stopped'; }}, lingerInfo() {{ return {{ok: true}}; }},
-}};
+if ('{stop}' !== 'absent') {{
+  window.__OBED_MM_FEED__ = {{
+    linger(token) {{ tokens.push(token); checks += 1; return allow && ('{stop}' !== 'refusal' || checks <= 2); }},
+    lingerWhy() {{ return 'stopped'; }}, lingerInfo() {{ return {{ok: true}}; }},
+  }};
+}}
 function callback() {{
   runs += 1;
   callbackTokens.push(feed ? feed.frameToken() : null);
@@ -292,7 +297,7 @@ console.log(JSON.stringify({{
         "runs": expected_runs,
         "hooked": True,
         "hadFeed": True,
-        "starts": 1,
+        "starts": expected_starts,
         "endReason": expected_reason,
         "tokenFrozen": True,
         "distinctNormalTokens": True,
@@ -4104,12 +4109,21 @@ function canvas(id, rect) {
   return {id, nodeType: 1, parentNode: null, parentElement: null, __inStage: true,
     getBoundingClientRect() { return {left: rect.x, top: rect.y, width: rect.w, height: rect.h}; }};
 }
+let bodyAppends = 0;
+const appendToBody = bodyEl.appendChild;
+bodyEl.appendChild = function(v) { bodyAppends += 1; return appendToBody(v); };
 goToScene(0);
 const a = playing('A1', 'https://host/a.mov');
 const b = playing('B1', 'https://host/b.mov');
 a._rect = {left: 100, top: 120, width: 300, height: 180};
 b._rect = {left: 520, top: 140, width: 240, height: 160};
-goToScene(1); a.pause(); b.pause(); detach(a); detach(b); goToScene(2);
+goToScene(1); a.pause(); b.pause(); detach(a); detach(b);
+const departureAppends = bodyAppends;
+goToScene(2);
+flushTimeouts();
+const beforeRoot = {retryAppends: bodyAppends - departureAppends,
+  aOnBody: a.parentNode === bodyEl, bOnBody: b.parentNode === bodyEl,
+  aOpacity: a.style.opacity, bOpacity: b.style.opacity};
 const matchBefore = [a.__obedLayer || null, a.__obedParent || null, b.__obedLayer || null, b.__obedParent || null];
 const root = treeNode('layerRoot');
 const layerA = treeNode('layerA'), layerB = treeNode('layerB'), label = treeNode('layerLabel');
@@ -4136,7 +4150,7 @@ const afterSet = {aInMovieLayer: a.parentNode === layerA, bInterim: b.parentNode
 layerA.replaceChild(stub, slotA);
 moCallbacks.slice().forEach((cb) => cb([{addedNodes: [stub], removedNodes: [slotA]}]));
 console.log(JSON.stringify({
-  interim, matchingUntouched: matchBefore.every((value, i) => value === matchInterim[i]), afterSet,
+  beforeRoot, interim, matchingUntouched: matchBefore.every((value, i) => value === matchInterim[i]), afterSet,
   final: {aInMovieLayer: a.parentNode === layerA, bInterim: b.parentNode === root && b.isConnected,
     aOnRoot: a.parentNode === root, layer: a.__obedLayer && a.__obedLayer.id},
   rootOrder: root.children.map((node) => node.id || node.__obedInstance),
@@ -4145,6 +4159,7 @@ console.log(JSON.stringify({
 """
     result = _run_chain(plan, script)
     assert result == {
+        "beforeRoot": {"retryAppends": 0, "aOnBody": True, "bOnBody": True, "aOpacity": "0", "bOpacity": "0"},
         "interim": {"a": True, "b": True, "bConnected": True},
         "matchingUntouched": True,
         "afterSet": {"aInMovieLayer": True, "bInterim": True, "aOnRoot": False},
