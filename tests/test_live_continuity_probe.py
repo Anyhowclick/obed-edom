@@ -11719,6 +11719,7 @@ def _handback_continuity(*, fps: int = 30, source_frames: float = 1.0) -> dict[s
     ("feed-off-no-adjacency", 30, 1.0, "departure", True),
     ("continuous-no-adjacency-unreadable", 30, 1.0, "continuous", False),
     ("backwards-unreadable-duration", 30, 1.0, "continuous", False),
+    ("rvfc-duration-cannot-pass", 30, 1.0, "continuous", None),
 ])
 def test_handback_continuity_scorer(
     case: str, fps: int, source_frames: float, mode: str, expected: bool | None,
@@ -11741,6 +11742,8 @@ def test_handback_continuity_scorer(
     elif case == "backwards-unreadable-duration":
         record["presented"][0]["mediaTime"] = record["lastUpload"]["mediaTime"] - 1 / 30
         record["sourceFrameDurationS"] = None
+    elif case == "rvfc-duration-cannot-pass":
+        record["durationSource"] = "rvfc"
     scored = probe.score_handback_continuity(record, mode=mode)
     assert scored["verdict"] is expected
     if expected is not None and case != "dom-exposure":

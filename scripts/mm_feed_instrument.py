@@ -940,6 +940,8 @@ def score_handback_continuity(
         return _verdict(None, "the upload/removal frame adjacency is unreadable", **detail)
     if len(dom_checks) != 4 or any(value is None for value in dom_checks):
         return _verdict(None, "DOM hand-back coverage is unreadable", **detail)
+    if source_frames <= max_source_frames and duration_source != "fps":
+        return _verdict(None, "the source frame rate is unknown, so the hand-back cannot pass", **detail)
     return _verdict(source_frames <= max_source_frames,
                     "hand-back exceeded the source-frame tolerance" if source_frames > max_source_frames else None,
                     **detail)
