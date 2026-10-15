@@ -51,3 +51,5 @@ G1 rows:
 | Alpha_DSK fixture | — | D1×1, D2×3, D3×1 | — |
 | qual-decks | — | D3×2; across-first-build D3×1 | — |
 | Every other fixture | — | clean | — |
+
+**Post-merge (owner, 2026-10-15):** the `F2/attempt-01`/`-02` rows were dropped from G1, and the capture folder was Trashed. D1g's positive cases are covered by the unit tests only. The rows' measured outcomes above remain the record. G1 PASS without them.
