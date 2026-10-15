@@ -1,4 +1,4 @@
-"""Prepare-time conversion of an export's movies to H.264, against the real bundled ffmpeg.
+"""Prepare-time conversion of export movies, against the real bundled ffmpeg.
 
 Clips are tiny lavfi renders (320x180, at most 30 frames, about 1 s), generated once per
 module and copied into a fresh fake export for each test."""
@@ -16,7 +16,7 @@ import pytest
 from obed_edom import html_preview as hp
 from obed_edom import preview_movies as pm
 from obed_edom.html_preview import PreviewError
-from obed_edom.live_codec import movie_codec, movie_geometry, movie_timing
+from obed_edom.live_codec import movie_codec, movie_geometry, movie_timing, webm_info
 from obed_edom.maps_movie import ffmpeg_exe
 
 LAVFI = ["-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=1"]
@@ -100,6 +100,8 @@ def test_converts_every_non_h264_copy_in_place_with_identical_timing(tmp_path, m
         ("S2", clips["prores_copy"], "clip.mov"),
         ("S1", clips["hevc"], "untitled.mov"),
         ("S2", clips["alpha_const"], "keyed.mov"),
+        ("S1", clips["alpha_real"], "keyed-real.mov"),
+        ("S2", clips["alpha_real"], "keyed-real.mov"),
         ("S3", clips["h264"], "wa.mp4"),
     ])
     sources = {key: (movie_timing(p), movie_geometry(p), hashlib.sha256(p.read_bytes()).hexdigest())
@@ -113,23 +115,33 @@ def test_converts_every_non_h264_copy_in_place_with_identical_timing(tmp_path, m
     record = pm.convert_movies(export, slides, log=lines.append)
 
     assert record["encoder"] == "libx264 crf14 fast yuv420p; aac 192k"
+    assert record["alphaEncoder"] == "libvpx-vp9 crf20 yuva420p; silent WebM"
     assert any(line.startswith("Converting untitled.mov to H.264 · 0 / 1 s") for line in lines)
+    assert any(line.startswith("Converting keyed-real.mov to VP9 alpha · 0 / 1 s") for line in lines)
     assert sorted(p.name for p in export.rglob("*") if p.is_file() and p.suffix != ".json") == sorted(
         p.name for p in paths.values()
     )
     for key, path in paths.items():
         timing, geometry, _sha = sources[key]
-        out_timing, out_geometry = movie_timing(path), movie_geometry(path)
-        assert movie_codec(path) == "avc1"
-        assert out_timing.timescale == timing.timescale
-        assert abs(out_timing.presented_s - timing.presented_s) <= 0.5 / 30
-        assert (out_geometry.width, out_geometry.height, out_geometry.matrix) == (
-            geometry.width, geometry.height, geometry.matrix,
-        )
+        if key[1] == "keyed-real.mov":
+            info = webm_info(path)
+            assert movie_codec(path) == "V_VP9"
+            assert info is not None and info.alpha
+            assert (info.width, info.height) == (geometry.width, geometry.height)
+            assert abs(info.duration_s - timing.presented_s) <= 0.5 / 30
+        else:
+            out_timing, out_geometry = movie_timing(path), movie_geometry(path)
+            assert movie_codec(path) == "avc1"
+            assert out_timing.timescale == timing.timescale
+            assert abs(out_timing.presented_s - timing.presented_s) <= 0.5 / 30
+            assert (out_geometry.width, out_geometry.height, out_geometry.matrix) == (
+                geometry.width, geometry.height, geometry.matrix,
+            )
     assert movie_geometry(paths[("S1", "untitled.mov")]).matrix[:2] == (0, -65536)
     assert paths[("S3", "wa.mp4")].read_bytes() == h264_before
     assert paths[("S1", "clip.mov")].stat().st_nlink == 2
     assert paths[("S1", "clip.mov")].stat().st_ino == paths[("S2", "clip.mov")].stat().st_ino
+    assert paths[("S1", "keyed-real.mov")].stat().st_ino == paths[("S2", "keyed-real.mov")].stat().st_ino
     root = export.resolve()
     by_path = {entry["path"]: entry for entry in record["converted"]}
     assert set(by_path) == {
@@ -143,6 +155,7 @@ def test_converts_every_non_h264_copy_in_place_with_identical_timing(tmp_path, m
             "path": entry["path"],
             "asset": name,
             "sourceCodec": "HEVC" if name == "untitled.mov" else "ProRes",
+            "targetCodec": "VP9 alpha" if name == "keyed-real.mov" else "H.264",
             "sourceSha256": sources[(uuid, name)][2],
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "bytes": path.stat().st_size,
@@ -154,7 +167,7 @@ def test_converts_every_non_h264_copy_in_place_with_identical_timing(tmp_path, m
 @pytest.mark.parametrize(
     "bad, match",
     [
-        ("alpha_real", "it has transparency, and H.264 has none; replace it with an opaque movie"),
+        ("alpha_loss", "lost transparency during conversion"),
         ("odd", "its size 319×180 is odd"),
         ("dropped", "the converted file plays"),
         ("missing", "its file is missing from the export"),
@@ -162,7 +175,7 @@ def test_converts_every_non_h264_copy_in_place_with_identical_timing(tmp_path, m
     ],
 )
 def test_refuses_by_name_and_leaves_the_export_untouched(tmp_path, monkeypatch, clips, bad, match):
-    clip = clips.get(bad, clips["alpha_const"])
+    clip = clips["alpha_real"] if bad == "alpha_loss" else clips.get(bad, clips["alpha_const"])
     export, slides, paths = export_with(tmp_path, monkeypatch, [
         ("S1", clips["prores"], "fine.mov"),
         ("S2", clip, "bad.mov"),
@@ -175,6 +188,15 @@ def test_refuses_by_name_and_leaves_the_export_untouched(tmp_path, monkeypatch, 
             return [*argv[:-1], "-frames:v", "20", argv[-1]]
 
         monkeypatch.setattr(pm, "_encode_argv", dropping_argv)
+    if bad == "alpha_loss":
+        alpha_argv = pm._alpha_encode_argv
+
+        def opaque_argv(*args):
+            argv = alpha_argv(*args)
+            argv[argv.index("yuva420p")] = "yuv420p"
+            return argv
+
+        monkeypatch.setattr(pm, "_alpha_encode_argv", opaque_argv)
     if bad == "disk_full":
         def full_disk(*_args):
             raise OSError(28, "No space left on device")

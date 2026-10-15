@@ -82,7 +82,11 @@ def _deck_qualification(root: Path, slides: list[dict], settings: dict) -> dict:
 def _converted_movies(manifest: dict) -> list[dict]:
     movies: dict[str, dict] = {}
     for entry in (manifest.get("movieConversion") or {}).get("converted", []):
-        movies.setdefault(entry["asset"], {"asset": entry["asset"], "sourceCodec": entry["sourceCodec"]})
+        movies.setdefault(entry["asset"], {
+            "asset": entry["asset"],
+            "sourceCodec": entry["sourceCodec"],
+            "targetCodec": entry.get("targetCodec") or "H.264",
+        })
     return list(movies.values())
 
 

@@ -201,14 +201,10 @@ def _continuity_scripts(plan: dict[str, Any], canvas: dict[str, int]) -> str:
 
 
 def _codec_supported(family: str, *, attach: bool, headless: bool) -> bool:
-    """h264 decodes everywhere. HEVC is attempted only in headful launch mode: OBS's
-    CEF (attach) and headless Chrome are not assumed to decode HEVC (untested either
-    way on the owner's Mac, so both fail closed rather than guessing). ProRes never
-    plays in Chrome; av1/vp9 decode support here is unverified, so they are kept
-    conservative and fail closed like any other unproven codec."""
+    """Return whether the output mode is qualified for ordinary playback."""
     if family == "h264":
         return True
-    if family == "hevc":
+    if family in ("hevc", "vp9"):
         return not attach and not headless
     return False
 
@@ -1306,7 +1302,7 @@ class LiveOutputHost:
             asset = movie["assetKeys"][0]
             entry = codec_by_asset.get(asset)
             family = entry["family"] if entry is not None else "other"
-            if not _codec_supported(family, attach=attach, headless=self.headless):
+            if family == "vp9" or not _codec_supported(family, attach=attach, headless=self.headless):
                 display = _codec_display(entry)
                 if self._gl_replay_mode == "injected":
                     self._gl_replay_mode, self._gl_replay_reason, self._gl_replay_script = "unavailable", "continuity unsupported", ""

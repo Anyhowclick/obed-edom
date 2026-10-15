@@ -749,8 +749,15 @@ def test_deck_qualification_reports_continuity_and_conversions_without_starting_
                'objectId': 'instance-without-runtime-entry', 'code': 'R11', 'reason': 'R11: unmeasured export shape'}
     monkeypatch.setattr(live, 'derive_runtime', lambda *args, **kwargs: (SimpleNamespace(refusals=(refusal,)), {}))
     job.result['slides'].append({'originalOrdinal': 2, 'playerIndex': 1, 'skipped': False})
-    converted = [{'path': f'assets/{folder}/assets/untitled.mov', 'asset': 'untitled.mov', 'sourceCodec': 'HEVC',
-                  'sourceSha256': 'a', 'sha256': 'b', 'bytes': 1} for folder in ('s1', 's2')]
+    converted = [
+        {'path': f'assets/{folder}/assets/untitled.mov', 'asset': 'untitled.mov', 'sourceCodec': 'HEVC',
+         'sourceSha256': 'a', 'sha256': 'b', 'bytes': 1}
+        for folder in ('s1', 's2')
+    ] + [
+        {'path': f'assets/{folder}/assets/keyed.mov', 'asset': 'keyed.mov', 'sourceCodec': 'ProRes',
+         'targetCodec': 'VP9 alpha', 'sourceSha256': 'c', 'sha256': 'd', 'bytes': 2}
+        for folder in ('s1', 's2')
+    ]
     job.result['manifest']['movieConversion'] = {'encoder': 'libx264 crf14 fast yuv420p; aac 192k', 'converted': converted}
     response = client.get('/api/live/decks/prepared/qualification')
     assert response.status_code == 200
@@ -760,7 +767,10 @@ def test_deck_qualification_reports_continuity_and_conversions_without_starting_
         'continuity': {'mode': 'qualified', 'reason': None, 'notCarried': [{
             'fromSlide': 1, 'toSlide': 2, 'asset': 'vid-20250608-wa0125.mp4', 'objectId': 'instance-without-runtime-entry',
             'code': 'R11', 'reason': 'R11: unmeasured export shape'}]},
-        'convertedMovies': [{'asset': 'untitled.mov', 'sourceCodec': 'HEVC'}],
+        'convertedMovies': [
+            {'asset': 'untitled.mov', 'sourceCodec': 'HEVC', 'targetCodec': 'H.264'},
+            {'asset': 'keyed.mov', 'sourceCodec': 'ProRes', 'targetCodec': 'VP9 alpha'},
+        ],
     }
     monkeypatch.setenv('OBED_LIVE_CONTINUITY', 'off')
     job.result['manifest']['movieConversion']['converted'] = []

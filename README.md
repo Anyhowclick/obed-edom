@@ -16,7 +16,7 @@ If macOS blocks the launcher, Control-click it and choose **Open**.
 
 - **Sermon Base Generator** — create LW and DSK decks, an operator-cued Word outline, previews, and a review PDF.
 - **Sermon Checker** — check an outline, one deck, or an LW/DSK pair for cue, wording, layout, photo, and house-style issues. Checks do not alter the source files.
-- **Alpha Keynote** — drop or choose a Keynote, prepare it (movies are converted to H.264 and mis-mapped export textures are repaired), then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
+- **Alpha Keynote** — drop or choose a Keynote, prepare it (movies are converted to H.264 or VP9 with alpha and mis-mapped export textures are repaired), then present using a slide grid and current still preview. Supports silent screen output and managed DeckLink fill/key output.
 - **CG Resizer** — turn a finalised wide-wall deck into a 16:9 CG deck and review any framing choices.
 - **DSK Generator** — turn a full-wall (FW) deck into a lower-thirds (DSK) deck; the DSK template is optional for image/video decks (the wall deck's own transparent layout, then the reference deck, are tried first), required for reformatted text verses; chosen once and remembered on this Mac, shared with Sermon Base Generator.
 - **Maps** — build and export map slides for LW, DSK, and CG.
@@ -56,7 +56,7 @@ The generator writes one operator cue for every generated slide into the `_CUED.
 
 In **Alpha Keynote**, drop a `.key` file from Finder or **Choose on this Mac**.
 **Qualify Keynote** prepares a cached HTML
-export from a scratch copy, converting every movie that is not H.264 (see
+export from a scratch copy, converting movies to a supported playback format (see
 **Codec report**). A prepared deck from **Sermon Checker → Build Preview** can
 also be selected. A deck that cannot play (unrecognised player, not 16:9, not
 manual mode, unsupported media such as a web video, no playable slides) shows the
@@ -296,23 +296,20 @@ above.
 
 ### Codec report
 
-Preparing a deck converts every movie its slides reference that is not H.264 to
-H.264 (libx264 crf 14, preset fast, yuv420p; audio AAC 192k), in place in the
-cached export, with the same file names. Only the export's movie copies are
-converted; the `.key` is never touched. Copies with the same media data, timing and
-geometry are encoded once. Each output is checked against its source (codec, coded size,
-timescale, rotation matrix, presented duration and, where the source has no
-trimming edit list, frame count) before it replaces the copy; a failed check
-fails the prepare and removes the incomplete export.
-`manifest.movieConversion` records the encoder and each converted file; the
-prepare panel lists the converted movies with their source codecs. A cached
-export is reused only while every movie it references is H.264, so an older
-cache with ProRes or HEVC movies is exported again once.
+Preparing a deck converts opaque movies to H.264 (libx264 crf 14, preset fast,
+yuv420p; audio AAC 192k). Silent ProRes movies with real transparency, identity
+rotation and edits, and even dimensions are converted to VP9-alpha WebM
+(libvpx-vp9 crf 20, yuva420p). Both targets replace only the cached export bytes,
+keep the exported file names, and are verified before publication. Copies with
+the same media data, timing, geometry and target are encoded once.
+`manifest.movieConversion` records each encoder, source and target codec, and
+converted file. A cache is reused only while every referenced movie is H.264 or
+verified VP9 WebM with alpha.
 
-The prepare fails, naming every such movie, when a movie has real transparency
-(H.264 has none), is HEVC whose transparency cannot be checked, has an odd width
-or height, or has unreadable timing. Replace it with an opaque movie (or one with
-even dimensions) and prepare again.
+The prepare fails, naming every such movie, when transparency cannot be checked,
+an alpha movie is unsupported or has audio, a dimension is odd, or timing is
+unreadable. Replace unsupported input with a compatible opaque or silent ProRes
+movie and prepare again.
 
 Preparing a deck also repairs Keynote's HTML-export texture mis-mapping: Keynote
 sometimes points a label, tag box or movie poster at another object's image (for
@@ -330,11 +327,10 @@ image)`); re-export the deck. A cached export without a current
 Every session still probes each movie the export references (reading its box
 tree directly, no ffprobe) and reports it on `output.codecs`;
 `output.codecWarnings` flags any that may not play in the current output. HEVC
-(`hvc1`/`hev1`) is only attempted in headful launch mode — never headless launch,
-never the OBS attach output — and a deck's continuity plan reports `unsupported`
-if a movie it needs is not playable this way. A deck prepared in the dashboard
-has only H.264 movies, so this only applies to exports that bypass the prepare
-(for example the probe's gate fixtures).
+(`hvc1`/`hev1`) and VP9 are attempted only in headful launch mode — never headless
+launch or an attach output. VP9 remains unsupported for movie continuity. A deck's
+continuity plan reports `unsupported` if it needs such a movie, while ordinary
+unqualified playback warns and proceeds.
 
 Residuals:
 
@@ -342,13 +338,13 @@ Residuals:
 - HDR HEVC (PQ/HLG) becomes 8-bit SDR without tone mapping.
 - Encoding runs at about realtime at 3840×1080, so long clips add minutes to a
   prepare.
-- Conversion is one more generation at crf 14 (visually transparent); audio is
-  re-encoded (live output is muted anyway).
+- Opaque conversion is one more generation at crf 14; VP9-alpha conversion uses
+  crf 20 and accepts silent movies only.
 - Two concurrent prepares of the same deck can make each other fail (fail
   closed).
 - Re-preparing a deck while a live session serves its cache can re-export it
-  underneath the session; an older non-H.264 cache always re-exports on its
-  first re-prepare.
+  underneath the session; an older unsupported cache re-exports on its first
+  re-prepare.
 
 ### Keyer output (managed OBS)
 
