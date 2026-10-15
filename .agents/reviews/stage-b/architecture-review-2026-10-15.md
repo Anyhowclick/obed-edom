@@ -10,6 +10,11 @@ Method (`improve-codebase-architecture`):
 Ratings below are the reconciled verified ones. The first pass rated 12 candidates Strong; 5 remain.
 Vocabulary: `.agents/skills/codebase-design`.
 
+**Owner decisions (2026-10-15):** scope approved as recommended. That is C6 scoring interface, C1, C2, C3, the bounded C4 slice, C5 and the C10 audit, then verification and Q7 attempt 4.
+- C4 keeps the report-wide producer-error rule.
+- The headless vs OBS feed-off expectation set is decided when the C5 registry is built.
+- `entryColdStart` is report-only.
+
 ## Where the tangle is
 
 **Already deep. Leave these alone:**
