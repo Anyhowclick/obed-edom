@@ -54,10 +54,9 @@ ALPHA_3B9019 = "3b9019f068d8ef1c14e586c86e75274a2bebad3c65116fd2247362ed9f39a7e3
 MINIMAL_59CB = "59cb220d674317326e710ccdc7d65fe1d7e473c83646227d2f691e6373d6fa0c"
 F2_SOURCE = Path.home() / "Desktop" / "Convert wall to 16x9 CGs" / "F2.key"
 F2_EXPORT = F2_SOURCE.with_name("F2-html")
-F2_SOURCE_SHA256 = "6fea812c38a43f239ab8cd9101bfe9c8ac550596ae8b01dd6ca05fef8ddb0022"
-F2_EXPORT_TREE_SHA256 = "a2c7fd9a19f3caee02595fe8a639a5f8be8dfb319385c838f89caf557dd6647a"
+F2_SOURCE_SHA256 = "f99a68ef3dc53f5e46e639e8607954b7fa4a8d69ba9a863b453f93b5320cc51b"
+F2_EXPORT_TREE_SHA256 = "c664279eeb4ac5d1bb75164984e03ba2de343c55dd558ac5691fd3ec1385d9da"
 F2_EXPECTED_REPAIRS = (
-    (4, "D2", 11, "B37026D59346E052B9E3697C923C552D"),
     (4, "D2", 12, "DF3DB700EEDF01B099F884EDCEAB50D3"),
 )
 F2_COLLIDING_IDS = {donor_id for _ordinal, _rule, _page, donor_id in F2_EXPECTED_REPAIRS}
@@ -72,7 +71,7 @@ EXPECT: dict[str, dict[str, Any]] = {
     "qual-decks/D2/html-unmodified": {"kind": "repaired", "rules": {"D3": 2}},
     "qual-decks/D2/html-unmodified.across-first-build": {"kind": "repaired", "rules": {"D3": 1}},
     "preview/3b9019": {"kind": "refused", "message": REFUSAL_3B9019},
-    "F2": {"kind": "repaired", "rules": {"D2": 2}},
+    "F2": {"kind": "repaired", "rules": {"D2": 1}},
 }
 DEFAULT_EXPECT = {"kind": "0 hits"}
 CLEAN_EXPORTS = (
