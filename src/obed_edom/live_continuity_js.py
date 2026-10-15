@@ -836,17 +836,21 @@ PRESERVE_CORE_JS = r"""
   const glCalls = new WeakMap();
   const lingers = new Set();
   const departureHides = new Map();
+  let glHookInstalled = false;
   let glToken = null, glTokenSeq = 0;
   function feedEntry(boundary) {
     const m = window.__OBED_MM_FEED__;
     const entries = m && m.entries;
     return entries && boundary && boundary.src ? entries[boundary.src.objectId] : null;
   }
-  function deferDepartureHide(v, boundary) {
+  function deferDepartureHide(v, boundary, owner, rectAt, caller) {
+    if (!glHookInstalled || v.__obedDepartureHidden === boundary) return false;
     const entry = feedEntry(boundary);
-    if (!entry || typeof entry.framesFed !== 'number' || !isFinite(entry.framesFed)) return false;
+    if (!entry || entry.state === 'stoodDown'
+        || typeof entry.framesFed !== 'number' || !isFinite(entry.framesFed)) return false;
     departureHides.set(v, {
-      boundary: boundary, generation: preserveGeneration, framesFed: entry.framesFed
+      boundary: boundary, generation: preserveGeneration, framesFed: entry.framesFed,
+      owner: owner, rectAt: rectAt, caller: caller
     });
     return true;
   }
@@ -854,13 +858,21 @@ PRESERVE_CORE_JS = r"""
     departureHides.forEach(function(pending, v) {
       if (pending.generation !== preserveGeneration || v.__obedGen === -1 || v.ended
           || !document.contains(v) || currentHashNum() !== pending.boundary.atScene - 1) {
+        if (v.__obedGen !== -1 && document.contains(v)) {
+          v.style.opacity = '0';
+          v.__obedDepartureHidden = pending.boundary;
+        }
         departureHides.delete(v);
         return;
       }
       const entry = feedEntry(pending.boundary);
-      if (!entry || !(entry.framesFed > pending.framesFed)) return;
+      if (!entry || (!(entry.framesFed > pending.framesFed) && entry.state !== 'stoodDown')) return;
+      beginMove(v);
+      (document.getElementById('body') || document.body).appendChild(v);
       v.style.opacity = '0';
+      v.__obedDepartureHidden = pending.boundary;
       departureHides.delete(v);
+      rideFrame(v, pending);
     });
   }
   function runGlCall(token, ts) {
@@ -875,7 +887,7 @@ PRESERVE_CORE_JS = r"""
       call.threw = false;
       return out;
     } finally {
-      if (!call.threw) finishDepartureHides();
+      try { finishDepartureHides(); } catch (e) {}
       inGlFrame = false;
       glToken = prev;
     }
@@ -974,6 +986,7 @@ PRESERVE_CORE_JS = r"""
         },
         set: function(value) { raw = value; }
       });
+      glHookInstalled = true;
       if (prior) {
         adopting = true;
         requestAnimationFrame(function() { adopting = false; });
@@ -1277,7 +1290,8 @@ PRESERVE_CORE_JS = r"""
       && claimed.boundary === boundary && claimed.decoder === v;
   }
   function posterHold(v, boundary, reason, requestOnce) {
-    if (!boundary.underArtwork || v.__obedPosterBoundary === boundary) return;
+    if (!boundary.underArtwork) return false;
+    if (v.__obedPosterBoundary === boundary) return v.__obedPosterOnceAccepted === boundary;
     v.__obedPosterBoundary = boundary;
     v.__obedPosterHeld = true;
     try { v.pause(); } catch (e) {}
@@ -1293,10 +1307,60 @@ PRESERVE_CORE_JS = r"""
         why = 'once-error';
       }
     }
+    if (why === null && requestOnce) v.__obedPosterOnceAccepted = boundary;
     note('poster-hold', {
       elId: v.__obedElId, objectId: boundary.src.objectId,
       t: v.currentTime, reason: why
     });
+    return why === null && requestOnce;
+  }
+  function rideFrame(v, ride) {
+    if (v.__obedMotionPinning !== ride.owner) return;
+    const scene = currentHashNum();
+    if (ride.generation !== preserveGeneration || v.__obedGen === -1
+        || v.ended || !document.contains(v) || scene !== ride.boundary.atScene - 1) {
+      v.__obedMotionPinning = false;
+      return;
+    }
+    const screenRect = toScreen(ride.rectAt());
+    if (!screenRect) {
+      noteStageMapUnavailable(ride.caller);
+    } else {
+      v.style.left = screenRect.x + 'px';
+      v.style.top = screenRect.y + 'px';
+      v.style.width = screenRect.w + 'px';
+      v.style.height = screenRect.h + 'px';
+    }
+    requestAnimationFrame(function() { rideFrame(v, ride); });
+  }
+  function departureInterimPlace(v, boundary) {
+    const stage = document.getElementById('stage');
+    const map = stageMap();
+    if (!stage || !map || !boundary.src.rect) return false;
+    const box = toScreen(boundary.src.rect, map);
+    const roots = [];
+    Array.prototype.forEach.call(document.querySelectorAll('canvas'), function(c) {
+      let root = c;
+      while (root && root.parentElement !== stage) root = root.parentElement;
+      if (root && /^layer/.test(String(root.id || '')) && roots.indexOf(root) < 0) roots.push(root);
+    });
+    const places = [];
+    roots.forEach(function(root) {
+      const found = interimAnchor(root, box, map);
+      if (found.anchor) places.push({root: root, anchor: found.anchor});
+    });
+    if (places.length !== 1) return false;
+    const place = places[0];
+    place.root.insertBefore(v, place.anchor.nextSibling);
+    v.style.width = (box.w / map.s) + 'px';
+    v.style.height = (box.h / map.s) + 'px';
+    v.style.left = '0px';
+    v.style.top = '0px';
+    const cur = v.getBoundingClientRect();
+    v.style.left = ((box.x - cur.left) / map.s) + 'px';
+    v.style.top = ((box.y - cur.top) / map.s) + 'px';
+    v.style.removeProperty('z-index');
+    return true;
   }
   function rideTransition(v, owner, boundary, rectAt, caller, hidden) {
     // The ride owns the decoder now: end any footprint hold, or it drags the
@@ -1307,40 +1371,38 @@ PRESERVE_CORE_JS = r"""
     }
     const generation = preserveGeneration;
     const stage = document.getElementById('body') || document.body;
-    if (v.parentNode !== stage) {
-      beginMove(v);
-      stage.appendChild(v);
+    if (v.__obedMotionPinning === owner) {
+      if (!hidden && v.parentNode !== stage) {
+        beginMove(v);
+        stage.appendChild(v);
+      }
+      return false;
     }
-    if (v.__obedMotionPinning === owner) return false;
     v.__obedMotionPinning = owner;
     v.style.position = 'absolute';
     v.style.visibility = 'visible';
     v.style.display = 'block';
-    const waitForGl = hidden && deferDepartureHide(v, boundary);
-    v.style.opacity = hidden && !waitForGl ? '0' : '1';
     v.style.pointerEvents = 'none';
     v.dataset.obedRemounted = '1';
-    function frame() {
-      if (v.__obedMotionPinning !== owner) return;
-      const scene = currentHashNum();
-      if (generation !== preserveGeneration || v.__obedGen === -1
-          || v.ended || !document.contains(v) || scene !== boundary.atScene - 1) {
-        v.__obedMotionPinning = false;
-        return;
-      }
-      const screenRect = toScreen(rectAt());
-      if (!screenRect) {
-        noteStageMapUnavailable(caller);
-      } else {
-        v.style.left = screenRect.x + 'px';
-        v.style.top = screenRect.y + 'px';
-        v.style.width = screenRect.w + 'px';
-        v.style.height = screenRect.h + 'px';
-      }
-      requestAnimationFrame(frame);
+    const claimed = hidden && feedClaimed(v, boundary);
+    const onceAccepted = hidden && !claimed ? posterHold(v, boundary, null, true) : false;
+    const ride = {
+      boundary: boundary, generation: generation, owner: owner, rectAt: rectAt, caller: caller
+    };
+    const waitForGl = hidden && (claimed || onceAccepted)
+      && deferDepartureHide(v, boundary, owner, rectAt, caller);
+    if (waitForGl && (document.contains(v) || departureInterimPlace(v, boundary))) {
+      v.style.opacity = '1';
+      return true;
     }
-    if (hidden && !feedClaimed(v, boundary)) posterHold(v, boundary, null, true);
-    frame();
+    if (hidden) departureHides.delete(v);
+    if (v.parentNode !== stage) {
+      beginMove(v);
+      stage.appendChild(v);
+    }
+    v.style.opacity = hidden ? '0' : '1';
+    if (hidden) v.__obedDepartureHidden = boundary;
+    rideFrame(v, ride);
     return true;
   }
   function keepThroughBridge(v) {
@@ -2120,6 +2182,7 @@ PRESERVE_CORE_JS = r"""
         anchors: found.anchors});
       return false;
     }
+    departureHides.delete(v);
     if (v.__obedMotionPinning) v.__obedMotionPinning = false;
     if (v.__obedPinning) {
       v.__obedPinning = false;

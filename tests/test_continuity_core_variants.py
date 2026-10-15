@@ -156,11 +156,12 @@ def test_interim_delay_defers_only_the_interim_scan_by_one_animation_frame() -> 
     assert core.replace(replacement, variants._INTERIM_SCAN) == PRESERVE_CORE_JS
 
 
-def test_departure_early_hide_restores_only_the_pre_draw_opacity_change() -> None:
+def test_departure_early_hide_restores_the_pre_fix_ride_byte_for_byte() -> None:
     core = variants.variant_core("departure-early-hide")
     replacement = variants._TRANSFORMS["departure-early-hide"][0][1]
     assert replacement in core
     assert variants._DEPARTURE_HIDE not in core
+    assert replacement == variants._DEPARTURE_EARLY_HIDE
     assert core.replace(replacement, variants._DEPARTURE_HIDE) == PRESERVE_CORE_JS
 
 

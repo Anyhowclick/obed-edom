@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "71d8ead2d8edbbf8503b6fab32907051dcbbe51d97a8ac231dc2b02d8831568e"
+PINNED_CORE_SHA256 = "7da6ec2f9eaf0a2da55c86d94f683e4ad45e6eda39eafca3c3afad2d63272b12"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -3969,37 +3969,68 @@ _UNDER_ARTWORK_BRIDGE_PLAN = {
 
 
 def _departure_hide(mode: str) -> dict:
-    claim = "const claimed = P.feed.claim('A1');" if mode == "continuous" else "const claimed = null;"
+    continuous = mode in ("continuous", "stand-down")
+    claim = "const claimed = P.feed.claim('A1');" if continuous else "const claimed = null;"
+    before_first = "entry.framesFed += 1;" if mode == "continuous" else ""
+    first_callback = (
+        "entry.state = 'stoodDown'; P.feed.onStandDown('A1', 'gl-error');"
+        if mode == "stand-down"
+        else ""
+    )
+    second_callback = "entry.framesFed += 1; entry.state = 'held';" if mode == "once" else ""
     return _run_chain(
         _UNDER_ARTWORK_BRIDGE_PLAN,
         rf"""
-const entry = {{mode: '{mode}', state: 'armed', framesFed: 0}};
+const entry = {{mode: '{'continuous' if continuous else 'once'}', state: 'armed', framesFed: 0}};
 let once = 0;
 window.__OBED_MM_FEED__ = {{
   entries: {{A1: entry}},
   once() {{ once += 1; return true; }},
 }};
+const sourceRoot = {{id: 'layerSourceRoot', parentNode: stageEl, parentElement: stageEl, __inStage: true, kids: [],
+  querySelectorAll(sel) {{ return sel === 'canvas' ? [sourcePoster] : []; }},
+  insertBefore(node, ref) {{
+    const old = this.kids.indexOf(node); if (old >= 0) this.kids.splice(old, 1);
+    const i = ref ? this.kids.indexOf(ref) : -1;
+    this.kids.splice(i < 0 ? this.kids.length : i, 0, node);
+    this.kids.forEach((child, j) => {{ child.parentNode = this; child.parentElement = this; child.__inStage = true;
+      child.previousSibling = j ? this.kids[j - 1] : null;
+      child.nextSibling = j + 1 < this.kids.length ? this.kids[j + 1] : null; }});
+  }},
+}};
+const sourceMovie = {{id: 'layerSourceMovie', parentNode: sourceRoot, parentElement: sourceRoot, __inStage: true}};
+const sourceLabel = {{id: 'layerSourceLabel', parentNode: sourceRoot, parentElement: sourceRoot, __inStage: true}};
+const sourcePoster = {{id: 'source-poster', parentNode: sourceMovie, parentElement: sourceMovie,
+  getBoundingClientRect() {{ return {{left: 100, top: 200, width: 300, height: 150}}; }} }};
+sourceRoot.kids.push(sourceMovie, sourceLabel);
+sourceMovie.nextSibling = sourceLabel; sourceLabel.previousSibling = sourceMovie;
+canvases.push(sourcePoster);
 goToScene(0);
 const a = playing('A1');
+a.parentNode = sourceMovie; a.parentElement = sourceMovie; a.__inStage = true;
 {claim}
 goToScene(1);
 a.pause();
+a.__inStage = false;
 detach(a);
-const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once}};
-let insideBefore = null, insideAfter = null;
-window.requestAnimFrame(function() {{ insideBefore = a.style.opacity; }});
+a.parentElement = null;
+const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once,
+  parent: a.parentNode === sourceRoot ? 'source-root' : a.parentNode === bodyEl ? 'body' : 'other',
+  order: sourceRoot.kids.map((node) => node.id || node.__obedInstance)}};
+{before_first}
+let emptyInside = null, insideBefore = null, insideAfter = null;
+window.requestAnimFrame(function() {{ emptyInside = a.style.opacity; {first_callback} }});
 glFrames.shift()(8);
 const afterEmptyCallback = a.style.opacity;
 window.requestAnimFrame(function() {{
   insideBefore = a.style.opacity;
-  entry.framesFed += 1;
-  entry.state = '{'fed' if mode == 'continuous' else 'held'}';
+  {second_callback}
   insideAfter = a.style.opacity;
 }});
 glFrames.shift()(16);
 console.log(JSON.stringify({{
-  claimed, beforeDraw, afterEmptyCallback, insideBefore, insideAfter, afterCallback: a.style.opacity,
-  frameCount: entry.framesFed,
+  claimed, beforeDraw, emptyInside, afterEmptyCallback, insideBefore, insideAfter,
+  afterCallback: a.style.opacity, onBody: a.parentNode === bodyEl, frameCount: entry.framesFed,
 }}));
 """,
         after_core=(
@@ -4013,11 +4044,14 @@ console.log(JSON.stringify({{
 def test_under_artwork_decoder_hides_after_the_first_fed_gl_callback_returns():
     assert _departure_hide("continuous") == {
         "claimed": True,
-        "beforeDraw": {"opacity": "1", "paused": False, "once": 0},
-        "afterEmptyCallback": "1",
-        "insideBefore": "1",
-        "insideAfter": "1",
+        "beforeDraw": {"opacity": "1", "paused": False, "once": 0, "parent": "source-root",
+                       "order": ["layerSourceMovie", "A1-video", "layerSourceLabel"]},
+        "emptyInside": "1",
+        "afterEmptyCallback": "0",
+        "insideBefore": "0",
+        "insideAfter": "0",
         "afterCallback": "0",
+        "onBody": True,
         "frameCount": 1,
     }
 
@@ -4025,13 +4059,26 @@ def test_under_artwork_decoder_hides_after_the_first_fed_gl_callback_returns():
 def test_feed_off_once_decoder_holds_its_departure_frame_until_the_first_gl_draw():
     assert _departure_hide("once") == {
         "claimed": None,
-        "beforeDraw": {"opacity": "1", "paused": True, "once": 1},
+        "beforeDraw": {"opacity": "1", "paused": True, "once": 1, "parent": "source-root",
+                       "order": ["layerSourceMovie", "A1-video", "layerSourceLabel"]},
+        "emptyInside": "1",
         "afterEmptyCallback": "1",
         "insideBefore": "1",
         "insideAfter": "1",
         "afterCallback": "0",
+        "onBody": True,
         "frameCount": 1,
     }
+
+
+def test_stand_down_at_the_first_callback_hides_the_decoder_at_callback_end():
+    result = _departure_hide("stand-down")
+    assert result["beforeDraw"]["parent"] == "source-root"
+    assert result["emptyInside"] == "1"
+    assert result["afterEmptyCallback"] == "0"
+    assert result["afterCallback"] == "0"
+    assert result["onBody"] is True
+    assert result["frameCount"] == 0
 
 
 def test_under_artwork_bridge_holds_hidden_then_rehomes_without_loading_the_stub():

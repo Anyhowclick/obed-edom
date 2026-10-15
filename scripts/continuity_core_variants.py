@@ -47,10 +47,95 @@ _POSTER_PAUSE = (
     "    try { v.pause(); } catch (e) {}\n"
 )
 _INTERIM_SCAN = "    interimScan(roots, performance.now());\n"
-_DEPARTURE_HIDE = (
-    "    const waitForGl = hidden && deferDepartureHide(v, boundary);\n"
-    "    v.style.opacity = hidden && !waitForGl ? '0' : '1';\n"
-)
+_DEPARTURE_HIDE = """  function rideTransition(v, owner, boundary, rectAt, caller, hidden) {
+    // The ride owns the decoder now: end any footprint hold, or it drags the
+    // landed decoder back to the source slot once the hash settles (live D2).
+    if (v.__obedPinning) {
+      v.__obedPinning = false;
+      v.__obedPinToken = (v.__obedPinToken || 0) + 1;
+    }
+    const generation = preserveGeneration;
+    const stage = document.getElementById('body') || document.body;
+    if (v.__obedMotionPinning === owner) {
+      if (!hidden && v.parentNode !== stage) {
+        beginMove(v);
+        stage.appendChild(v);
+      }
+      return false;
+    }
+    v.__obedMotionPinning = owner;
+    v.style.position = 'absolute';
+    v.style.visibility = 'visible';
+    v.style.display = 'block';
+    v.style.pointerEvents = 'none';
+    v.dataset.obedRemounted = '1';
+    const claimed = hidden && feedClaimed(v, boundary);
+    const onceAccepted = hidden && !claimed ? posterHold(v, boundary, null, true) : false;
+    const ride = {
+      boundary: boundary, generation: generation, owner: owner, rectAt: rectAt, caller: caller
+    };
+    const waitForGl = hidden && (claimed || onceAccepted)
+      && deferDepartureHide(v, boundary, owner, rectAt, caller);
+    if (waitForGl && (document.contains(v) || departureInterimPlace(v, boundary))) {
+      v.style.opacity = '1';
+      return true;
+    }
+    if (hidden) departureHides.delete(v);
+    if (v.parentNode !== stage) {
+      beginMove(v);
+      stage.appendChild(v);
+    }
+    v.style.opacity = hidden ? '0' : '1';
+    if (hidden) v.__obedDepartureHidden = boundary;
+    rideFrame(v, ride);
+    return true;
+  }
+"""
+_DEPARTURE_EARLY_HIDE = """  function rideTransition(v, owner, boundary, rectAt, caller, hidden) {
+    // The ride owns the decoder now: end any footprint hold, or it drags the
+    // landed decoder back to the source slot once the hash settles (live D2).
+    if (v.__obedPinning) {
+      v.__obedPinning = false;
+      v.__obedPinToken = (v.__obedPinToken || 0) + 1;
+    }
+    const generation = preserveGeneration;
+    const stage = document.getElementById('body') || document.body;
+    if (v.parentNode !== stage) {
+      beginMove(v);
+      stage.appendChild(v);
+    }
+    if (v.__obedMotionPinning === owner) return false;
+    v.__obedMotionPinning = owner;
+    v.style.position = 'absolute';
+    v.style.visibility = 'visible';
+    v.style.display = 'block';
+    v.style.opacity = hidden ? '0' : '1';
+    v.style.pointerEvents = 'none';
+    v.dataset.obedRemounted = '1';
+    function frame() {
+      if (v.__obedMotionPinning !== owner) return;
+      const scene = currentHashNum();
+      if (generation !== preserveGeneration || v.__obedGen === -1
+          || v.ended || !document.contains(v) || scene !== boundary.atScene - 1) {
+        v.__obedMotionPinning = false;
+        return;
+      }
+      const screenRect = toScreen(rectAt());
+      if (!screenRect) {
+        noteStageMapUnavailable(caller);
+      } else {
+        v.style.left = screenRect.x + 'px';
+        v.style.top = screenRect.y + 'px';
+        v.style.width = screenRect.w + 'px';
+        v.style.height = screenRect.h + 'px';
+      }
+      requestAnimationFrame(frame);
+    }
+    if (hidden && !feedClaimed(v, boundary)) posterHold(v, boundary, null, true);
+    frame();
+    return true;
+  }
+"""
 
 _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     # Pool every decoder: neither the plan-asset filter nor the planned-instance filter.
@@ -93,7 +178,7 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
         "      interimScan(roots.filter(function(r) { return r.isConnected; }), observedAt);\n"
         "    });\n",
     ),),
-    "departure-early-hide": ((_DEPARTURE_HIDE, "    v.style.opacity = hidden ? '0' : '1';\n"),),
+    "departure-early-hide": ((_DEPARTURE_HIDE, _DEPARTURE_EARLY_HIDE),),
 }
 
 

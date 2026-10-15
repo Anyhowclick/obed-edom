@@ -1733,7 +1733,7 @@ def test_continuity_output_shape(tmp_path, monkeypatch):
     assert set(continuity) <= {"mode", "reason", "version", "sha256", "scale", "glReplay", "mmFeed"}
     assert continuity["mode"] == "unsupported"
     assert continuity["version"] == live_host.CONTINUITY_VERSION == 7
-    assert continuity["sha256"] == live_host.js_sha256() == "71d8ead2d8edbbf8503b6fab32907051dcbbe51d97a8ac231dc2b02d8831568e"
+    assert continuity["sha256"] == live_host.js_sha256() == "7da6ec2f9eaf0a2da55c86d94f683e4ad45e6eda39eafca3c3afad2d63272b12"
 
 
 def test_observe_logs_only_on_change(tmp_path, monkeypatch):
