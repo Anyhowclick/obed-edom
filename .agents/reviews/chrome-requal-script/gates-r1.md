@@ -51,7 +51,7 @@ Run on the pre-merge tree `9bc19f01`/`ef597451`, before main (#285/#286) was mer
 
 ## Pending
 
-- Full suites on the merged tree. The merge's only non-doc change is a path constant in `scripts/texture_repair_check.py`, and `tests/test_chrome_requal.py` passes 13/13 on the merged tree. The full re-run is deferred until a peer's managed-OBS placement pair releases the machine.
+- Full suites on the merged tree: skipped by the owner (2026-10-15, "Skip the merged-tree re-run; the merge only changed a path constant."). `tests/test_chrome_requal.py` passes 13/13 on the merged tree.
 
 - None for this PR. Each new major goes in a release PR: the printed `QUALIFIED_SNAP_MAJORS` line plus a short gate record pasting the script's output.
 - Chrome Beta is not installed on this Mac, so the `--chrome` Beta path was not exercised. The binary is routed through `d.CHROME` and the host's `chrome_path`, as reviewed.
