@@ -10,14 +10,14 @@ MM_OPACITY_ENV = "OBED_LIVE_MM_OPACITY"
 # 17c0c938 is e9b2fad4 plus two `,isEvalSupported:!1` PDF.js options, outside every anchor.
 SUPPORTED_PLAYERS = {
     "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354": (
-        "d3ddd770dae1cd4aeb67a68a7e6aa12ef3d890b5ce4cd1cb19db81ec5e709d54",
+        "0c94dd74b4e8b4f199971cae3ccf95581136655c173281bc293124f33d2500fb",
         "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
-        "8202717a2699a2e4691aac6848675e3636f5d26ac1336f9ae6faba0a48cc72dd",
+        "573d292b39e2d33096dd2e1684f1ea1010496dd382a81f53343685ae3c14df00",
     ),
     "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91": (
-        "1036a8e26fae661c0cde23291f1726643bfb7aa0e781b7f95da1739c7cda3732",
+        "451d2473b7d1de1ae54c1aba9b4144b3874cfc8cf948264027dff4422d2dbc87",
         "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
-        "c0faaa3c99c88705931f686d96d4e891a8d10b6b59aa2da62faae5cf56b2c4fc",
+        "ecff39e1444a0d874ecf7df140f53d3214c1eca0e7fb672911fe82ae1abed071",
     ),
 }
 _ANCHOR = b"UC=new Eg,UC.displayManager.showWaitingIndicator()"
@@ -38,7 +38,7 @@ _MM_OPACITY_NODE = (
     b'"forwards"===e.fillMode&&e.beginTime+1e-9>=Q.beginTime+Q.duration;if(!0===B.hidden)return 0===a&&'
     b'null!==e&&!1===e.from.scalar&&!1===e.to.scalar&&"forwards"===e.fillMode&&'
     b'Math.abs(e.beginTime-Q.beginTime)<=1e-9&&Math.abs(e.duration-Q.duration)<=1e-9;return!1}catch(n){return!1}}'
-    b"__obedChainOpacity(X,A){if(null===X)return null;var B=this.__obedNodeOpacity(A);"
+    b"__obedChainOpacity(X,A){if(null===X)return null;if(0===X)return 0;var B=this.__obedNodeOpacity(A);"
     b"return null===B?null:(void 0===X?1:X)*B}"
 )
 _MM_HANDBACK_METHOD = (
