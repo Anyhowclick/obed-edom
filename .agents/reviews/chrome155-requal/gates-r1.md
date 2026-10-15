@@ -23,7 +23,7 @@
 **Results:**
 - **PASS:** handoff, frozen_frame, frozen_region, cost, grant, cvc.
 - **Arms that MATCH:** grant-chrome, grant-attach, channel-predefined, life-grant-reload, on, on2, off, opaque-off, noblend, m-on, m-paused, m-off, m-hold, m-raw.
-- **`m-snap` at DPR 1** (base, clip-x, clip-y, letterbox-frac, letterbox-frac clip-x, shift): reference PASS (interior 0.0, edge 0.0), mask PASS, geometry PASS. The snapped holder lands exactly on the live movie paint on 155.
+- **`m-snap` at DPR 1** (base, clip-x, clip-y, letterbox-frac, letterbox-frac clip-x, letterbox-frac clip-y): reference PASS (interior 0.0, edge 0.0), mask PASS, geometry PASS; shift: reference and mask PASS (it has no geometry check; corrected 2026-10-15 by the chrome-requal gate record). The snapped holder lands exactly on the live movie paint on 155.
 - **`holder_pixels`: INCONCLUSIVE in every arm.** No decision record anywhere carries an `lPath` (W5 never qualified one), so this check cannot score in any DX-1. The same was true at #262's merge.
 - **DPR 1.5 / 2 cells: INCONCLUSIVE.** The headless window opens at 1920×993, a known harness limit that was INCONCLUSIVE at #262's merge too.
 - **Other INCONCLUSIVE checks:** screen, cut, foreground, tone, overlay, exterior, hidden, shown, scope and lifecycle. Their controls were not in this run list, and they are outside the freeze-qualification scope, as at merge.
