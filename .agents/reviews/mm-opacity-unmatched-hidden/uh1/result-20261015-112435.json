@@ -1,0 +1,6140 @@
+{
+ "gate": "UH-1",
+ "overall": "PASS",
+ "arms": {
+  "base-live": {
+   "verdict": "PASS",
+   "problems": [],
+   "checks": {
+    "slot7TextureIdentity": true,
+    "slot7RawPairs": true,
+    "slot7OpacityOne": true,
+    "slot7Contributes": true,
+    "slot7TextureNonempty": true,
+    "slot8TextureIdentity": true,
+    "slot8RawPairs": true,
+    "slot8OpacityOne": true,
+    "slot8Contributes": true,
+    "slot8TextureNonempty": true,
+    "everyMmDrawIdentified": true,
+    "slot1Contributes": true,
+    "slot10Contributes": true,
+    "slot11Contributes": true
+   },
+   "detail": {
+    "context": 3,
+    "window": {
+     "D0": 11701.799999982119,
+     "Dlast": 13106,
+     "R": 13375.799999982119,
+     "removal": {
+      "at": 13375.799999982119,
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "source": "mutation"
+     },
+     "canvasContext": {
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "monitored": true,
+      "seenConnected": true,
+      "removedAt": 13375.799999982119,
+      "lastTaskEnd": 13106
+     },
+     "frameCount": 65,
+     "lastFrame": {
+      "ctx": 3,
+      "index": 66,
+      "clearAt": 13086.899999976158,
+      "draws": [
+       {
+        "at": 13087.09999999404,
+        "program": 1,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 5,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 5,
+           "uploadAt": 11593.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 4,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 4,
+           "uploadAt": 11593.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13087.5,
+        "program": 2,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 6,
+          "asset": "slot1",
+          "assetId": "68EE6B7757EAE3EBE14400D8B803EC01",
+          "info": {
+           "width": 585,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 6,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot1",
+        "rect": null,
+        "opacity": 0.052992325177275035,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          678,
+          0,
+          585,
+          428
+         ],
+         "equal": false,
+         "diffBytes": 213501,
+         "diffRgb": 213501,
+         "maxAbs": 14,
+         "l1": 2892633,
+         "l1Rgb": 2892633,
+         "beforeHash": "32a1b4a5",
+         "afterHash": "87b54bfc"
+        }
+       },
+       {
+        "at": 13096.59999999404,
+        "program": 3,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 8,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 149,
+           "height": 8,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 8,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 0.9999318006091553,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13096.799999982119,
+        "program": 4,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 10,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 10,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 9,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 9,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13096.899999976158,
+        "program": 5,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 12,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 12,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 11,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 11,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13097.09999999404,
+        "program": 6,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 13,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 13,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13097.199999988079,
+        "program": 7,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 15,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 292,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 15,
+           "uploadAt": 11593.299999982119,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13097.299999982119,
+        "program": 8,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 16,
+          "asset": "slot7",
+          "assetId": "C0C026F1A1C5577B04664882E8B35C5D",
+          "info": {
+           "width": 44,
+           "height": 50,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 16,
+           "uploadAt": 11593.299999982119,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot7",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          568,
+          520,
+          44,
+          50
+         ],
+         "equal": false,
+         "diffBytes": 2937,
+         "diffRgb": 2937,
+         "maxAbs": 223,
+         "l1": 396459,
+         "l1Rgb": 396459,
+         "beforeHash": "d2f9b6a5",
+         "afterHash": "df29a464"
+        }
+       },
+       {
+        "at": 13100.299999982119,
+        "program": 9,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 17,
+          "asset": "slot8",
+          "assetId": "E7CF3AADFEEDA3217255F36836CDA7A8",
+          "info": {
+           "width": 88,
+           "height": 59,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 17,
+           "uploadAt": 11593.299999982119,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot8",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          652,
+          515,
+          88,
+          59
+         ],
+         "equal": false,
+         "diffBytes": 4413,
+         "diffRgb": 4413,
+         "maxAbs": 223,
+         "l1": 664026,
+         "l1Rgb": 664026,
+         "beforeHash": "763b11dd",
+         "afterHash": "ed709641"
+        }
+       },
+       {
+        "at": 13102,
+        "program": 10,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11593.199999988079,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 18,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 88,
+           "height": 88,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 18,
+           "uploadAt": 11593.299999982119,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13102.199999988079,
+        "program": 11,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 20,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 357,
+           "height": 235,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 20,
+           "uploadAt": 11593.299999982119,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 19,
+          "asset": "slot10",
+          "assetId": "7AF1A2FD289A629D45D84B4F2F8588A9",
+          "info": {
+           "width": 39,
+           "height": 27,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 19,
+           "uploadAt": 11593.299999982119,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot10",
+        "rect": null,
+        "opacity": 0.9999924355626842,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          972,
+          209,
+          39,
+          27
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10fb0f8",
+         "afterHash": "10fb0f8"
+        }
+       },
+       {
+        "at": 13104.799999982119,
+        "program": 12,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 22,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 176,
+           "height": 205,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 22,
+           "uploadAt": 11593.299999982119,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 21,
+          "asset": "slot11",
+          "assetId": "54AC5F2D72B23FC14E9B5D9C0111B61C",
+          "info": {
+           "width": 21,
+           "height": 24,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 21,
+           "uploadAt": 11593.299999982119,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot11",
+        "rect": null,
+        "opacity": 0.9999924355626842,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          938,
+          210,
+          21,
+          24
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10da0685",
+         "afterHash": "10da0685"
+        }
+       }
+      ],
+      "taskEnd": 13106
+     },
+     "postDlastGlCalls": [],
+     "holdCaptures": [
+      {
+       "index": 11,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-live/pages/frame-011.png",
+       "sha256": "9e814009bd83259a24bdef207ea7829dd90ca72a2870bfc5d68f02d17a8d4b43",
+       "pageTs": 13210.59999999404
+      },
+      {
+       "index": 12,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-live/pages/frame-012.png",
+       "sha256": "9e814009bd83259a24bdef207ea7829dd90ca72a2870bfc5d68f02d17a8d4b43",
+       "pageTs": 13294.749999985099
+      }
+     ]
+    },
+    "slot7": {
+     "draws": 65,
+     "programs": [
+      "8"
+     ],
+     "textures": [
+      "16"
+     ],
+     "opacities": [
+      "1"
+     ],
+     "contributionL1Rgb": [
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      414708,
+      245019,
+      225885,
+      298095,
+      252444,
+      226278,
+      251790,
+      253815,
+      271488,
+      263325,
+      215799,
+      236625,
+      256125,
+      254685,
+      253425,
+      262170,
+      255357,
+      243984,
+      254754,
+      289509,
+      279834,
+      377811,
+      417708,
+      395226,
+      361659,
+      340836,
+      310029,
+      290634,
+      290658,
+      297354,
+      302415,
+      307419,
+      320331,
+      359751,
+      369972,
+      368337,
+      350358,
+      347904,
+      350391,
+      358023,
+      365265,
+      371121,
+      374052,
+      375915,
+      377679,
+      379734,
+      382239,
+      385278,
+      386994,
+      390165,
+      391806,
+      393315,
+      394941,
+      396459,
+      396459,
+      396459,
+      396459
+     ]
+    },
+    "slot8": {
+     "draws": 65,
+     "programs": [
+      "9"
+     ],
+     "textures": [
+      "17"
+     ],
+     "opacities": [
+      "1"
+     ],
+     "contributionL1Rgb": [
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      657573,
+      267951,
+      282474,
+      283620,
+      353436,
+      314964,
+      396093,
+      294900,
+      333372,
+      307449,
+      315537,
+      319629,
+      341139,
+      341361,
+      389313,
+      414687,
+      411444,
+      420846,
+      412332,
+      442470,
+      396366,
+      400188,
+      410277,
+      419637,
+      428994,
+      439461,
+      497475,
+      505053,
+      479319,
+      487485,
+      497421,
+      508836,
+      523053,
+      547134,
+      552009,
+      551031,
+      559683,
+      571671,
+      579066,
+      588786,
+      595965,
+      605685,
+      613080,
+      617943,
+      625125,
+      632523,
+      637383,
+      642237,
+      647106,
+      649428,
+      654285,
+      656832,
+      659160,
+      661695,
+      664026,
+      664026,
+      664026,
+      664026
+     ]
+    },
+    "slot1": {
+     "draws": 65,
+     "roi": [
+      678,
+      -9,
+      585,
+      437
+     ],
+     "sampleRects": [
+      "[678, 0, 585, 428]"
+     ],
+     "maxDiffRgb": 297420
+    },
+    "slot10": {
+     "draws": 65,
+     "roi": [
+      972,
+      209,
+      39,
+      27
+     ],
+     "sampleRects": [
+      "[972, 209, 39, 27]"
+     ],
+     "maxDiffRgb": 486
+    },
+    "slot11": {
+     "draws": 65,
+     "roi": [
+      938,
+      210,
+      21,
+      24
+     ],
+     "sampleRects": [
+      "[938, 210, 21, 24]"
+     ],
+     "maxDiffRgb": 450
+    },
+    "holdCrops": {
+     "slot7": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-live/crops/slot7-hold.png",
+      "sha256": "542b614a4995b5a5f7a8c6e57a1e16c5bf98ed1128f7568a336ba9f2c5a528c5",
+      "capture": 11,
+      "pageTs": 13210.59999999404
+     },
+     "slot8": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-live/crops/slot8-hold.png",
+      "sha256": "41374ce83cf075e36272255250a8569e065ae25076a4ff6b5b7b8c456b86978e",
+      "capture": 11,
+      "pageTs": 13210.59999999404
+     }
+    }
+   }
+  },
+  "stock": {
+   "verdict": "PASS",
+   "problems": [],
+   "checks": {
+    "slot7TextureIdentity": true,
+    "slot7RawPairs": true,
+    "slot7OpacityOne": true,
+    "slot7Contributes": true,
+    "slot7TextureNonempty": true,
+    "slot8TextureIdentity": true,
+    "slot8RawPairs": true,
+    "slot8OpacityOne": true,
+    "slot8Contributes": true,
+    "slot8TextureNonempty": true,
+    "everyMmDrawIdentified": true,
+    "slot1Contributes": true,
+    "slot10Contributes": true,
+    "slot11Contributes": true
+   },
+   "detail": {
+    "context": 3,
+    "window": {
+     "D0": 2989,
+     "Dlast": 4454.0999999940395,
+     "R": 5044.699999988079,
+     "removal": {
+      "at": 5044.699999988079,
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "source": "mutation"
+     },
+     "canvasContext": {
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "monitored": true,
+      "seenConnected": true,
+      "removedAt": 5044.699999988079,
+      "lastTaskEnd": 4454.0999999940395
+     },
+     "frameCount": 73,
+     "lastFrame": {
+      "ctx": 3,
+      "index": 74,
+      "clearAt": 4434.5,
+      "draws": [
+       {
+        "at": 4435.0999999940395,
+        "program": 1,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 5,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 5,
+           "uploadAt": 2917.800000011921,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 4,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 4,
+           "uploadAt": 2917.800000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4435.300000011921,
+        "program": 2,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 2917.800000011921,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 6,
+          "asset": "slot1",
+          "assetId": "68EE6B7757EAE3EBE14400D8B803EC01",
+          "info": {
+           "width": 585,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 6,
+           "uploadAt": 2917.800000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot1",
+        "rect": null,
+        "opacity": 0.052985161542892456,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          678,
+          0,
+          585,
+          428
+         ],
+         "equal": false,
+         "diffBytes": 213501,
+         "diffRgb": 213501,
+         "maxAbs": 14,
+         "l1": 2892720,
+         "l1Rgb": 2892720,
+         "beforeHash": "32a1b4a5",
+         "afterHash": "a9c54949"
+        }
+       },
+       {
+        "at": 4444.5999999940395,
+        "program": 3,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 2917.800000011921,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 8,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 149,
+           "height": 8,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 8,
+           "uploadAt": 2917.800000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 0.9999999999999999,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4444.699999988079,
+        "program": 4,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 10,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 10,
+           "uploadAt": 2917.9000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 9,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 9,
+           "uploadAt": 2917.9000000059605,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4444.800000011921,
+        "program": 5,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 12,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 12,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 11,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 11,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4445,
+        "program": 6,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 13,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 13,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4445.0999999940395,
+        "program": 7,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 15,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 292,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 15,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4445.199999988079,
+        "program": 8,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 16,
+          "asset": "slot7",
+          "assetId": "C0C026F1A1C5577B04664882E8B35C5D",
+          "info": {
+           "width": 44,
+           "height": 50,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 16,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot7",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          568,
+          520,
+          44,
+          50
+         ],
+         "equal": false,
+         "diffBytes": 2937,
+         "diffRgb": 2937,
+         "maxAbs": 223,
+         "l1": 396459,
+         "l1Rgb": 396459,
+         "beforeHash": "d2f9b6a5",
+         "afterHash": "df29a464"
+        }
+       },
+       {
+        "at": 4448.300000011921,
+        "program": 9,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 17,
+          "asset": "slot8",
+          "assetId": "E7CF3AADFEEDA3217255F36836CDA7A8",
+          "info": {
+           "width": 88,
+           "height": 59,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 17,
+           "uploadAt": 2918.0999999940395,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot8",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          652,
+          515,
+          88,
+          59
+         ],
+         "equal": false,
+         "diffBytes": 4413,
+         "diffRgb": 4413,
+         "maxAbs": 223,
+         "l1": 664026,
+         "l1Rgb": 664026,
+         "beforeHash": "763b11dd",
+         "afterHash": "ed709641"
+        }
+       },
+       {
+        "at": 4450.0999999940395,
+        "program": 10,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2918,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 18,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 88,
+           "height": 88,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 18,
+           "uploadAt": 2918.0999999940395,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4450.0999999940395,
+        "program": 11,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 20,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 357,
+           "height": 235,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 20,
+           "uploadAt": 2918.0999999940395,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 19,
+          "asset": "slot10",
+          "assetId": "7AF1A2FD289A629D45D84B4F2F8588A9",
+          "info": {
+           "width": 39,
+           "height": 27,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 19,
+           "uploadAt": 2918.0999999940395,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot10",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          972,
+          209,
+          39,
+          27
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10fb0f8",
+         "afterHash": "10fb0f8"
+        }
+       },
+       {
+        "at": 4452.5999999940395,
+        "program": 12,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 22,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 176,
+           "height": 205,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 22,
+           "uploadAt": 2918.0999999940395,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 21,
+          "asset": "slot11",
+          "assetId": "54AC5F2D72B23FC14E9B5D9C0111B61C",
+          "info": {
+           "width": 21,
+           "height": 24,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 21,
+           "uploadAt": 2918.0999999940395,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot11",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          938,
+          210,
+          21,
+          24
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10da0685",
+         "afterHash": "10da0685"
+        }
+       }
+      ],
+      "taskEnd": 4454.0999999940395
+     },
+     "postDlastGlCalls": [],
+     "holdCaptures": [
+      {
+       "index": 11,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/stock/pages/frame-011.png",
+       "sha256": "25bcf10b6bf8f23cd160bb7ddcde13e54546c59a5fe96a71fcade58ca2d2330a",
+       "pageTs": 4495.95000000298
+      },
+      {
+       "index": 12,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/stock/pages/frame-012.png",
+       "sha256": "25bcf10b6bf8f23cd160bb7ddcde13e54546c59a5fe96a71fcade58ca2d2330a",
+       "pageTs": 4578.79999999702
+      },
+      {
+       "index": 13,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/stock/pages/frame-013.png",
+       "sha256": "25bcf10b6bf8f23cd160bb7ddcde13e54546c59a5fe96a71fcade58ca2d2330a",
+       "pageTs": 4675.25
+      },
+      {
+       "index": 14,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/stock/pages/frame-014.png",
+       "sha256": "25bcf10b6bf8f23cd160bb7ddcde13e54546c59a5fe96a71fcade58ca2d2330a",
+       "pageTs": 4777.79999999702
+      },
+      {
+       "index": 15,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/stock/pages/frame-015.png",
+       "sha256": "25bcf10b6bf8f23cd160bb7ddcde13e54546c59a5fe96a71fcade58ca2d2330a",
+       "pageTs": 4864.45000000298
+      },
+      {
+       "index": 16,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/stock/pages/frame-016.png",
+       "sha256": "25bcf10b6bf8f23cd160bb7ddcde13e54546c59a5fe96a71fcade58ca2d2330a",
+       "pageTs": 4954.20000000298
+      }
+     ]
+    },
+    "slot7": {
+     "draws": 73,
+     "programs": [
+      "8"
+     ],
+     "textures": [
+      "16"
+     ],
+     "opacities": [
+      "1"
+     ],
+     "contributionL1Rgb": [
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      381348,
+      220365,
+      226176,
+      261417,
+      341004,
+      220143,
+      229131,
+      279243,
+      242157,
+      256170,
+      264483,
+      225042,
+      245469,
+      267309,
+      246111,
+      254343,
+      261948,
+      247911,
+      245037,
+      258606,
+      282501,
+      284109,
+      379749,
+      418368,
+      395712,
+      363327,
+      341841,
+      315561,
+      295497,
+      289020,
+      293904,
+      299439,
+      305442,
+      307833,
+      331761,
+      361812,
+      370047,
+      368337,
+      352353,
+      347946,
+      349242,
+      356421,
+      364188,
+      369933,
+      373284,
+      375690,
+      377022,
+      379014,
+      380955,
+      383640,
+      387018,
+      388644,
+      390111,
+      393315,
+      393300,
+      394941,
+      396459,
+      396459,
+      396459,
+      396459,
+      396459
+     ]
+    },
+    "slot8": {
+     "draws": 73,
+     "programs": [
+      "9"
+     ],
+     "textures": [
+      "17"
+     ],
+     "opacities": [
+      "1"
+     ],
+     "contributionL1Rgb": [
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      475992,
+      277758,
+      282846,
+      283620,
+      300879,
+      374598,
+      350757,
+      290502,
+      296022,
+      327909,
+      298920,
+      315537,
+      321591,
+      351678,
+      353712,
+      409794,
+      418401,
+      372012,
+      423960,
+      421323,
+      428379,
+      391548,
+      400506,
+      410277,
+      419637,
+      428994,
+      437517,
+      489951,
+      509454,
+      480201,
+      482556,
+      491967,
+      501861,
+      516006,
+      528861,
+      551289,
+      552279,
+      551115,
+      559683,
+      569334,
+      579066,
+      586248,
+      595965,
+      603363,
+      610548,
+      617943,
+      625125,
+      629991,
+      634845,
+      639705,
+      644559,
+      649428,
+      651960,
+      654285,
+      659160,
+      659160,
+      661695,
+      664026,
+      664026,
+      664026,
+      664026,
+      664026
+     ]
+    },
+    "slot1": {
+     "draws": 73,
+     "roi": [
+      678,
+      -9,
+      585,
+      437
+     ],
+     "sampleRects": [
+      "[678, 0, 585, 428]"
+     ],
+     "maxDiffRgb": 297435
+    },
+    "slot10": {
+     "draws": 73,
+     "roi": [
+      972,
+      209,
+      39,
+      27
+     ],
+     "sampleRects": [
+      "[972, 209, 39, 27]"
+     ],
+     "maxDiffRgb": 501
+    },
+    "slot11": {
+     "draws": 73,
+     "roi": [
+      938,
+      210,
+      21,
+      24
+     ],
+     "sampleRects": [
+      "[938, 210, 21, 24]"
+     ],
+     "maxDiffRgb": 444
+    },
+    "holdCrops": {
+     "slot7": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/stock/crops/slot7-hold.png",
+      "sha256": "542b614a4995b5a5f7a8c6e57a1e16c5bf98ed1128f7568a336ba9f2c5a528c5",
+      "capture": 14,
+      "pageTs": 4777.79999999702
+     },
+     "slot8": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/stock/crops/slot8-hold.png",
+      "sha256": "41374ce83cf075e36272255250a8569e065ae25076a4ff6b5b7b8c456b86978e",
+      "capture": 14,
+      "pageTs": 4777.79999999702
+     }
+    }
+   }
+  },
+  "base-preview": {
+   "verdict": "PASS",
+   "problems": [],
+   "checks": {
+    "slot7TextureIdentity": true,
+    "slot7RawPairs": true,
+    "slot7OpacityOne": true,
+    "slot7Contributes": true,
+    "slot7TextureNonempty": true,
+    "slot8TextureIdentity": true,
+    "slot8RawPairs": true,
+    "slot8OpacityOne": true,
+    "slot8Contributes": true,
+    "slot8TextureNonempty": true,
+    "everyMmDrawIdentified": true,
+    "slot1Contributes": true,
+    "slot10Contributes": true,
+    "slot11Contributes": true
+   },
+   "detail": {
+    "context": 3,
+    "window": {
+     "D0": 2994.2000000178814,
+     "Dlast": 4413.5,
+     "R": 4695.0999999940395,
+     "removal": {
+      "at": 4695.0999999940395,
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "source": "mutation"
+     },
+     "canvasContext": {
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "monitored": true,
+      "seenConnected": true,
+      "removedAt": 4695.0999999940395,
+      "lastTaskEnd": 4413.5
+     },
+     "frameCount": 62,
+     "lastFrame": {
+      "ctx": 3,
+      "index": 63,
+      "clearAt": 4392.200000017881,
+      "draws": [
+       {
+        "at": 4392.700000017881,
+        "program": 1,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 5,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 5,
+           "uploadAt": 2911.2000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 4,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 4,
+           "uploadAt": 2911.2000000178814,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4392.9000000059605,
+        "program": 2,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 6,
+          "asset": "slot1",
+          "assetId": "68EE6B7757EAE3EBE14400D8B803EC01",
+          "info": {
+           "width": 585,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 6,
+           "uploadAt": 2911.300000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot1",
+        "rect": null,
+        "opacity": 0.05316481021625774,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          678,
+          0,
+          585,
+          428
+         ],
+         "equal": false,
+         "diffBytes": 214098,
+         "diffRgb": 214098,
+         "maxAbs": 14,
+         "l1": 2889495,
+         "l1Rgb": 2889495,
+         "beforeHash": "32a1b4a5",
+         "afterHash": "72172816"
+        }
+       },
+       {
+        "at": 4402.800000011921,
+        "program": 3,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 8,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 149,
+           "height": 8,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 8,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 0.9982789249547945,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4402.9000000059605,
+        "program": 4,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 10,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 10,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 9,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 9,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4403,
+        "program": 5,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 12,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 12,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 11,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 11,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4403.200000017881,
+        "program": 6,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 13,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 13,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4403.4000000059605,
+        "program": 7,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 15,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 292,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 15,
+           "uploadAt": 2911.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4403.4000000059605,
+        "program": 8,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 16,
+          "asset": "slot7",
+          "assetId": "C0C026F1A1C5577B04664882E8B35C5D",
+          "info": {
+           "width": 44,
+           "height": 50,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 16,
+           "uploadAt": 2911.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot7",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          568,
+          520,
+          44,
+          50
+         ],
+         "equal": false,
+         "diffBytes": 2937,
+         "diffRgb": 2937,
+         "maxAbs": 223,
+         "l1": 396459,
+         "l1Rgb": 396459,
+         "beforeHash": "d2f9b6a5",
+         "afterHash": "df29a464"
+        }
+       },
+       {
+        "at": 4406.9000000059605,
+        "program": 9,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 17,
+          "asset": "slot8",
+          "assetId": "E7CF3AADFEEDA3217255F36836CDA7A8",
+          "info": {
+           "width": 88,
+           "height": 59,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 17,
+           "uploadAt": 2911.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot8",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          652,
+          515,
+          88,
+          59
+         ],
+         "equal": false,
+         "diffBytes": 4413,
+         "diffRgb": 4413,
+         "maxAbs": 223,
+         "l1": 664026,
+         "l1Rgb": 664026,
+         "beforeHash": "4e21cb4b",
+         "afterHash": "86c97a2f"
+        }
+       },
+       {
+        "at": 4408.9000000059605,
+        "program": 10,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2911.4000000059605,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 18,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 88,
+           "height": 88,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 18,
+           "uploadAt": 2911.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4409.0999999940395,
+        "program": 11,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 20,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 357,
+           "height": 235,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 20,
+           "uploadAt": 2911.5,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 19,
+          "asset": "slot10",
+          "assetId": "7AF1A2FD289A629D45D84B4F2F8588A9",
+          "info": {
+           "width": 39,
+           "height": 27,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 19,
+           "uploadAt": 2911.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot10",
+        "rect": null,
+        "opacity": 0.9998103000438113,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          972,
+          209,
+          39,
+          27
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10fb0f8",
+         "afterHash": "10fb0f8"
+        }
+       },
+       {
+        "at": 4412,
+        "program": 12,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 22,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 176,
+           "height": 205,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 22,
+           "uploadAt": 2911.5,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 21,
+          "asset": "slot11",
+          "assetId": "54AC5F2D72B23FC14E9B5D9C0111B61C",
+          "info": {
+           "width": 21,
+           "height": 24,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 21,
+           "uploadAt": 2911.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot11",
+        "rect": null,
+        "opacity": 0.9998103000438113,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          938,
+          210,
+          21,
+          24
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10da0685",
+         "afterHash": "10da0685"
+        }
+       }
+      ],
+      "taskEnd": 4413.5
+     },
+     "postDlastGlCalls": [],
+     "holdCaptures": [
+      {
+       "index": 10,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-preview/pages/frame-010.png",
+       "sha256": "89a5258804acf1b409624326079df9afabea66041353d501148044c00b62cd9a",
+       "pageTs": 4452.25
+      },
+      {
+       "index": 11,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-preview/pages/frame-011.png",
+       "sha256": "89a5258804acf1b409624326079df9afabea66041353d501148044c00b62cd9a",
+       "pageTs": 4535.050000011921
+      },
+      {
+       "index": 12,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-preview/pages/frame-012.png",
+       "sha256": "89a5258804acf1b409624326079df9afabea66041353d501148044c00b62cd9a",
+       "pageTs": 4618.70000000298
+      }
+     ]
+    },
+    "slot7": {
+     "draws": 62,
+     "programs": [
+      "8"
+     ],
+     "textures": [
+      "16"
+     ],
+     "opacities": [
+      "1"
+     ],
+     "contributionL1Rgb": [
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418611,
+      418305,
+      263919,
+      230358,
+      285978,
+      272598,
+      226845,
+      248028,
+      256095,
+      263793,
+      253230,
+      215679,
+      237381,
+      260655,
+      254685,
+      251604,
+      260754,
+      255987,
+      240384,
+      249936,
+      289509,
+      282402,
+      387789,
+      418767,
+      395226,
+      361659,
+      340836,
+      311460,
+      291795,
+      290511,
+      296232,
+      302415,
+      308226,
+      322476,
+      357456,
+      369630,
+      369501,
+      351429,
+      347904,
+      350715,
+      358965,
+      365619,
+      371757,
+      374958,
+      376128,
+      378720,
+      380763,
+      383583,
+      387018,
+      388596,
+      391806,
+      393315,
+      394941,
+      396459,
+      396459,
+      396459
+     ]
+    },
+    "slot8": {
+     "draws": 62,
+     "programs": [
+      "9"
+     ],
+     "textures": [
+      "17"
+     ],
+     "opacities": [
+      "1"
+     ],
+     "contributionL1Rgb": [
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      698283,
+      643113,
+      277194,
+      274638,
+      282372,
+      334941,
+      324423,
+      407751,
+      295842,
+      296661,
+      334977,
+      312384,
+      320022,
+      341367,
+      345648,
+      389313,
+      402855,
+      454875,
+      413304,
+      425910,
+      458490,
+      396366,
+      400350,
+      411951,
+      421308,
+      428994,
+      439461,
+      497475,
+      506499,
+      478143,
+      487302,
+      495429,
+      508836,
+      525105,
+      548916,
+      551805,
+      550230,
+      559683,
+      569334,
+      579066,
+      588786,
+      598506,
+      605685,
+      615405,
+      622803,
+      627663,
+      634845,
+      639705,
+      644559,
+      649428,
+      651960,
+      656832,
+      659160,
+      661695,
+      664026,
+      664026,
+      664026
+     ]
+    },
+    "slot1": {
+     "draws": 62,
+     "roi": [
+      678,
+      -9,
+      585,
+      437
+     ],
+     "sampleRects": [
+      "[678, 0, 585, 428]"
+     ],
+     "maxDiffRgb": 297516
+    },
+    "slot10": {
+     "draws": 62,
+     "roi": [
+      972,
+      209,
+      39,
+      27
+     ],
+     "sampleRects": [
+      "[972, 209, 39, 27]"
+     ],
+     "maxDiffRgb": 492
+    },
+    "slot11": {
+     "draws": 62,
+     "roi": [
+      938,
+      210,
+      21,
+      24
+     ],
+     "sampleRects": [
+      "[938, 210, 21, 24]"
+     ],
+     "maxDiffRgb": 456
+    },
+    "holdCrops": {
+     "slot7": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-preview/crops/slot7-hold.png",
+      "sha256": "542b614a4995b5a5f7a8c6e57a1e16c5bf98ed1128f7568a336ba9f2c5a528c5",
+      "capture": 11,
+      "pageTs": 4535.050000011921
+     },
+     "slot8": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/base-preview/crops/slot8-hold.png",
+      "sha256": "d260bdce0d285a42bb2a153eddc61ce1c2a91f971c18058dc9b98730c5a8ff43",
+      "capture": 11,
+      "pageTs": 4535.050000011921
+     }
+    }
+   }
+  },
+  "cand-live": {
+   "verdict": "PASS",
+   "problems": [],
+   "checks": {
+    "slot7TextureIdentity": true,
+    "slot7RawPairs": true,
+    "slot7OpacityZero": true,
+    "slot7NoContribution": true,
+    "slot8TextureIdentity": true,
+    "slot8RawPairs": true,
+    "slot8OpacityZero": true,
+    "slot8NoContribution": true,
+    "everyMmDrawIdentified": true,
+    "slot1Contributes": true,
+    "slot10Contributes": true,
+    "slot11Contributes": true
+   },
+   "detail": {
+    "context": 3,
+    "window": {
+     "D0": 11717.799999982119,
+     "Dlast": 13178.799999982119,
+     "R": 13442.799999982119,
+     "removal": {
+      "at": 13442.799999982119,
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "source": "mutation"
+     },
+     "canvasContext": {
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "monitored": true,
+      "seenConnected": true,
+      "removedAt": 13442.799999982119,
+      "lastTaskEnd": 13178.799999982119
+     },
+     "frameCount": 63,
+     "lastFrame": {
+      "ctx": 3,
+      "index": 64,
+      "clearAt": 13156.59999999404,
+      "draws": [
+       {
+        "at": 13157.299999982119,
+        "program": 1,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 5,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 5,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 4,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 4,
+           "uploadAt": 11658,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13157.59999999404,
+        "program": 2,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 6,
+          "asset": "slot1",
+          "assetId": "68EE6B7757EAE3EBE14400D8B803EC01",
+          "info": {
+           "width": 585,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 6,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot1",
+        "rect": null,
+        "opacity": 0.052985161542892456,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          678,
+          0,
+          585,
+          428
+         ],
+         "equal": false,
+         "diffBytes": 213501,
+         "diffRgb": 213501,
+         "maxAbs": 14,
+         "l1": 2892720,
+         "l1Rgb": 2892720,
+         "beforeHash": "32a1b4a5",
+         "afterHash": "a9c54949"
+        }
+       },
+       {
+        "at": 13167.799999982119,
+        "program": 3,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 8,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 149,
+           "height": 8,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 8,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 0.9999999999999999,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13168,
+        "program": 4,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 10,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 10,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 9,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 9,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13168.199999988079,
+        "program": 5,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 12,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 12,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 11,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 11,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13168.5,
+        "program": 6,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 13,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 13,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13168.59999999404,
+        "program": 7,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 15,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 292,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 15,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13168.699999988079,
+        "program": 8,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 16,
+          "asset": "slot7",
+          "assetId": "C0C026F1A1C5577B04664882E8B35C5D",
+          "info": {
+           "width": 44,
+           "height": 50,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 16,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot7",
+        "rect": null,
+        "opacity": 0,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          568,
+          520,
+          44,
+          50
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "d2f9b6a5",
+         "afterHash": "d2f9b6a5"
+        }
+       },
+       {
+        "at": 13172,
+        "program": 9,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 17,
+          "asset": "slot8",
+          "assetId": "E7CF3AADFEEDA3217255F36836CDA7A8",
+          "info": {
+           "width": 88,
+           "height": 59,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 17,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot8",
+        "rect": null,
+        "opacity": 0,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          652,
+          515,
+          88,
+          59
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "763b11dd",
+         "afterHash": "763b11dd"
+        }
+       },
+       {
+        "at": 13173.90000000596,
+        "program": 10,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 18,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 88,
+           "height": 88,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 18,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13174.09999999404,
+        "program": 11,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 20,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 357,
+           "height": 235,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 20,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 19,
+          "asset": "slot10",
+          "assetId": "7AF1A2FD289A629D45D84B4F2F8588A9",
+          "info": {
+           "width": 39,
+           "height": 27,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 19,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot10",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          972,
+          209,
+          39,
+          27
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10fb0f8",
+         "afterHash": "10fb0f8"
+        }
+       },
+       {
+        "at": 13177.299999982119,
+        "program": 12,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 22,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 176,
+           "height": 205,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 22,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 21,
+          "asset": "slot11",
+          "assetId": "54AC5F2D72B23FC14E9B5D9C0111B61C",
+          "info": {
+           "width": 21,
+           "height": 24,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 21,
+           "uploadAt": 11658.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot11",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          938,
+          210,
+          21,
+          24
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10da0685",
+         "afterHash": "10da0685"
+        }
+       }
+      ],
+      "taskEnd": 13178.799999982119
+     },
+     "postDlastGlCalls": [],
+     "holdCaptures": [
+      {
+       "index": 11,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand-live/pages/frame-011.png",
+       "sha256": "26a51518dca693d1a09ce46859471e591dfa8bb5bf519b6f19805537a342769f",
+       "pageTs": 13282.54999999702
+      },
+      {
+       "index": 12,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand-live/pages/frame-012.png",
+       "sha256": "26a51518dca693d1a09ce46859471e591dfa8bb5bf519b6f19805537a342769f",
+       "pageTs": 13366.04999999702
+      }
+     ]
+    },
+    "slot7": {
+     "draws": 63,
+     "programs": [
+      "8"
+     ],
+     "textures": [
+      "16"
+     ],
+     "opacities": [
+      "0"
+     ],
+     "contributionL1Rgb": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "slot8": {
+     "draws": 63,
+     "programs": [
+      "9"
+     ],
+     "textures": [
+      "17"
+     ],
+     "opacities": [
+      "0"
+     ],
+     "contributionL1Rgb": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "slot1": {
+     "draws": 63,
+     "roi": [
+      678,
+      -9,
+      585,
+      437
+     ],
+     "sampleRects": [
+      "[678, 0, 585, 428]"
+     ],
+     "maxDiffRgb": 297453
+    },
+    "slot10": {
+     "draws": 63,
+     "roi": [
+      972,
+      209,
+      39,
+      27
+     ],
+     "sampleRects": [
+      "[972, 209, 39, 27]"
+     ],
+     "maxDiffRgb": 486
+    },
+    "slot11": {
+     "draws": 63,
+     "roi": [
+      938,
+      210,
+      21,
+      24
+     ],
+     "sampleRects": [
+      "[938, 210, 21, 24]"
+     ],
+     "maxDiffRgb": 459
+    },
+    "holdCrops": {
+     "slot7": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand-live/crops/slot7-hold.png",
+      "sha256": "2f944bca9132ead5e851dca6920a435600b8bd4366c20af4aed3d0994b979d03",
+      "capture": 11,
+      "pageTs": 13282.54999999702
+     },
+     "slot8": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand-live/crops/slot8-hold.png",
+      "sha256": "00dedbf32bc63163e8d6d88dfa62340239a5d3ad8c1ebd4d8353da3ea3d2c066",
+      "capture": 11,
+      "pageTs": 13282.54999999702
+     }
+    }
+   }
+  },
+  "cand-preview": {
+   "verdict": "PASS",
+   "problems": [],
+   "checks": {
+    "slot7TextureIdentity": true,
+    "slot7RawPairs": true,
+    "slot7OpacityZero": true,
+    "slot7NoContribution": true,
+    "slot8TextureIdentity": true,
+    "slot8RawPairs": true,
+    "slot8OpacityZero": true,
+    "slot8NoContribution": true,
+    "everyMmDrawIdentified": true,
+    "slot1Contributes": true,
+    "slot10Contributes": true,
+    "slot11Contributes": true
+   },
+   "detail": {
+    "context": 3,
+    "window": {
+     "D0": 2963.300000011921,
+     "Dlast": 4443.0999999940395,
+     "R": 4717.200000017881,
+     "removal": {
+      "at": 4717.200000017881,
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "source": "mutation"
+     },
+     "canvasContext": {
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "monitored": true,
+      "seenConnected": true,
+      "removedAt": 4717.200000017881,
+      "lastTaskEnd": 4443.0999999940395
+     },
+     "frameCount": 72,
+     "lastFrame": {
+      "ctx": 3,
+      "index": 72,
+      "clearAt": 4422.300000011921,
+      "draws": [
+       {
+        "at": 4422.4000000059605,
+        "program": 1,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 5,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 5,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 4,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 4,
+           "uploadAt": 2914.5999999940395,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4422.800000011921,
+        "program": 2,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 6,
+          "asset": "slot1",
+          "assetId": "68EE6B7757EAE3EBE14400D8B803EC01",
+          "info": {
+           "width": 585,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 6,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot1",
+        "rect": null,
+        "opacity": 0.052985161542892456,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          678,
+          0,
+          585,
+          428
+         ],
+         "equal": false,
+         "diffBytes": 213501,
+         "diffRgb": 213501,
+         "maxAbs": 14,
+         "l1": 2892705,
+         "l1Rgb": 2892705,
+         "beforeHash": "32a1b4a5",
+         "afterHash": "fee75fa"
+        }
+       },
+       {
+        "at": 4432.5,
+        "program": 3,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 8,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 149,
+           "height": 8,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 8,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 0.9999999999999999,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4432.700000017881,
+        "program": 4,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 10,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 10,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 9,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 9,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4432.9000000059605,
+        "program": 5,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 12,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 12,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 11,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 11,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4433,
+        "program": 6,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 13,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 13,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4433.200000017881,
+        "program": 7,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 15,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 292,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 15,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4433.300000011921,
+        "program": 8,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 16,
+          "asset": "slot7",
+          "assetId": "C0C026F1A1C5577B04664882E8B35C5D",
+          "info": {
+           "width": 44,
+           "height": 50,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 16,
+           "uploadAt": 2914.800000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot7",
+        "rect": null,
+        "opacity": 0,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          568,
+          520,
+          44,
+          50
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "d2f9b6a5",
+         "afterHash": "d2f9b6a5"
+        }
+       },
+       {
+        "at": 4436.300000011921,
+        "program": 9,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 17,
+          "asset": "slot8",
+          "assetId": "E7CF3AADFEEDA3217255F36836CDA7A8",
+          "info": {
+           "width": 88,
+           "height": 59,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 17,
+           "uploadAt": 2914.800000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot8",
+        "rect": null,
+        "opacity": 0,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          652,
+          515,
+          88,
+          59
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "763b11dd",
+         "afterHash": "763b11dd"
+        }
+       },
+       {
+        "at": 4438.4000000059605,
+        "program": 10,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2914.7000000178814,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 18,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 88,
+           "height": 88,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 18,
+           "uploadAt": 2914.800000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4438.5999999940395,
+        "program": 11,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 20,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 357,
+           "height": 235,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 20,
+           "uploadAt": 2914.800000011921,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 19,
+          "asset": "slot10",
+          "assetId": "7AF1A2FD289A629D45D84B4F2F8588A9",
+          "info": {
+           "width": 39,
+           "height": 27,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 19,
+           "uploadAt": 2914.800000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot10",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          972,
+          209,
+          39,
+          27
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10fb0f8",
+         "afterHash": "10fb0f8"
+        }
+       },
+       {
+        "at": 4441.5999999940395,
+        "program": 12,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 22,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 176,
+           "height": 205,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 22,
+           "uploadAt": 2914.800000011921,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 21,
+          "asset": "slot11",
+          "assetId": "54AC5F2D72B23FC14E9B5D9C0111B61C",
+          "info": {
+           "width": 21,
+           "height": 24,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 21,
+           "uploadAt": 2914.800000011921,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot11",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          938,
+          210,
+          21,
+          24
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10da0685",
+         "afterHash": "10da0685"
+        }
+       }
+      ],
+      "taskEnd": 4443.0999999940395
+     },
+     "postDlastGlCalls": [],
+     "holdCaptures": [
+      {
+       "index": 11,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand-preview/pages/frame-011.png",
+       "sha256": "8ac89774d833eb2a53b5553bed171cce9ac107027ffc898ef39e5a282855174b",
+       "pageTs": 4542.0
+      },
+      {
+       "index": 12,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand-preview/pages/frame-012.png",
+       "sha256": "8ac89774d833eb2a53b5553bed171cce9ac107027ffc898ef39e5a282855174b",
+       "pageTs": 4626.000000014901
+      }
+     ]
+    },
+    "slot7": {
+     "draws": 72,
+     "programs": [
+      "8"
+     ],
+     "textures": [
+      "16"
+     ],
+     "opacities": [
+      "0"
+     ],
+     "contributionL1Rgb": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "slot8": {
+     "draws": 72,
+     "programs": [
+      "9"
+     ],
+     "textures": [
+      "17"
+     ],
+     "opacities": [
+      "0"
+     ],
+     "contributionL1Rgb": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "slot1": {
+     "draws": 72,
+     "roi": [
+      678,
+      -9,
+      585,
+      437
+     ],
+     "sampleRects": [
+      "[678, 0, 585, 428]"
+     ],
+     "maxDiffRgb": 297525
+    },
+    "slot10": {
+     "draws": 72,
+     "roi": [
+      972,
+      209,
+      39,
+      27
+     ],
+     "sampleRects": [
+      "[972, 209, 39, 27]"
+     ],
+     "maxDiffRgb": 498
+    },
+    "slot11": {
+     "draws": 72,
+     "roi": [
+      938,
+      210,
+      21,
+      24
+     ],
+     "sampleRects": [
+      "[938, 210, 21, 24]"
+     ],
+     "maxDiffRgb": 450
+    },
+    "holdCrops": {
+     "slot7": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand-preview/crops/slot7-hold.png",
+      "sha256": "2f944bca9132ead5e851dca6920a435600b8bd4366c20af4aed3d0994b979d03",
+      "capture": 11,
+      "pageTs": 4542.0
+     },
+     "slot8": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand-preview/crops/slot8-hold.png",
+      "sha256": "00dedbf32bc63163e8d6d88dfa62340239a5d3ad8c1ebd4d8353da3ea3d2c066",
+      "capture": 11,
+      "pageTs": 4542.0
+     }
+    }
+   }
+  },
+  "cand2-live": {
+   "verdict": "PASS",
+   "problems": [],
+   "checks": {
+    "slot7TextureIdentity": true,
+    "slot7RawPairs": true,
+    "slot7OpacityZero": true,
+    "slot7NoContribution": true,
+    "slot8TextureIdentity": true,
+    "slot8RawPairs": true,
+    "slot8OpacityZero": true,
+    "slot8NoContribution": true,
+    "everyMmDrawIdentified": true,
+    "slot1Contributes": true,
+    "slot10Contributes": true,
+    "slot11Contributes": true
+   },
+   "detail": {
+    "context": 3,
+    "window": {
+     "D0": 11623.399999976158,
+     "Dlast": 13103.199999988079,
+     "R": 13375.799999982119,
+     "removal": {
+      "at": 13375.799999982119,
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "source": "mutation"
+     },
+     "canvasContext": {
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "monitored": true,
+      "seenConnected": true,
+      "removedAt": 13375.799999982119,
+      "lastTaskEnd": 13103.199999988079
+     },
+     "frameCount": 64,
+     "lastFrame": {
+      "ctx": 3,
+      "index": 65,
+      "clearAt": 13081.299999982119,
+      "draws": [
+       {
+        "at": 13081.899999976158,
+        "program": 1,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 5,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 5,
+           "uploadAt": 11576,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 4,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 4,
+           "uploadAt": 11576,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13082.199999988079,
+        "program": 2,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 11576,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 6,
+          "asset": "slot1",
+          "assetId": "68EE6B7757EAE3EBE14400D8B803EC01",
+          "info": {
+           "width": 585,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 6,
+           "uploadAt": 11576,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot1",
+        "rect": null,
+        "opacity": 0.052985161542892456,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          678,
+          0,
+          585,
+          428
+         ],
+         "equal": false,
+         "diffBytes": 213501,
+         "diffRgb": 213501,
+         "maxAbs": 14,
+         "l1": 2892720,
+         "l1Rgb": 2892720,
+         "beforeHash": "32a1b4a5",
+         "afterHash": "a9c54949"
+        }
+       },
+       {
+        "at": 13092.09999999404,
+        "program": 3,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 11576,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 8,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 149,
+           "height": 8,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 8,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 0.9999999999999999,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13092.299999982119,
+        "program": 4,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 10,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 10,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 9,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 9,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13092.399999976158,
+        "program": 5,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 12,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 12,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 11,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 11,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13092.59999999404,
+        "program": 6,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 13,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 13,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13092.699999988079,
+        "program": 7,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 15,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 292,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 15,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13092.799999982119,
+        "program": 8,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 16,
+          "asset": "slot7",
+          "assetId": "C0C026F1A1C5577B04664882E8B35C5D",
+          "info": {
+           "width": 44,
+           "height": 50,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 16,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot7",
+        "rect": null,
+        "opacity": 0,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          568,
+          520,
+          44,
+          50
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "d2f9b6a5",
+         "afterHash": "d2f9b6a5"
+        }
+       },
+       {
+        "at": 13096,
+        "program": 9,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 17,
+          "asset": "slot8",
+          "assetId": "E7CF3AADFEEDA3217255F36836CDA7A8",
+          "info": {
+           "width": 88,
+           "height": 59,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 17,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot8",
+        "rect": null,
+        "opacity": 0,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          652,
+          515,
+          88,
+          59
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "763b11dd",
+         "afterHash": "763b11dd"
+        }
+       },
+       {
+        "at": 13098.09999999404,
+        "program": 10,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 18,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 88,
+           "height": 88,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 18,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 13098.199999988079,
+        "program": 11,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 20,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 357,
+           "height": 235,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 20,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 19,
+          "asset": "slot10",
+          "assetId": "7AF1A2FD289A629D45D84B4F2F8588A9",
+          "info": {
+           "width": 39,
+           "height": 27,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 19,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot10",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          972,
+          209,
+          39,
+          27
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10fb0f8",
+         "afterHash": "10fb0f8"
+        }
+       },
+       {
+        "at": 13101.899999976158,
+        "program": 12,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 22,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 176,
+           "height": 205,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 22,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 21,
+          "asset": "slot11",
+          "assetId": "54AC5F2D72B23FC14E9B5D9C0111B61C",
+          "info": {
+           "width": 21,
+           "height": 24,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 21,
+           "uploadAt": 11576.09999999404,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot11",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          938,
+          210,
+          21,
+          24
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10da0685",
+         "afterHash": "10da0685"
+        }
+       }
+      ],
+      "taskEnd": 13103.199999988079
+     },
+     "postDlastGlCalls": [],
+     "holdCaptures": [
+      {
+       "index": 11,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand2-live/pages/frame-011.png",
+       "sha256": "0f52e439a4cc6eb2b5ecacd83840f56fecb683e3dea4f0847d2b13af22f08879",
+       "pageTs": 13194.79999999702
+      },
+      {
+       "index": 12,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand2-live/pages/frame-012.png",
+       "sha256": "0f52e439a4cc6eb2b5ecacd83840f56fecb683e3dea4f0847d2b13af22f08879",
+       "pageTs": 13277.14999999106
+      }
+     ]
+    },
+    "slot7": {
+     "draws": 64,
+     "programs": [
+      "8"
+     ],
+     "textures": [
+      "16"
+     ],
+     "opacities": [
+      "0"
+     ],
+     "contributionL1Rgb": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "slot8": {
+     "draws": 64,
+     "programs": [
+      "9"
+     ],
+     "textures": [
+      "17"
+     ],
+     "opacities": [
+      "0"
+     ],
+     "contributionL1Rgb": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "slot1": {
+     "draws": 64,
+     "roi": [
+      678,
+      -9,
+      585,
+      437
+     ],
+     "sampleRects": [
+      "[678, 0, 585, 428]"
+     ],
+     "maxDiffRgb": 297681
+    },
+    "slot10": {
+     "draws": 64,
+     "roi": [
+      972,
+      209,
+      39,
+      27
+     ],
+     "sampleRects": [
+      "[972, 209, 39, 27]"
+     ],
+     "maxDiffRgb": 489
+    },
+    "slot11": {
+     "draws": 64,
+     "roi": [
+      938,
+      210,
+      21,
+      24
+     ],
+     "sampleRects": [
+      "[938, 210, 21, 24]"
+     ],
+     "maxDiffRgb": 453
+    },
+    "holdCrops": {
+     "slot7": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand2-live/crops/slot7-hold.png",
+      "sha256": "2f944bca9132ead5e851dca6920a435600b8bd4366c20af4aed3d0994b979d03",
+      "capture": 12,
+      "pageTs": 13277.14999999106
+     },
+     "slot8": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand2-live/crops/slot8-hold.png",
+      "sha256": "00dedbf32bc63163e8d6d88dfa62340239a5d3ad8c1ebd4d8353da3ea3d2c066",
+      "capture": 12,
+      "pageTs": 13277.14999999106
+     }
+    }
+   }
+  },
+  "cand2-preview": {
+   "verdict": "PASS",
+   "problems": [],
+   "checks": {
+    "slot7TextureIdentity": true,
+    "slot7RawPairs": true,
+    "slot7OpacityZero": true,
+    "slot7NoContribution": true,
+    "slot8TextureIdentity": true,
+    "slot8RawPairs": true,
+    "slot8OpacityZero": true,
+    "slot8NoContribution": true,
+    "everyMmDrawIdentified": true,
+    "slot1Contributes": true,
+    "slot10Contributes": true,
+    "slot11Contributes": true
+   },
+   "detail": {
+    "context": 3,
+    "window": {
+     "D0": 2932.7999999821186,
+     "Dlast": 4406.5999999940395,
+     "R": 4686.199999988079,
+     "removal": {
+      "at": 4686.199999988079,
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "source": "mutation"
+     },
+     "canvasContext": {
+      "ctx": 3,
+      "canvas": 3,
+      "connected": false,
+      "monitored": true,
+      "seenConnected": true,
+      "removedAt": 4686.199999988079,
+      "lastTaskEnd": 4406.5999999940395
+     },
+     "frameCount": 70,
+     "lastFrame": {
+      "ctx": 3,
+      "index": 71,
+      "clearAt": 4387.899999976158,
+      "draws": [
+       {
+        "at": 4388.0999999940395,
+        "program": 1,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 5,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 5,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 4,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 1920,
+           "height": 1080,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 4,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4388.5,
+        "program": 2,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 6,
+          "asset": "slot1",
+          "assetId": "68EE6B7757EAE3EBE14400D8B803EC01",
+          "info": {
+           "width": 585,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 6,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot1",
+        "rect": null,
+        "opacity": 0.052985161542892456,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          678,
+          0,
+          585,
+          428
+         ],
+         "equal": false,
+         "diffBytes": 213501,
+         "diffRgb": 213501,
+         "maxAbs": 14,
+         "l1": 2892720,
+         "l1Rgb": 2892720,
+         "beforeHash": "32a1b4a5",
+         "afterHash": "a9c54949"
+        }
+       },
+       {
+        "at": 4397.5,
+        "program": 3,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 7,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 5850,
+           "height": 4368,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 7,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 8,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 149,
+           "height": 8,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 8,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 0.9999999999999999,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4397.5999999940395,
+        "program": 4,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 10,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 10,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 9,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 310,
+           "height": 110,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 9,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4397.799999982119,
+        "program": 5,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 12,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 12,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 11,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 144,
+           "height": 28,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 11,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4397.899999976158,
+        "program": 6,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 13,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 13,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4397.899999976158,
+        "program": 7,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 15,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 292,
+           "height": 437,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 15,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4398,
+        "program": 8,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 16,
+          "asset": "slot7",
+          "assetId": "C0C026F1A1C5577B04664882E8B35C5D",
+          "info": {
+           "width": 44,
+           "height": 50,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 16,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot7",
+        "rect": null,
+        "opacity": 0,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          568,
+          520,
+          44,
+          50
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "d2f9b6a5",
+         "afterHash": "d2f9b6a5"
+        }
+       },
+       {
+        "at": 4400.799999982119,
+        "program": 9,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 17,
+          "asset": "slot8",
+          "assetId": "E7CF3AADFEEDA3217255F36836CDA7A8",
+          "info": {
+           "width": 88,
+           "height": 59,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 17,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot8",
+        "rect": null,
+        "opacity": 0,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          652,
+          515,
+          88,
+          59
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "763b11dd",
+         "afterHash": "763b11dd"
+        }
+       },
+       {
+        "at": 4402.5,
+        "program": 10,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 14,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 145,
+           "height": 34,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 14,
+           "uploadAt": 2887.399999976158,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 18,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 88,
+           "height": 88,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 18,
+           "uploadAt": 2887.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": null,
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": null
+       },
+       {
+        "at": 4402.5999999940395,
+        "program": 11,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 20,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 357,
+           "height": 235,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 20,
+           "uploadAt": 2887.5,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 19,
+          "asset": "slot10",
+          "assetId": "7AF1A2FD289A629D45D84B4F2F8588A9",
+          "info": {
+           "width": 39,
+           "height": 27,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 19,
+           "uploadAt": 2887.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot10",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          972,
+          209,
+          39,
+          27
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10fb0f8",
+         "afterHash": "10fb0f8"
+        }
+       },
+       {
+        "at": 4405.299999982119,
+        "program": 12,
+        "textures": [
+         {
+          "unit": 1,
+          "id": 22,
+          "asset": null,
+          "assetId": null,
+          "info": {
+           "width": 176,
+           "height": 205,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 22,
+           "uploadAt": 2887.5,
+           "nonempty": true
+          }
+         },
+         {
+          "unit": 0,
+          "id": 21,
+          "asset": "slot11",
+          "assetId": "54AC5F2D72B23FC14E9B5D9C0111B61C",
+          "info": {
+           "width": 21,
+           "height": 24,
+           "source": "[object HTMLCanvasElement]",
+           "url": "",
+           "texture": 21,
+           "uploadAt": 2887.5,
+           "nonempty": true
+          }
+         }
+        ],
+        "asset": "slot11",
+        "rect": null,
+        "opacity": 1,
+        "kind": "drawElements",
+        "sample": {
+         "rect": [
+          938,
+          210,
+          21,
+          24
+         ],
+         "equal": true,
+         "diffBytes": 0,
+         "diffRgb": 0,
+         "maxAbs": 0,
+         "l1": 0,
+         "l1Rgb": 0,
+         "beforeHash": "10da0685",
+         "afterHash": "10da0685"
+        }
+       }
+      ],
+      "taskEnd": 4406.5999999940395
+     },
+     "postDlastGlCalls": [],
+     "holdCaptures": [
+      {
+       "index": 11,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand2-preview/pages/frame-011.png",
+       "sha256": "c7745a84092573f40676c76ae6cbf95772414d034e003f05f914ad66c63821a3",
+       "pageTs": 4500.04999999702
+      },
+      {
+       "index": 12,
+       "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand2-preview/pages/frame-012.png",
+       "sha256": "c7745a84092573f40676c76ae6cbf95772414d034e003f05f914ad66c63821a3",
+       "pageTs": 4583.649999991059
+      }
+     ]
+    },
+    "slot7": {
+     "draws": 70,
+     "programs": [
+      "8"
+     ],
+     "textures": [
+      "16"
+     ],
+     "opacities": [
+      "0"
+     ],
+     "contributionL1Rgb": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "slot8": {
+     "draws": 70,
+     "programs": [
+      "9"
+     ],
+     "textures": [
+      "17"
+     ],
+     "opacities": [
+      "0"
+     ],
+     "contributionL1Rgb": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+     ]
+    },
+    "slot1": {
+     "draws": 70,
+     "roi": [
+      678,
+      -9,
+      585,
+      437
+     ],
+     "sampleRects": [
+      "[678, 0, 585, 428]"
+     ],
+     "maxDiffRgb": 297525
+    },
+    "slot10": {
+     "draws": 70,
+     "roi": [
+      972,
+      209,
+      39,
+      27
+     ],
+     "sampleRects": [
+      "[972, 209, 39, 27]"
+     ],
+     "maxDiffRgb": 486
+    },
+    "slot11": {
+     "draws": 70,
+     "roi": [
+      938,
+      210,
+      21,
+      24
+     ],
+     "sampleRects": [
+      "[938, 210, 21, 24]"
+     ],
+     "maxDiffRgb": 450
+    },
+    "holdCrops": {
+     "slot7": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand2-preview/crops/slot7-hold.png",
+      "sha256": "2f944bca9132ead5e851dca6920a435600b8bd4366c20af4aed3d0994b979d03",
+      "capture": 12,
+      "pageTs": 4583.649999991059
+     },
+     "slot8": {
+      "path": "/private/tmp/claude-501/-Users-anyhowclick-Desktop-work-obed-edom--claude-worktrees-inspiring-feynman-06914e/29684ee7-fbfe-46e5-9097-279cbfa06ec2/scratchpad/sol/uh1/oroot/.html-preview/uh1-runs/20261015-112435/cand2-preview/crops/slot8-hold.png",
+      "sha256": "00dedbf32bc63163e8d6d88dfa62340239a5d3ad8c1ebd4d8353da3ea3d2c066",
+      "capture": 12,
+      "pageTs": 4583.649999991059
+     }
+    }
+   }
+  }
+ },
+ "cross": {
+  "problems": [],
+  "checks": {
+   "preview-slot7NoiseBounded": true,
+   "preview-slot7CandMatchesTerminal": true,
+   "preview-slot7RepeatMatchesTerminal": true,
+   "preview-slot8NoiseBounded": true,
+   "preview-slot8CandMatchesTerminal": true,
+   "preview-slot8RepeatMatchesTerminal": true,
+   "live-slot7NoiseBounded": true,
+   "live-slot7CandMatchesTerminal": true,
+   "live-slot7RepeatMatchesTerminal": true,
+   "live-slot8NoiseBounded": true,
+   "live-slot8CandMatchesTerminal": true,
+   "live-slot8RepeatMatchesTerminal": true,
+   "stock-slot7RetainsArtifact": true,
+   "stock-slot8RetainsArtifact": true,
+   "base-preview-slot7RetainsArtifact": true,
+   "base-preview-slot8RetainsArtifact": true,
+   "base-live-slot7RetainsArtifact": true,
+   "base-live-slot8RetainsArtifact": true
+  },
+  "detail": {
+   "preview-slot7": {
+    "noiseHold": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "noiseTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "candHoldVsTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "repeatHoldVsTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    }
+   },
+   "preview-slot8": {
+    "noiseHold": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "noiseTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "candHoldVsTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "repeatHoldVsTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    }
+   },
+   "live-slot7": {
+    "noiseHold": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "noiseTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "candHoldVsTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "repeatHoldVsTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    }
+   },
+   "live-slot8": {
+    "noiseHold": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "noiseTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "candHoldVsTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    },
+    "repeatHoldVsTerminal": {
+     "maxAbs": 0,
+     "l1": 0,
+     "meanAbs": 0.0
+    }
+   },
+   "stock-slot7": {
+    "holdVsCandidate": {
+     "maxAbs": 223,
+     "l1": 396459,
+     "meanAbs": 60.069545454545455
+    },
+    "terminalContributionL1": 396459
+   },
+   "stock-slot8": {
+    "holdVsCandidate": {
+     "maxAbs": 223,
+     "l1": 664026,
+     "meanAbs": 42.63135593220339
+    },
+    "terminalContributionL1": 664026
+   },
+   "base-preview-slot7": {
+    "holdVsCandidate": {
+     "maxAbs": 223,
+     "l1": 396459,
+     "meanAbs": 60.069545454545455
+    },
+    "terminalContributionL1": 396459
+   },
+   "base-preview-slot8": {
+    "holdVsCandidate": {
+     "maxAbs": 223,
+     "l1": 664206,
+     "meanAbs": 42.64291217257319
+    },
+    "terminalContributionL1": 664026
+   },
+   "base-live-slot7": {
+    "holdVsCandidate": {
+     "maxAbs": 223,
+     "l1": 396459,
+     "meanAbs": 60.069545454545455
+    },
+    "terminalContributionL1": 396459
+   },
+   "base-live-slot8": {
+    "holdVsCandidate": {
+     "maxAbs": 223,
+     "l1": 664026,
+     "meanAbs": 42.63135593220339
+    },
+    "terminalContributionL1": 664026
+   }
+  }
+ },
+ "generatedAt": "2026-10-15T03:25:41.911951+00:00"
+}

@@ -1,0 +1,69 @@
+{
+  "base": {
+    "revision": "e476ea74542b3f1e15d4328248f63d57cde60eb7",
+    "test_source_sha256": "86e36607e81421edfd4aa608532c01d5d5528f2538008190bcceaf18cd71030f"
+  },
+  "candidate_test_source_sha256": "418d9e8464c898e95135c0be9cf1cfadb73726199834cb94a33fb47139a0e0c1",
+  "changes": [
+    {
+      "base": [
+        1,
+        1,
+        1
+      ],
+      "candidate": [
+        0,
+        0,
+        0
+      ],
+      "fingerprint": "f2350147870865e13a6a4e588c1d3b06f50ed18204520b4283dc8f67e0717b66",
+      "first_source": "old_f2",
+      "slot": 7
+    },
+    {
+      "base": [
+        1,
+        1,
+        1
+      ],
+      "candidate": [
+        0,
+        0,
+        0
+      ],
+      "fingerprint": "f2350147870865e13a6a4e588c1d3b06f50ed18204520b4283dc8f67e0717b66",
+      "first_source": "old_f2",
+      "slot": 8
+    }
+  ],
+  "distinct_effects": 29,
+  "distinct_leaves": 145,
+  "expected": [
+    {
+      "fingerprint": "f2350147870865e13a6a4e588c1d3b06f50ed18204520b4283dc8f67e0717b66",
+      "slot": 7
+    },
+    {
+      "fingerprint": "f2350147870865e13a6a4e588c1d3b06f50ed18204520b4283dc8f67e0717b66",
+      "slot": 8
+    }
+  ],
+  "sources": {
+    "current_f2": {
+      "json_files": 9,
+      "new_distinct_effects": 1,
+      "new_distinct_leaves": 9
+    },
+    "main_output_fixtures": {
+      "json_files": 127,
+      "new_distinct_effects": 26,
+      "new_distinct_leaves": 122
+    },
+    "old_f2": {
+      "json_files": 9,
+      "new_distinct_effects": 2,
+      "new_distinct_leaves": 14
+    }
+  },
+  "status": "PASS"
+}

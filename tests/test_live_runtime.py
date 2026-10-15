@@ -164,6 +164,7 @@ REAL_PLAYER = fixture("p2-binary") / "html-player" / "assets" / "player" / "main
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 EFFECT_1_TO_2 = FIXTURE_ROOT / "effect_1_to_2.json"
 EFFECT_7_TO_8 = FIXTURE_ROOT / "effect_7_to_8.json"
+F2_SLIDE3_MM_SUBTREE = FIXTURE_ROOT / "f2_slide3_mm_subtree.json"
 SOURCE_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
 SLOT4_ALPHA = 0.29468628764152527
 ALPHA_DSK_OPACITY = 0.6117682456970215
@@ -308,20 +309,21 @@ def test_mm_opacity_anchors_are_unique_on_the_real_player():
 # and old True 21476f78... with R1-R5. New False: recorded when the new player was admitted.
 # Line Draw (R14-R20) merged with CEF frac placement: main had aa0ae4bb... / 134114e0... and rendering 416613aa... /
 # 7d9eb308...; the placement branch had 63c328b2... / 7b0af749... and rendering a117b3ee... / 2432c819....
-# The frac boundary repair replaces True e57025c3... / bff8f5ae...; False and rendering remain unchanged.
+# The frac boundary repair replaces True e57025c3... / bff8f5ae...; False and rendering remain unchanged. Absorbing a
+# proved ancestor zero replaces True d3ddd770... / 1036a8e2... and rendering 8202717a... / c0faaa3c...; False unchanged.
 REAL_PATCHED_SHA256 = {
     OLD_PLAYER_SHA256: {
-        True: "d3ddd770dae1cd4aeb67a68a7e6aa12ef3d890b5ce4cd1cb19db81ec5e709d54",
+        True: "0c94dd74b4e8b4f199971cae3ccf95581136655c173281bc293124f33d2500fb",
         False: "7cf00b5606365ec9ca6276ec7c8ed7f55c119f6f6bf310e25857f3579acb75de",
     },
     NEW_PLAYER_SHA256: {
-        True: "1036a8e26fae661c0cde23291f1726643bfb7aa0e781b7f95da1739c7cda3732",
+        True: "451d2473b7d1de1ae54c1aba9b4144b3874cfc8cf948264027dff4422d2dbc87",
         False: "4f9fbffd95e4649543142b2e95586babd9d75f0a0d9a4974e21d6f33c8389e3b",
     },
 }
 REAL_RENDERING_SHA256 = {
-    OLD_PLAYER_SHA256: "8202717a2699a2e4691aac6848675e3636f5d26ac1336f9ae6faba0a48cc72dd",
-    NEW_PLAYER_SHA256: "c0faaa3c99c88705931f686d96d4e891a8d10b6b59aa2da62faae5cf56b2c4fc",
+    OLD_PLAYER_SHA256: "573d292b39e2d33096dd2e1684f1ea1010496dd382a81f53343685ae3c14df00",
+    NEW_PLAYER_SHA256: "ecff39e1444a0d874ecf7df140f53d3214c1eca0e7fb672911fe82ae1abed071",
 }
 
 
@@ -1035,6 +1037,18 @@ def test_mm_opacity_real_patched_methods_draw_the_authored_opacity_on_p2_1_to_2(
     assert [[new for _, new in row] for row in _mirror(effect)] == patched
     assert [[old for old, _ in row] for row in _mirror(effect)] == stock
 
+    # Local slots 0/1/2 are original F2 slots 7/8/10.
+    f2_effect = json.loads(F2_SLIDE3_MM_SUBTREE.read_text())
+    f2_stock = [[1, 1, 0], [1, 1, 0.5], [1, 1, 1]]
+    f2_patched = [[0, 0, 0], [0, 0, 0.5], [0, 0, 1]]
+    for sha in REAL_PLAYERS:
+        candidate = _real_player(sha)
+        assert _run_extracted(node, _hook_only(candidate).decode(), False, f2_effect) == f2_stock
+        assert _run_extracted(node, live_runtime.patch_player(candidate).decode(), True, f2_effect) == f2_patched
+        assert _run_extracted(node, live_runtime.patch_rendering(candidate).decode(), True, f2_effect) == f2_patched
+    assert [[old for old, _ in row] for row in _mirror(f2_effect)] == f2_stock
+    assert [[new for _, new in row] for row in _mirror(f2_effect)] == f2_patched
+
     fade_in = json.loads(EFFECT_7_TO_8.read_text())
     fade_out = _fade_variant(
         fade_in,
@@ -1182,6 +1196,15 @@ SYNTHETIC_TREES = {
                               [_layer(0.5, [_group(_anim("opacity", 1, 0))], texture="leaf")])]),
         [(0.4, 0.2, 0)],
     ),
+    "zero-wrapper-through-unknown-middle": (
+        _layer(layers=[_layer(0, [_group(_anim("opacity", 0, 0))], [
+            _layer(1, [_group(_anim("hidden", True, True))], [
+                _layer(0.5, texture="static-leaf"),
+                _layer(0.5, [_group(_anim("opacity", 1, 0))], texture="fading-leaf"),
+            ]),
+        ])]),
+        [0, (0, 0, 0)],
+    ),
 }
 
 
@@ -1243,6 +1266,8 @@ def _node_opacity(node: dict) -> float | None:
 def _chain_opacity(parent, node: dict):
     if parent is None:
         return None
+    if parent == 0:
+        return 0
     value = _node_opacity(node)
     return None if value is None else (1 if parent is _UNDEFINED else parent) * value
 
@@ -1392,6 +1417,7 @@ def _effect_fingerprint(effect: dict) -> str:
 P2_1_TO_2_FINGERPRINT = "f040174b9998ecdd9011d8d7b91c01b2146c2f319700c07950de00103ab98ccf"
 ALPHA_DSK_6_TO_7_FINGERPRINT = "53b5f2b2482eb4d08418c84b416a2ac9cc5e065682feb1ec79dbfbcce6665669"
 ALPHA_DSK_7_TO_8_FINGERPRINT = "4d87c01a586e6596a2ccb2499c3e65c50acd5c4f7975136bf3442e910a8a133b"
+F2_SLIDE3_MM_SUBTREE_FINGERPRINT = "b00a51e507a8176c3db3c76e2f75743aae0a8a7dab21ab341c28490741ea93af"
 
 
 def _census(json_paths) -> tuple[dict[str, int], set[tuple[str, int]], set[tuple[str, int]]]:
@@ -1444,9 +1470,13 @@ def test_mm_opacity_census_mirror_changes_only_expected_slots_in_committed_fixtu
     assert stats["shimmer"] == stats["sparkle"] == 0
     assert _effect_fingerprint(effect) == P2_1_TO_2_FINGERPRINT
     assert _effect_fingerprint(json.loads(EFFECT_7_TO_8.read_text())) == ALPHA_DSK_7_TO_8_FINGERPRINT
+    f2_effect = json.loads(F2_SLIDE3_MM_SUBTREE.read_text())
+    assert _effect_fingerprint(f2_effect) == F2_SLIDE3_MM_SUBTREE_FINGERPRINT
     assert stock_changed == {
         (P2_1_TO_2_FINGERPRINT, 4),
         (ALPHA_DSK_7_TO_8_FINGERPRINT, 6),
+        (F2_SLIDE3_MM_SUBTREE_FINGERPRINT, 0),
+        (F2_SLIDE3_MM_SUBTREE_FINGERPRINT, 1),
     }
     assert extension_changed == {(ALPHA_DSK_7_TO_8_FINGERPRINT, 4), (ALPHA_DSK_7_TO_8_FINGERPRINT, 8)}
 

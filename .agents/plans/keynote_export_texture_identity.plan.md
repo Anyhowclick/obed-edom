@@ -2,7 +2,7 @@
 
 Status: FINAL for owner review, 2026-10-14. All nine r3 findings accepted; prior folds retained as corrected here. Offline rewrite only; no implementation, measurements, tests, suites, git, apps or owner acceptance. Supplied base: `origin/main 5b09b379 + docs`, Stage T merged #267, unverified.
 
-Anchors: `pt` = `preview_textures.py`; `hp` = `html_preview.py`; `ir` = `iwa_runs.py`; `ki` = `iwa_kindindex.py`; `oi` = `offline_inspect.py`, under `src/obed_edom`. Evidence: adjacent `advisory.md`/measurements, `../critique-r2.md`, `../critique-r3.md`, and prior offline results; not rerun.
+Anchors: `pt` = `preview_textures.py`; `hp` = `html_preview.py`; `ir` = `iwa_runs.py`; `ki` = `iwa_kindindex.py`; `oi` = `offline_inspect.py`, under `src/obed_edom`. Evidence: adjacent `advisory.md`/measurements, critique r2 (raw round pruned at merge; see §8), critique r3 (raw round pruned at merge; see §8), and prior offline results; not rerun.
 
 ## 1. Problem and measured basis
 
