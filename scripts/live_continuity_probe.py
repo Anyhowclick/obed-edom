@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import fcntl
 import hashlib
 import json
@@ -75,7 +76,7 @@ import urllib.request
 from collections import Counter
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Callable, Collection, Iterator, Sequence
+from typing import Any, Callable, Collection, Iterator, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -345,6 +346,17 @@ FEED_CONTROL: dict[str, Any] = {}
 MM_FEED_REQUEST = "auto"
 MM_OPACITY_REQUEST = "auto"
 FEED_DWELL_S: float | None = None
+
+HOST_HEADLESS_CHROME = "headless Chrome"
+HOST_QUALIFIED_CHROME_ATTACH = "qualified Chrome attach"
+HOST_MANAGED_OBS_25 = "managed OBS 25"
+HOST_MANAGED_OBS_30 = "managed OBS 30"
+HOST_KINDS = (
+    HOST_HEADLESS_CHROME,
+    HOST_QUALIFIED_CHROME_ATTACH,
+    HOST_MANAGED_OBS_25,
+    HOST_MANAGED_OBS_30,
+)
 
 MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
     "feed-on": {"feedLive": True, "holdFrame": None, "noRiderAboveCanvas": True,
@@ -1670,6 +1682,15 @@ def bind_dom_ids(facts: dict[str, Any], nodes: list[dict[str, Any]]) -> None:
                     retire["dstDomId"] = spec["dstDomId"]
 
 
+def complete_facts(
+    plan: ContinuityPlan, export_root: Path, slides: list[dict[str, Any]], *, armed: bool = False,
+) -> dict[str, Any]:
+    facts = ground_truth_facts(plan, armed=armed, arrival=arrival_starts(export_root, slides, plan))
+    bind_dom_ids(facts, movie_nodes(export_root, slides))
+    bind_feed_source_fps(facts, export_root, slides)
+    return facts
+
+
 def ground_truth_facts(
     plan: ContinuityPlan, *, armed: bool = False, arrival: dict[int, dict[str, bool]] | None = None,
 ) -> dict[str, Any]:
@@ -1738,13 +1759,18 @@ def gl_replay_mode(entry: Any) -> str | None:
     return gl.get("mode") if isinstance(gl, dict) else None
 
 
+def select_facts(
+    continuity: Any, facts_off: dict[str, Any], facts_on: dict[str, Any] | None
+) -> tuple[str, dict[str, Any]]:
+    if facts_on is not None and gl_replay_mode({"continuity": continuity}) == "injected":
+        return "on", facts_on
+    return "off", facts_off
+
+
 def facts_for(
     continuity: Any, facts_off: dict[str, Any], facts_on: dict[str, Any] | None
 ) -> dict[str, Any]:
-    """The flag-on facts only when the host reports the module injected (plan g5g6 D2)."""
-    if facts_on is not None and gl_replay_mode({"continuity": continuity}) == "injected":
-        return facts_on
-    return facts_off
+    return select_facts(continuity, facts_off, facts_on)[1]
 
 
 def check_vgl_expectations(
@@ -4497,14 +4523,6 @@ def score_census(
     return records, sorted(red), unknown
 
 
-def record_sampler(result: dict[str, Any], transport: Any, raw_samples: list[dict[str, Any]]) -> None:
-    """The stopped sampler's `{schema, meta, selfCheck}` and, when a paint control ran, its record."""
-    result["sampler"] = sampler_record(transport, raw_samples)
-    control = transport.evaluate(PAINT_CONTROL_READ_JS)
-    if isinstance(control, dict):
-        result["paintControlRecord"] = control
-
-
 def arm_paint_census(samples: list[dict[str, Any]], scored: dict[str, Any], specs: Sequence[dict[str, Any]]) -> Any:
     """Every painted -> not -> painted run of a carried decoder over the whole arm, each decoder with
     the windows its carries were scored over (report only)."""
@@ -4525,6 +4543,247 @@ def arm_paint_census(samples: list[dict[str, Any]], scored: dict[str, Any], spec
     return paint_instrument.paint_census(samples, carried, asset_by_id, scene_count=max(counts))
 
 
+def _capture_samples(capture: Mapping[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+    key = "samples" if isinstance(capture.get("samples"), list) else "sampleRows"
+    rows = capture.get(key)
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        return [], key == "sampleRows"
+    authored = capture.get("sampleSpace") == "authored" or (
+        capture.get("sampleSpace") != "screen" and any(
+            "stageMapValid" in row or any(isinstance(video, dict) and "rectScreen" in video for video in row.get("videos") or [])
+            for row in rows
+        )
+    )
+    return (copy.deepcopy(rows) if authored else convert_samples_to_authored(copy.deepcopy(rows))[0]), key == "sampleRows"
+
+
+def _feed_producer(capture: Mapping[str, Any]) -> Any:
+    evidence = capture.get("feedEvidence")
+    return evidence.get("producer") if isinstance(evidence, Mapping) else None
+
+
+def _continuous_expected(capture: Mapping[str, Any]) -> bool | None:
+    value = capture.get("continuousExpected")
+    if isinstance(value, bool):
+        return value
+    evidence = capture.get("feedEvidence")
+    verdicts = evidence.get("verdicts") if isinstance(evidence, Mapping) else None
+    if not isinstance(verdicts, Mapping) or not verdicts:
+        return None
+    records: list[Mapping[str, Any]] = []
+    for record in verdicts.values():
+        if not isinstance(record, Mapping):
+            return None
+        records.append(record)
+        visits = record.get("visits")
+        if visits is not None:
+            if not isinstance(visits, list) or not all(isinstance(visit, Mapping) for visit in visits):
+                return None
+            records.extend(visits)
+    values = {record.get("continuousExpected") for record in records}
+    only = next(iter(values)) if len(values) == 1 else None
+    return only if isinstance(only, bool) else None
+
+
+def score_arm(
+    capture: Mapping[str, Any], facts: Mapping[str, Any], expected_stage: Mapping[str, float],
+) -> dict[str, Any]:
+    """Pure arm scoring. Raw observations are copied; saved derived verdicts are discarded and rebuilt."""
+    result = copy.deepcopy(dict(capture))
+    facts_copy = copy.deepcopy(dict(facts))
+    specs = list(facts_copy.get("verdicts") or [])
+    for spec in specs:
+        spec.setdefault("alias", None)
+    for key in (
+        "sampleCount", "unplannedWraps", "stageMapInvalidCount", "stageMap", "stageFit", "verdicts",
+        "paintCensus", "feedVerdicts",
+    ):
+        result.pop(key, None)
+    for spec in specs:
+        result.pop(spec.get("id"), None)
+        if spec.get("alias"):
+            result.pop(spec["alias"], None)
+
+    samples, sample_rows_alias = _capture_samples(capture)
+    result["samples"] = samples
+    result["sampleSpace"] = "authored"
+    if sample_rows_alias:
+        result["sampleRows"] = samples
+    result["sampleCount"] = len(samples)
+    result["unplannedWraps"] = unplanned_wraps(samples)
+    result["stageMapInvalidCount"] = sum(not row.get("stageMapValid") for row in samples)
+    result["stageMap"] = stage_map_summary(samples)
+    if all(key in expected_stage for key in ("x", "y", "width", "height")):
+        result["stageFit"] = score_stage_fit(samples, dict(expected_stage))
+    else:
+        result["stageFit"] = {"verdict": None, "reason": "expected stage fit is unavailable", "expected": dict(expected_stage)}
+
+    continuity = capture.get("continuity")
+    if continuity is None and isinstance(capture.get("output"), Mapping):
+        continuity = capture["output"].get("continuity")
+    result["continuity"] = copy.deepcopy(continuity)
+    runtime_installed = isinstance(continuity, Mapping) and continuity.get("mode") == "qualified"
+    evidence = capture.get("evidence")
+    result["evidence"] = copy.deepcopy(evidence) if isinstance(evidence, Mapping) else None
+    sampler = capture.get("sampler")
+    schema = sampler.get("schema") if isinstance(sampler, Mapping) else None
+
+    producer = _feed_producer(capture)
+    continuous_expected = _continuous_expected(capture)
+    normalized_feed = None
+    if producer is not None and continuous_expected is not None:
+        records = mm_feed_instrument.verdict_records(
+            copy.deepcopy(producer), feed_specs_for(facts_copy), continuous_expected=continuous_expected,
+        )
+        normalized_feed = {"producer": copy.deepcopy(producer), "verdicts": records}
+        result["continuousExpected"] = continuous_expected
+        result["feedEvidence"] = normalized_feed
+    elif "feedEvidence" in result:
+        result["feedEvidence"] = {"producer": copy.deepcopy(producer)} if producer is not None else None
+
+    score_kwargs: dict[str, Any] = {"schema": schema}
+    if normalized_feed is not None:
+        score_kwargs["feed_evidence"] = normalized_feed
+    scored = score_verdicts(
+        samples, dict(evidence) if isinstance(evidence, Mapping) else {}, facts_copy, runtime_installed, continuity,
+        **score_kwargs,
+    )
+    result.update(with_aliases(scored, specs))
+    result["verdicts"] = verdict_table(result, specs)
+    if producer is not None or "feedEvidence" in capture or "feedVerdicts" in capture:
+        result["feedVerdicts"] = {spec["id"]: scored[spec["id"]] for spec in specs}
+    result["paintCensus"] = arm_paint_census(samples, result, specs)
+    return result
+
+
+def chrome_process_counts() -> dict[str, int | None]:
+    try:
+        snapshot = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True, errors="replace", check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"owned": None, "foreign": None}
+    if snapshot.returncode != 0:
+        return {"owned": None, "foreign": None}
+    rows: list[tuple[int, int, str]] = []
+    for line in snapshot.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    if os.getpid() not in {pid for pid, _ppid, _command in rows}:
+        return {"owned": None, "foreign": None}
+    children: dict[int, list[int]] = {}
+    for pid, ppid, _command in rows:
+        children.setdefault(ppid, []).append(pid)
+    descendants = {os.getpid()}
+    pending = [os.getpid()]
+    while pending:
+        for pid in children.get(pending.pop(), []):
+            if pid not in descendants:
+                descendants.add(pid)
+                pending.append(pid)
+    chrome_executables = (
+        "/Contents/MacOS/Google Chrome",
+        "/Contents/MacOS/Google Chrome for Testing",
+    )
+    roots = {pid for pid, _ppid, command in rows if command.endswith(chrome_executables)}
+    owned = len(roots & descendants)
+    return {"owned": owned, "foreign": len(roots) - owned}
+
+
+def environment_observation() -> dict[str, Any]:
+    try:
+        uptime = subprocess.run(
+            ["uptime"], capture_output=True, text=True, errors="replace", check=False, timeout=2,
+        )
+        uptime_value = uptime.stdout.strip() if uptime.returncode == 0 and uptime.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError):
+        uptime_value = None
+    try:
+        load = list(os.getloadavg())
+    except OSError:
+        load = None
+    return {"at": time.time(), "loadAverage": load, "uptime": uptime_value, "chromeCounts": chrome_process_counts()}
+
+
+def static_environment(player: Any, host_kind: str) -> dict[str, Any]:
+    try:
+        browser_version = player._require_transport().call("Browser.getVersion")
+    except Exception:
+        browser_version = None
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=False, timeout=2,
+        )
+        git_head = completed.stdout.strip() if completed.returncode == 0 and completed.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError):
+        git_head = None
+    return {
+        "qualificationIdentity": host_kind,
+        "browserVersion": browser_version,
+        "gitHead": git_head,
+    }
+
+
+def capture_arm(
+    player: Any, facts: Mapping[str, Any], *, continuous_expected: bool, host_kind: str,
+    environment: Mapping[str, Any], census: bool = False,
+) -> dict[str, Any]:
+    """Collect one full-deck arm. `instrumentCost`, when added in C2, is `{hook: {count, p95, max, overBudget}}`."""
+    if not isinstance(continuous_expected, bool):
+        raise TypeError("continuous_expected must be a bool")
+    if host_kind not in HOST_KINDS:
+        raise ValueError(f"unknown host kind {host_kind!r}")
+    if not isinstance(environment, Mapping):
+        raise TypeError("environment must be a mapping")
+    evidence: dict[str, Any] = {}
+    feed: dict[str, Any] = {}
+    capture: dict[str, Any] = {
+        "continuousExpected": continuous_expected,
+        "hostKind": host_kind,
+        "environment": copy.deepcopy(dict(environment)),
+        "scope": {"kind": "full-deck"},
+    }
+    observations: dict[str, Any] = {}
+    capture["environment"]["observations"] = observations
+    observer = boundary_observer(player, dict(facts), evidence)
+    if census:
+        capture["censusRaw"] = {}
+        observer = census_observer(player, observer, capture["censusRaw"])
+    shown = sorted(
+        (slide for slide in getattr(player, "slides", ()) if not slide.get("skipped")),
+        key=lambda slide: slide["originalOrdinal"],
+    )
+    middle = shown[len(shown) // 2]["originalOrdinal"] if shown else None
+    inner_observer = observer
+
+    def observe(ordinal: int) -> None:
+        if inner_observer is not None:
+            inner_observer(ordinal)
+        if "during" not in observations and (middle is None or ordinal == middle):
+            observations["during"] = environment_observation()
+
+    observations["before"] = environment_observation()
+    raw_samples = drive_and_sample(
+        player, observer=observe, carry_into=carry_destination_players(dict(facts)),
+        feed_facts=dict(facts), feed_sink=feed, feed_continuous_expected=continuous_expected,
+    )
+    observations["after"] = environment_observation()
+    transport = player._require_transport()
+    capture["continuity"] = copy.deepcopy((getattr(player, "output", {}) or {}).get("continuity"))
+    capture["samples"] = raw_samples
+    capture["sampleSpace"] = "screen"
+    capture["sampler"] = sampler_record(transport, raw_samples)
+    control = transport.evaluate(PAINT_CONTROL_READ_JS)
+    if isinstance(control, dict):
+        capture["paintControlRecord"] = control
+    capture["evidence"] = evidence
+    if "producer" in feed:
+        capture["feedEvidence"] = {"producer": feed["producer"]}
+    return capture
+
+
 def show_output(player: LiveOutputHost, result: dict[str, Any]) -> None:
     """`show()` before any sampling: it lifts the attach host's inline `#body` opacity 0 and the
     launch host's black cover, both of which the ancestor-aware owner and paint reads would see.
@@ -4540,9 +4799,6 @@ def run_arm(
     gl_replay: str = "off", facts_on: dict[str, Any] | None = None, census: bool = False,
 ) -> dict[str, Any]:
     force_viewport(*viewport)
-    bind_feed_source_fps(facts, export_root, slides)
-    if facts_on is not None:
-        bind_feed_source_fps(facts_on, export_root, slides)
     player = LiveOutputHost(
         export_root, slides, headless=True, gl_replay=gl_replay, **feed_host_kwargs(facts_on or facts),
     )
@@ -4551,40 +4807,14 @@ def run_arm(
         player.start()
         result["continuity"] = player.output["continuity"]
         show_output(player, result)
-        arm_facts = facts_for(result["continuity"], facts, facts_on)
+        facts_set, arm_facts = select_facts(result["continuity"], facts, facts_on)
         if facts_on is not None:
-            result["factsSet"] = "on" if arm_facts is facts_on else "off"
-        evidence: dict[str, Any] = {}
-        feed_evidence: dict[str, Any] = {}
-        observer = boundary_observer(player, arm_facts, evidence)
-        if census:
-            result["censusRaw"] = {}
-            observer = census_observer(player, observer, result["censusRaw"])
-        raw_samples = drive_and_sample(
-            player, observer=observer, carry_into=carry_destination_players(arm_facts),
-            feed_facts=arm_facts, feed_sink=feed_evidence, feed_continuous_expected=True,
+            result["factsSet"] = facts_set
+        capture = capture_arm(
+            player, arm_facts, continuous_expected=True, host_kind=HOST_HEADLESS_CHROME,
+            environment=static_environment(player, HOST_HEADLESS_CHROME), census=census,
         )
-        record_sampler(result, player._require_transport(), raw_samples)
-        samples, invalid_count = convert_samples_to_authored(raw_samples)
-        result["samples"] = samples
-        result["sampleCount"] = len(samples)
-        result["unplannedWraps"] = unplanned_wraps(samples)
-        result["stageMapInvalidCount"] = invalid_count
-        result["stageMap"] = stage_map_summary(samples)
-        result["stageFit"] = score_stage_fit(samples, expected_stage)
-        runtime_installed = result["continuity"].get("mode") == "qualified"
-        result["evidence"] = evidence
-        if feed_evidence:
-            result["feedEvidence"] = feed_evidence
-        result.update(with_aliases(
-            score_verdicts(
-                samples, evidence, arm_facts, runtime_installed, result["continuity"], schema=result["sampler"].get("schema"),
-                feed_evidence=feed_evidence,
-            ),
-            arm_facts.get("verdicts") or [],
-        ))
-        result["verdicts"] = verdict_table(result, arm_facts.get("verdicts") or [])
-        result["paintCensus"] = arm_paint_census(samples, result, arm_facts.get("verdicts") or [])
+        result.update(score_arm(capture, arm_facts, expected_stage))
     finally:
         try:
             player.stop()
@@ -4693,9 +4923,6 @@ def run_attach_arm(
 ) -> dict[str, Any]:
     # The live host forces attach mode to 1920x1080 by contract regardless of
     # `--viewport`; the attach arm stays pinned to that, never the CLI value.
-    bind_feed_source_fps(facts, export_root, slides)
-    if facts_on is not None:
-        bind_feed_source_fps(facts_on, export_root, slides)
     result: dict[str, Any] = {"arm": "attach", "attachViewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT}}
     with attach_chrome(scratch / "attach-chrome-profile", result) as port:
         with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
@@ -4706,9 +4933,9 @@ def run_attach_arm(
                 player.start()
                 output = player.output
                 result["continuity"] = output["continuity"]
-                attach_facts = facts_for(result["continuity"], facts, facts_on)
+                facts_set, attach_facts = select_facts(result["continuity"], facts, facts_on)
                 if facts_on is not None:
-                    result["factsSet"] = "on" if attach_facts is facts_on else "off"
+                    result["factsSet"] = facts_set
                 result["output"] = {key: value for key, value in output.items() if key != "continuity"}
                 show_output(player, result)
                 transport = player._require_transport()
@@ -4717,34 +4944,11 @@ def run_attach_arm(
                 )
                 computed_background = transport.evaluate("getComputedStyle(document.documentElement).backgroundColor")
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
-                evidence: dict[str, Any] = {}
-                feed_evidence: dict[str, Any] = {}
-                raw_samples = drive_and_sample(
-                    player, observer=boundary_observer(player, attach_facts, evidence),
-                    carry_into=carry_destination_players(attach_facts),
-                    feed_facts=attach_facts, feed_sink=feed_evidence, feed_continuous_expected=False,
+                capture = capture_arm(
+                    player, attach_facts, continuous_expected=False, host_kind=HOST_QUALIFIED_CHROME_ATTACH,
+                    environment=static_environment(player, HOST_QUALIFIED_CHROME_ATTACH),
                 )
-                record_sampler(result, transport, raw_samples)
-                samples, invalid_count = convert_samples_to_authored(raw_samples)
-                result["samples"] = samples
-                result["sampleCount"] = len(samples)
-                result["unplannedWraps"] = unplanned_wraps(samples)
-                result["stageMapInvalidCount"] = invalid_count
-                result["stageMap"] = stage_map_summary(samples)
-                result["stageFit"] = score_stage_fit(samples, expected_stage)
-                runtime_installed = result["continuity"].get("mode") == "qualified"
-                result["evidence"] = evidence
-                if feed_evidence:
-                    result["feedEvidence"] = feed_evidence
-                result.update(with_aliases(
-                    score_verdicts(
-                        samples, evidence, attach_facts, runtime_installed, result["continuity"],
-                        schema=result["sampler"].get("schema"), feed_evidence=feed_evidence,
-                    ),
-                    attach_facts.get("verdicts") or [],
-                ))
-                result["verdicts"] = verdict_table(result, attach_facts.get("verdicts") or [])
-                result["paintCensus"] = arm_paint_census(samples, result, attach_facts.get("verdicts") or [])
+                result.update(score_arm(capture, attach_facts, expected_stage))
             finally:
                 try:
                     player.stop()
@@ -6346,6 +6550,7 @@ def run_goto_destination(
     expected_scene_id: str | None, character_rect: dict[str, float] | None,
     armed: bool, require_no_consumption: bool, advance_to: int | None = None, click_builds: bool | None = None,
     auto_kinds: Sequence[str] | None = None, leg_specs: Sequence[dict[str, Any]] = (), continuity: Any = None,
+    host_kind: str, continuous_expected: bool,
 ) -> dict[str, Any]:
     """One goTo, driven for real through `LiveOutputHost.execute`, scored with the same
     `visible_slide_record` the V/Voff passes use -- never a re-derived scorer. With
@@ -6414,7 +6619,10 @@ def run_goto_destination(
 
     advanced = advance_carry = None
     if advance_to is not None:
-        advance_carry = run_advance_leg(player, to_ordinal, advance_to, leg_specs, continuity)
+        advance_carry = run_advance_leg(
+            player, to_ordinal, advance_to, leg_specs, continuity,
+            host_kind=host_kind, continuous_expected=continuous_expected,
+        )
         if advance_carry.get("verdict") is not True:
             reasons.append(f"advance leg {to_ordinal}->{advance_to}: {advance_carry.get('error') or advance_carry.get('reasons')}")
         advanced = visible_slide_record(
@@ -6444,6 +6652,7 @@ def run_goto_destination(
 
 def run_advance_leg(
     player: LiveOutputHost, from_ordinal: int, to_ordinal: int, specs: Sequence[dict[str, Any]], continuity: Any,
+    *, host_kind: str, continuous_expected: bool,
 ) -> dict[str, Any]:
     """Pass G's per-frame advance leg: the session's stopped sampler restarts on the settled
     source, the advance crosses the carry, and every expected-True carry of that boundary
@@ -6455,26 +6664,34 @@ def run_advance_leg(
         return {"specs": [], "verdicts": {}, "sampler": None, "verdict": None,
                 "error": f"no expected-True carry matches the advance {from_ordinal}->{to_ordinal}"}
     transport = player._require_transport()
+    environment = static_environment(player, host_kind)
+    observations = environment["observations"] = {"before": environment_observation()}
     drain_samples(transport)
     transport.evaluate(SAMPLER_START_JS)
     time.sleep(CLICK_DELAY_S)
     advance_until_original_slide(player, to_ordinal)
     wait_until_settled(player)
+    observations["during"] = environment_observation()
     time.sleep(WINDOW_PAD_S)
     transport.evaluate(SAMPLER_STOP_JS)
     raw = drain_samples(transport)
+    observations["after"] = environment_observation()
     sampler = sampler_record(transport, raw)
-    rows = convert_samples_to_authored(raw)[0]
+    capture = {
+        "samples": raw, "sampleSpace": "screen", "sampler": sampler, "continuity": copy.deepcopy(continuity),
+        "evidence": {}, "continuousExpected": continuous_expected, "hostKind": host_kind,
+        "environment": environment,
+        "scope": {"kind": "advance-leg", "fromOrdinal": from_ordinal, "toOrdinal": to_ordinal},
+    }
+    arm = score_arm(capture, {"verdicts": list(specs)}, {})
+    rows = arm["samples"]
     blind = [
         row.get("t") for row in rows
         if hash_number(row.get("hash")) is None or _finite_number(row.get("sceneCount")) is None
     ]
     ended = [row["t"] for row in rows if row.get("t") not in blind and hash_number(row["hash"]) >= row["sceneCount"]]
     reached = slide_reached(player.observe(), to_ordinal)
-    scored = score_verdicts(
-        rows, {}, {"verdicts": list(specs)}, (continuity or {}).get("mode") == "qualified", continuity,
-        schema=sampler.get("schema") if isinstance(sampler, dict) else None,
-    )
+    scored = {spec["id"]: arm[spec["id"]] for spec in specs}
     end_of_show = {"rows": len(ended), "firstT": min(ended)} if ended else None
     exit_reason = (
         f"the leg passed the end of show at t={end_of_show['firstT']}" if end_of_show is not None
@@ -6491,7 +6708,8 @@ def run_advance_leg(
         reasons.append(f"advance did not reach slide {to_ordinal} (reached={reached!r})")
     return {
         "specs": list(specs), "verdicts": scored, "sampler": sampler, "endOfShow": end_of_show,
-        "reached": reached, "reasons": reasons,
+        "reached": reached, "reasons": reasons, "scope": arm["scope"], "hostKind": arm["hostKind"],
+        "continuousExpected": arm["continuousExpected"], "environment": arm["environment"],
         "verdict": combine_verdicts(
             *(scored[spec["id"]].get("verdict") for spec in specs), reached, None if problem is not None else True,
         ),
@@ -6564,6 +6782,7 @@ def _run_goto_arm(
     evidence_dir: Path, character_rect: dict[str, float] | None, onset_scene_id: str, gl_replay: str = "off",
     matrix: Sequence[Sequence[int]] = GOTO_MATRIX, click_builds: bool | None = None,
     auto_kinds: Sequence[str] | None = None, carry_specs: Sequence[dict[str, Any]] = (),
+    host_kind: str, continuous_expected: bool,
 ) -> dict[str, Any]:
     """One armed or null-control goTo session: start, warm up, drive every `matrix` case (an
     advance leg, scored per frame against the matching `carry_specs`, only when armed), stop.
@@ -6590,6 +6809,7 @@ def _run_goto_arm(
                     require_no_consumption=armed and to_ordinal == GOTO_CONSUMPTION_CHECK_TO,
                     advance_to=advance[0] if armed and advance else None, click_builds=click_builds,
                     auto_kinds=auto_kinds, continuity=result["continuity"],
+                    host_kind=host_kind, continuous_expected=continuous_expected,
                     leg_specs=[
                         spec for spec in carry_specs
                         if advance and (spec["fromPlayer"] + 1, spec["toPlayer"] + 1) == (to_ordinal, advance[0])
@@ -6612,7 +6832,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
     plan_export = prepare_export(args.fixture, args.original_index, root, "pass-g-plan")
     plan_slides = load_slides(plan_export)
     plan = ground_truth_plan(plan_export, plan_slides)
-    facts = ground_truth_facts(plan, arrival=arrival_starts(plan_export, plan_slides, plan))
+    facts = complete_facts(plan, plan_export, plan_slides)
     instances = slide_instances_of(plan)
     v_expectations = facts["rectExpectations"]["V"]
 
@@ -6629,6 +6849,9 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         expectations_g.setdefault(consumption_index, {})[CHARACTERS_ASSET_KEY] = DEAD
 
     viewport = (VIEWPORT_WIDTH, VIEWPORT_HEIGHT) if args.attach else args.viewport
+    host_kind, continuous_expected = (
+        (HOST_QUALIFIED_CHROME_ATTACH, False) if args.attach else (HOST_HEADLESS_CHROME, True)
+    )
     evidence_dir = evidence_dir_of(args.artifact)
     onset_scene_id = str(plan.scene_index_by_player[consumption_index])
     matrix = goto_matrix(facts["verdicts"], len(plan_slides))
@@ -6664,6 +6887,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
             gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
             carry_specs=[spec for spec in facts["verdicts"] if spec["kind"] == "carry" and spec["expect"] is True],
+            host_kind=host_kind, continuous_expected=continuous_expected,
         )
 
         export_off = prepare_export(args.fixture, args.original_index, root, "pass-g-off")
@@ -6672,6 +6896,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
             gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
+            host_kind=host_kind, continuous_expected=continuous_expected,
         )
 
     if args.core_variant is not None:
@@ -7395,7 +7620,7 @@ def gl_ground_truth(export_root: Path, slides: list[dict[str, Any]], facts: dict
     """The flag-on plan, its facts, and Vgl's expectations."""
     plan_on = ground_truth_plan(export_root, slides, gl_replay=True)
     arrival = arrival_starts(export_root, slides, plan_on)
-    facts_on = ground_truth_facts(plan_on, armed=True, arrival=arrival)
+    facts_on = complete_facts(plan_on, export_root, slides, armed=True)
     vgl = rect_expectations(plan_on, runtime_of(plan_on), continuity_on=True, arrival=arrival)
     check_vgl_expectations(facts["rectExpectations"]["V"], vgl, facts_on["armed"])
     return plan_on, facts_on, vgl
@@ -7410,7 +7635,7 @@ def run_forced_fail(args: argparse.Namespace) -> dict[str, Any]:
     export_plan = prepare_export(args.fixture, args.original_index, root, "forced-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
-    facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
+    facts = complete_facts(plan, export_plan, plan_slides)
     armed = gl_ground_truth(export_plan, plan_slides, facts)[1]["armed"]
     retire = facts["retire"]
     if not retire or retire["boundaryKey"] != armed["boundaryKey"]:
@@ -7513,8 +7738,7 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     export_plan = prepare_export(args.fixture, args.original_index, root, "red-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
-    facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
-    bind_dom_ids(facts, movie_nodes(export_plan, plan_slides))
+    facts = complete_facts(plan, export_plan, plan_slides)
     plan_on, facts_on = gl_ground_truth(export_plan, plan_slides, facts)[:2] if auto else (None, None)
     runtime = runtime_of(plan_on if plan_on is not None else plan)
     if args.strip is not None:
@@ -7665,8 +7889,7 @@ def run_paint_control(args: argparse.Namespace) -> dict[str, Any]:
     export_plan = prepare_export(args.fixture, args.original_index, root, "paint-control-plan")
     plan_slides = load_slides(export_plan)
     plan = ground_truth_plan(export_plan, plan_slides)
-    facts = ground_truth_facts(plan, arrival=arrival_starts(export_plan, plan_slides, plan))
-    bind_dom_ids(facts, movie_nodes(export_plan, plan_slides))
+    facts = complete_facts(plan, export_plan, plan_slides)
     target = paint_control_target(facts["verdicts"], control)
     control_js = paint_instrument.paint_control_js(
         control["n"], control["variant"], control["phase"], control["atScene"],
@@ -8188,7 +8411,7 @@ def force_wrap_ground_truth(fixture: Path, original_index: Path, boundary: str, 
     export = prepare_export(fixture, original_index, root, "force-wrap")
     slides = load_slides(export)
     plan = ground_truth_plan(export, slides)
-    facts = ground_truth_facts(plan)
+    facts = complete_facts(plan, export, slides)
     facts_on = gl_ground_truth(export, slides, facts)[1] if gl_replay == "auto" else None
     if boundary == "1to2":
         destination, scene, src_rect, dst_rect, transition = (
@@ -8458,7 +8681,7 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
     generated sample verdicts to equal today's `score_boundaries` verdicts."""
     ground = result.get("groundTruth") if isinstance(result.get("groundTruth"), dict) else {}
     arms = result.get("arms") if isinstance(result.get("arms"), dict) else {}
-    required = {"A", "B", *(["C"] if bridge_carry_ids(facts["verdicts"]) else [])}
+    required = {"A", "B", *(["C"] if bridge_carry_ids(facts.get("verdicts") or []) else [])}
     entries = [*((f"arm {name}", arms.get(name)) for name in sorted(required | set(arms))), ("attach", result.get("attach"))]
     out: dict[str, Any] = {}
     counts = {"reproduced": 0, "differ": 0, "notRederivable": 0, "contractRejected": 0}
@@ -8467,13 +8690,13 @@ def rescore_generated(result: dict[str, Any], facts: dict[str, Any], facts_on: d
             out[label] = {"reason": "missing, or no samples"}
             continue
         arm_facts = facts_on if facts_on is not None and entry.get("factsSet") == "on" else facts
-        installed = continuity_mode(entry) == "qualified"
         evidence = entry.get("evidence")
-        sampler = entry.get("sampler") if isinstance(entry.get("sampler"), dict) else {}
-        scored = score_verdicts(
-            entry["samples"], evidence if isinstance(evidence, dict) else {}, arm_facts, installed, entry.get("continuity"),
-            schema=sampler.get("schema"),
-        )
+        capture = copy.deepcopy(entry)
+        capture.setdefault("sampleSpace", "authored")
+        capture.setdefault("scope", {"kind": "replay", "source": label})
+        arm = score_arm(capture, arm_facts, {})
+        scored = {spec["id"]: arm[spec["id"]] for spec in arm_facts.get("verdicts") or []}
+        installed = continuity_mode(entry) == "qualified"
         rows: dict[str, Any] = {}
         for spec in arm_facts["verdicts"]:
             key = spec_key(spec)
@@ -8527,12 +8750,14 @@ def run_rescore_cli(args: argparse.Namespace) -> None:
         return
     export = prepare_export(args.fixture, args.original_index, run_root(args.rescore), "rescore")
     slides = load_slides(export)
-    facts = ground_truth_facts(ground_truth_plan(export, slides))
-    bind_dom_ids(facts, movie_nodes(export, slides))
+    facts = complete_facts(ground_truth_plan(export, slides), export, slides)
     stored = json.loads(args.rescore.read_text())
     auto = (stored.get("glReplay") or {}).get("requested") == "auto"
     facts_on = gl_ground_truth(export, slides, facts)[1] if auto else None
-    report = rescore_artifact(args.rescore, loop_period_of(movie_nodes(export, slides), facts["asset"]))
+    if "asset" in facts:
+        report = rescore_artifact(args.rescore, loop_period_of(movie_nodes(export, slides), facts["asset"]))
+    else:
+        report = {"artifact": str(args.rescore), "legacyOracle": {"applicable": False}, "ok": True}
     report["generated"] = rescore_generated(stored, facts, facts_on)
     report["ok"] = report["ok"] and report["generated"]["ok"]
     print(json.dumps(report, indent=2, default=str))
@@ -9407,10 +9632,9 @@ def run_cli(args: argparse.Namespace) -> None:
         export_a = prepare_export(args.fixture, args.original_index, root, "arm-a")
         slides_a = load_slides(export_a)
         plan = ground_truth_plan(export_a, slides_a)
-        facts = ground_truth_facts(plan, arrival=arrival_starts(export_a, slides_a, plan))
+        facts = complete_facts(plan, export_a, slides_a)
         if feed_specs_for(facts) and feed_fixture_required(args):
             result["fixtureIdentity"] = require_feed_fixture(export_a, slides_a)
-        bind_dom_ids(facts, movie_nodes(export_a, slides_a))
         result["groundTruth"] = {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts}
         expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
         attach_expected_stage = expected_stage_fit(facts["canvas"], {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT})

@@ -4477,7 +4477,8 @@ class TestGlReplayCli:
         with pytest.raises(RuntimeError):
             probe._run_goto_arm(
                 Path("x"), [], env={}, tag="G", armed=True, instances={}, expectations={}, viewport=(64, 32),
-                evidence_dir=tmp_path, character_rect=None, onset_scene_id="2", **kwargs,
+                evidence_dir=tmp_path, character_rect=None, onset_scene_id="2",
+                host_kind=probe.HOST_HEADLESS_CHROME, continuous_expected=True, **kwargs,
             )
         assert recording[-1]["gl_replay"] == (gl or "off")
 
@@ -8084,6 +8085,255 @@ class TestRescoreGenerated:
         assert "refused1to2" not in report["arms"]["arm A"]["verdicts"]
 
 
+def test_environment_observation_counts_only_chrome_roots_from_one_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = "\n".join((
+        "50 1 /usr/bin/python3",
+        "100 1 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "101 1 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/chrome_crashpad_handler",
+        "102 100 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=renderer",
+        "200 1 python3 scripts/chrome_requal.py --chrome /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --out x",
+        "201 1 /bin/zsh -c /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --version",
+        "202 1 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (Alerts).app/Contents/MacOS/Google Chrome Helper (Alerts)",
+    )).encode() + b"\n203 1 /tmp/undecodable-\xff"
+    calls: list[tuple[str, ...]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> Any:
+        calls.append(tuple(argv))
+        stdout = b"up 1 day" if argv == ["uptime"] else snapshot
+        return argparse.Namespace(returncode=0, stdout=stdout.decode(errors=kwargs["errors"]))
+
+    monkeypatch.setattr(probe.subprocess, "run", run)
+    monkeypatch.setattr(probe.os, "getpid", lambda: 50)
+    monkeypatch.setattr(probe.os, "getloadavg", lambda: (1.0, 2.0, 3.0))
+    observation = probe.environment_observation()
+
+    assert calls == [("uptime",), ("ps", "-axo", "pid=,ppid=,comm=")]
+    assert observation["chromeCounts"] == {"owned": 0, "foreign": 1}
+
+
+class TestArmInterface:
+    @pytest.mark.parametrize((
+        "evidence_axis", "host_kind", "schema", "producer_mode", "continuous", "recorded_continuous",
+        "installed", "expected_continuous", "expected_verdict", "has_evidence", "expected_normalizer_continuous",
+    ), [
+        pytest.param(
+            "complete", probe.HOST_HEADLESS_CHROME, 2, "continuous", True, None,
+            True, True, True, True, True, id="complete",
+        ),
+        pytest.param(
+            "missing-sampler", probe.HOST_QUALIFIED_CHROME_ATTACH, None, "once", None, True,
+            True, True, None, False, True, id="missing-sampler",
+        ),
+        pytest.param(
+            "missing-producer", probe.HOST_MANAGED_OBS_25, 2, None, False, None,
+            True, False, True, True, None, id="missing-producer",
+        ),
+        pytest.param(
+            "runtime-not-installed", probe.HOST_MANAGED_OBS_30, None, "continuous", None, None,
+            False, None, None, False, None, id="runtime-not-installed",
+        ),
+    ])
+    def test_score_arm_owns_the_complete_pure_scoring_interface(
+        self, monkeypatch: pytest.MonkeyPatch, evidence_axis: str, host_kind: str, schema: int | None,
+        producer_mode: str | None, continuous: bool | None, recorded_continuous: bool | None,
+        installed: bool, expected_continuous: bool | None, expected_verdict: bool | None, has_evidence: bool,
+        expected_normalizer_continuous: bool | None,
+    ) -> None:
+        facts = copy.deepcopy(_p2_facts())
+        feed_spec = next(spec for spec in facts["verdicts"] if spec["kind"] == "carry")
+        feed_spec.update(underArtwork=True, feed={"draw": 1}, feedDraws={}, artworkAbove=[], sourceFps=30.0)
+        producer = None if producer_mode is None else {
+            "kind": "mm-feed", "module": {"entries": {"source": {"mode": producer_mode}}},
+        }
+        row = {
+            "t": 1.0, "scene": 0, "hash": "#0", "sceneCount": 1,
+            "videos": [{"rect": probe.to_screen_rect(SRC_RECT, LETTERBOXED_STAGE_MAP_5_6)}],
+            "stageMap": copy.deepcopy(LETTERBOXED_STAGE_MAP_5_6),
+        }
+        stored_record = {"verdict": True}
+        if recorded_continuous is not None:
+            stored_record["continuousExpected"] = recorded_continuous
+        capture: dict[str, Any] = {
+            "samples": [row], "sampleSpace": "screen",
+            "continuity": {"mode": "qualified" if installed else "unsupported"},
+            "evidence": {"retirement": {"observed": True}} if has_evidence else None,
+            "hostKind": host_kind, "environment": {"qualificationIdentity": evidence_axis},
+            "instrumentCost": {"sampler.tick": {"count": 1, "p95": 0.2, "max": 0.2, "overBudget": 0}},
+            "scope": {"kind": "full-deck"},
+            "feedEvidence": {"producer": producer, "verdicts": {"stored-derived": stored_record}},
+            "feedVerdicts": {"stored-derived": {"verdict": True}},
+        }
+        if schema is not None:
+            capture["sampler"] = {"schema": schema, "meta": {}, "selfCheck": {"ok": True}}
+        if continuous is not None:
+            capture["continuousExpected"] = continuous
+        stale_alias = next(spec["alias"] for spec in facts["verdicts"] if spec.get("alias"))
+        capture[stale_alias] = {"verdict": False, "stored": True}
+        original_capture, original_facts = copy.deepcopy(capture), copy.deepcopy(facts)
+        seen: dict[str, Any] = {}
+
+        def normalize(raw: Any, entries: Any, *, continuous_expected: bool) -> dict[str, Any]:
+            seen["normalizer"] = {
+                "producer": copy.deepcopy(raw), "continuous": continuous_expected,
+                "fps": [entry.get("sourceFps") for entry in entries],
+            }
+            return {feed_spec["id"]: {"continuousExpected": continuous_expected, "fromProducer": True}}
+
+        def score(samples: Any, evidence: Any, selected: Any, runtime: bool, continuity: Any, **kwargs: Any) -> dict[str, Any]:
+            seen["scorer"] = {
+                "schema": kwargs.get("schema"), "runtime": runtime, "evidence": copy.deepcopy(evidence),
+                "feed": copy.deepcopy(kwargs.get("feed_evidence")),
+            }
+            verdict = True if runtime and kwargs.get("schema") == 2 else None
+            return {spec["id"]: {"verdict": verdict, "case": evidence_axis} for spec in selected["verdicts"]}
+
+        monkeypatch.setattr(probe.mm_feed_instrument, "verdict_records", normalize)
+        monkeypatch.setattr(probe, "score_verdicts", score)
+        monkeypatch.setattr(probe, "arm_paint_census", lambda samples, scored, specs: {"rows": len(samples)})
+        expected_stage = {"x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0}
+        result = probe.score_arm(capture, facts, expected_stage)
+
+        assert capture == original_capture and facts == original_facts
+        assert seen["scorer"]["schema"] == schema and seen["scorer"]["runtime"] is installed
+        assert seen["scorer"]["evidence"] == (capture["evidence"] or {})
+        assert result["hostKind"] == host_kind and result["environment"] == capture["environment"]
+        assert result["scope"] == capture["scope"] and result["instrumentCost"] == capture["instrumentCost"]
+        assert result["sampler"]["schema"] == schema if schema is not None else "sampler" not in result
+        assert result["paintCensus"] == {"rows": 1}
+        assert result["verdicts"][feed_spec["id"]]["verdict"] is expected_verdict
+        assert result.get("continuousExpected") is expected_continuous
+        expected_normalizer = None if expected_normalizer_continuous is None else {
+            "producer": producer, "continuous": expected_normalizer_continuous, "fps": [30.0],
+        }
+        expected_feed_evidence = (
+            {"producer": producer, "verdicts": {
+                feed_spec["id"]: {"continuousExpected": expected_normalizer_continuous, "fromProducer": True},
+            }}
+            if expected_normalizer is not None else {"producer": producer} if producer is not None else None
+        )
+        assert seen.get("normalizer") == expected_normalizer
+        assert seen["scorer"]["feed"] == (expected_feed_evidence if expected_normalizer is not None else None)
+        assert result["feedEvidence"] == expected_feed_evidence
+        assert set(result["feedVerdicts"]) == {spec["id"] for spec in facts["verdicts"]}
+        assert "stored-derived" not in result["feedVerdicts"]
+        assert result[stale_alias] == result[next(spec["id"] for spec in facts["verdicts"] if spec["alias"] == stale_alias)]
+
+        replay = copy.deepcopy(capture)
+        replay["sampleRows"] = replay.pop("samples")
+        replay_result = probe.score_arm(replay, facts, expected_stage)
+        assert replay_result["sampleRows"] == replay_result["samples"]
+        assert {
+            spec["id"]: replay_result[spec["id"]]["verdict"] for spec in facts["verdicts"]
+        } == {spec["id"]: result[spec["id"]]["verdict"] for spec in facts["verdicts"]}
+        round_trip = probe.score_arm(json.loads(json.dumps(result)), facts, expected_stage)
+        assert round_trip["samples"] == result["samples"]
+
+    def test_complete_facts_binds_every_source_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[Any] = []
+        monkeypatch.setattr(probe, "arrival_starts", lambda root, slides, plan: seen.append("arrivals") or {0: {}})
+        monkeypatch.setattr(
+            probe, "ground_truth_facts",
+            lambda plan, *, armed, arrival: seen.append(("facts", armed, arrival)) or {
+                "verdicts": [{"id": "carry", "underArtwork": True, "feed": {}}],
+            },
+        )
+        monkeypatch.setattr(probe, "movie_nodes", lambda root, slides: seen.append("nodes") or [{"id": 1}])
+        monkeypatch.setattr(probe, "bind_dom_ids", lambda facts, nodes: seen.append(("dom", nodes)))
+        monkeypatch.setattr(probe, "bind_feed_source_fps", lambda facts, root, slides: seen.append("fps"))
+
+        facts = probe.complete_facts(object(), Path("export"), [{"originalOrdinal": 1}], armed=True)
+
+        assert seen == ["arrivals", ("facts", True, {0: {}}), "nodes", ("dom", [{"id": 1}]), "fps"]
+        assert "fixtureIdentity" not in facts
+
+    @pytest.mark.parametrize(("caller", "continuous_expected", "host_kind"), [
+        pytest.param("launch", True, probe.HOST_HEADLESS_CHROME, id="launch"),
+        pytest.param("attach", False, probe.HOST_QUALIFIED_CHROME_ATTACH, id="attach"),
+    ])
+    def test_host_callers_select_flag_on_facts_and_delegate_to_the_same_interface(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caller: str,
+        continuous_expected: bool, host_kind: str,
+    ) -> None:
+        selected: list[Any] = []
+        off = {"verdicts": [], "set": "off"}
+        on = {"verdicts": [], "set": "on"}
+        expected_stage = {"x": 0.0, "y": 0.0, "width": 1920.0, "height": 1080.0}
+        capture = {"samples": [], "scope": {"kind": "full-deck"}}
+
+        class Transport:
+            def evaluate(self, source: str) -> Any:
+                return True if "transparentBackground" in source else "rgba(0, 0, 0, 0)"
+
+            def call(self, method: str) -> Any:
+                assert method == "Browser.getVersion"
+                return {"product": "Chrome/155.0.8059.79"}
+
+        class Player:
+            output = {"continuity": {"mode": "qualified", "glReplay": {"mode": "injected"}}}
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def start(self) -> None:
+                pass
+
+            def stop(self) -> None:
+                pass
+
+            def execute(self, operation: str) -> Any:
+                return argparse.Namespace(output_visible=True)
+
+            def _require_transport(self) -> Any:
+                return Transport()
+
+        def collect(player: Any, facts: Any, **kwargs: Any) -> dict[str, Any]:
+            selected.append(("capture", facts["set"], kwargs))
+            return capture
+
+        def score(value: Any, facts: Any, stage: Any) -> dict[str, Any]:
+            selected.append(("score", value, facts["set"], stage))
+            return {"delegated": True}
+
+        @contextmanager
+        def attach(profile: Path, result: dict[str, Any]) -> Iterator[int]:
+            yield 1234
+
+        monkeypatch.setattr(probe, "LiveOutputHost", Player)
+        monkeypatch.setattr(probe, "force_viewport", lambda *args: None)
+        monkeypatch.setattr(probe, "attach_chrome", attach)
+        monkeypatch.setattr(probe, "capture_arm", collect)
+        monkeypatch.setattr(probe, "score_arm", score)
+        monkeypatch.setattr(
+            probe.subprocess, "run",
+            lambda argv, **kwargs: argparse.Namespace(returncode=0, stdout="a" * 40 + "\n"),
+        )
+
+        if caller == "launch":
+            result = probe.run_arm(
+                "A", Path("export"), [], off, (1920, 1080), expected_stage,
+                facts_on=on,
+            )
+        else:
+            result = probe.run_attach_arm(
+                Path("export"), [], off, tmp_path, expected_stage,
+                facts_on=on,
+            )
+
+        assert result["factsSet"] == "on" and result["delegated"] is True
+        assert selected == [
+            ("capture", "on", {
+                "continuous_expected": continuous_expected, "host_kind": host_kind,
+                "environment": {
+                    "qualificationIdentity": host_kind,
+                    "browserVersion": {"product": "Chrome/155.0.8059.79"},
+                    "gitHead": "a" * 40,
+                },
+                **({"census": False} if caller == "launch" else {}),
+            }),
+            ("score", capture, "on", expected_stage),
+        ]
+
+
 class TestGotoMatrixFromThePlan:
     def test_p2_is_todays_matrix_plus_its_bridge_leg(self) -> None:
         """Owner decision 5: P2's one expected-True carry (the 3->4 bridge) gains its advance leg."""
@@ -10395,21 +10645,43 @@ class TestAdvanceLeg:
         )
         seen: dict[str, Any] = {}
 
-        def score_verdicts(samples: Any, evidence: Any, facts: Any, installed: bool, continuity: Any, *, schema: Any) -> dict[str, Any]:
-            seen.update(times=[row["t"] for row in samples], installed=installed, specs=facts["verdicts"], schema=schema)
-            return {P2_CARRY34: {"verdict": True, "window": {"start": 0.0, "end": 2.5}}}
+        def score_arm(capture: Any, facts: Any, expected_stage: Any) -> dict[str, Any]:
+            seen.update(
+                times=[row["t"] for row in capture["samples"]],
+                installed=capture["continuity"]["mode"] == "qualified",
+                specs=facts["verdicts"], schema=capture["sampler"]["schema"],
+                host_kind=capture["hostKind"], continuous_expected=capture["continuousExpected"],
+                environment=capture["environment"],
+            )
+            return {
+                **capture, P2_CARRY34: {"verdict": True, "window": {"start": 0.0, "end": 2.5}},
+            }
 
         monkeypatch.setattr(probe.time, "sleep", lambda s: events.append(f"sleep {s}"))
         monkeypatch.setattr(probe, "advance_until_original_slide", lambda p, ordinal: events.append(f"advance {ordinal}"))
         monkeypatch.setattr(probe, "wait_until_settled", lambda p: events.append("settled"))
         monkeypatch.setattr(probe, "sampler_record", lambda t, r: _sampler_ok())
-        monkeypatch.setattr(probe, "score_verdicts", score_verdicts)
-        leg = probe.run_advance_leg(player, 3, 4, [LEG_SPEC], {"mode": "qualified"})
+        monkeypatch.setattr(probe, "score_arm", score_arm)
+        monkeypatch.setattr(probe, "static_environment", lambda player, host_kind: {"qualificationIdentity": host_kind})
+        monkeypatch.setattr(probe, "environment_observation", lambda: {"at": 1.0})
+        leg = probe.run_advance_leg(
+            player, 3, 4, [LEG_SPEC], {"mode": "qualified"},
+            host_kind=probe.HOST_HEADLESS_CHROME, continuous_expected=True,
+        )
         assert events == [
             "drain", "start", f"sleep {probe.CLICK_DELAY_S}", "advance 4", "settled", f"sleep {probe.WINDOW_PAD_S}",
             "stop", "drain", "drain",
         ]
-        assert seen == {"times": [r["t"] for r in rows], "installed": True, "specs": [LEG_SPEC], "schema": 2}
+        assert seen == {
+            "times": [r["t"] for r in rows], "installed": True, "specs": [LEG_SPEC], "schema": 2,
+            "host_kind": probe.HOST_HEADLESS_CHROME, "continuous_expected": True,
+            "environment": {
+                "qualificationIdentity": probe.HOST_HEADLESS_CHROME,
+                "observations": {"before": {"at": 1.0}, "during": {"at": 1.0}, "after": {"at": 1.0}},
+            },
+        }
+        assert set(leg["environment"]["observations"]) == {"before", "during", "after"}
+        assert leg["hostKind"] == probe.HOST_HEADLESS_CHROME
         assert leg["verdict"] is verdict
         assert leg["endOfShow"] == ({"rows": 2, "firstT": 3.0} if end_of_show else None)
         if break_it == "slide":
@@ -10421,7 +10693,10 @@ class TestAdvanceLeg:
             assert leg["verdicts"][P2_CARRY34]["reason"] == f"inconclusive: {reason}"
 
     def test_a_leg_without_a_matching_spec_is_an_error_and_drives_nothing(self) -> None:
-        leg = probe.run_advance_leg(argparse.Namespace(), 3, 4, [], {"mode": "qualified"})
+        leg = probe.run_advance_leg(
+            argparse.Namespace(), 3, 4, [], {"mode": "qualified"},
+            host_kind=probe.HOST_HEADLESS_CHROME, continuous_expected=True,
+        )
         assert leg["verdict"] is None and "no expected-True carry" in leg["error"]
 
 
@@ -12025,8 +12300,19 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
         "tamper": None,
     }
     assert probe.contract.first_errors(probe.contract.mm_feed_report(report), limit=20) == []
-    record = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)[entry["id"]]
-    scored = probe.score_under_artwork({entry["id"]: record}, entry)
+    spec = {
+        **entry, "kind": "carry", "asset": "movie-a", "srcRect": dict(SRC_RECT), "dstRect": dict(DST_RECT),
+        "transitionScene": 1, "fromPlayer": 0, "toPlayer": 1, "expect": True, "alias": None,
+        "sourceScene": 0, "untilScene": None, "underArtwork": True,
+    }
+    capture = {
+        "samples": [], "sampleSpace": "authored", "continuity": {"mode": "qualified"},
+        "feedEvidence": {"producer": report}, "continuousExpected": True,
+        "hostKind": probe.HOST_HEADLESS_CHROME, "environment": {}, "scope": {"kind": "full-deck"},
+    }
+    arm = probe.score_arm(capture, {"verdicts": [spec]}, {})
+    record = arm["feedEvidence"]["verdicts"][entry["id"]]
+    scored = arm[entry["id"]]["underArtwork"]
     assert scored["verdict"] is True
     assert all(scored[name]["verdict"] is not None for name in (
         "feedLive", "noRiderAboveCanvas", "labelsOverFeed", "artworkAbove",
@@ -12089,8 +12375,9 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     report["claims"][0]["claimed"] = False
     report["departures"].append({"objectId": "movie-a", "entryId": entry["id"], "atScene": 2,
                                  "serial": 1, "t": .8})
-    off = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)[entry["id"]]
-    assert probe.score_feed_live(off["feed"], continuous_expected=True)["verdict"] is False
+    capture["feedEvidence"]["producer"] = report
+    off = probe.score_arm(capture, {"verdicts": [spec]}, {})[entry["id"]]["underArtwork"]
+    assert off["feedLive"]["verdict"] is False
     report["departures"][0]["serial"] = None
     unattributed = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=True)[entry["id"]]
     assert unattributed["mode"] == "unavailable"

@@ -197,6 +197,63 @@ def test_the_default_probe_sampler_is_untouched_outside_the_instrument() -> None
     assert "rafTs" not in probe.SAMPLER_JS
 
 
+def test_capture_arm_installs_observer_and_resolves_drive_and_sample_at_invocation(monkeypatch) -> None:
+    events: list[Any] = []
+    sink: dict[str, Any] = {}
+
+    class Transport:
+        def evaluate(self, source: str) -> Any:
+            if source == dx.INSTRUMENT_READ_JS:
+                return {"instrumentRead": True}
+            return None
+
+    class Player:
+        output = {"continuity": {"mode": "qualified"}, "mmOpacity": {}, "viewport": {}}
+        transport = Transport()
+
+        def _require_transport(self) -> Any:
+            return self.transport
+
+    def observer(player: Any, facts: Any, evidence: Any) -> Any:
+        events.append(("observer-installed", facts))
+
+        def read(ordinal: int) -> None:
+            evidence["retirement"] = {"ordinal": ordinal}
+            events.append(("observer-read", ordinal))
+
+        return read
+
+    def drive(player: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        events.append(("drive",))
+        kwargs["observer"](9)
+        return [{"t": 1.0, "videos": [], "stageMap": None}]
+
+    monkeypatch.setattr(probe, "boundary_observer", observer)
+    monkeypatch.setattr(probe, "drive_and_sample", drive)
+    monkeypatch.setattr(probe, "sampler_record", lambda transport, rows: {"schema": 7, "meta": {}, "selfCheck": {"ok": True}})
+    monkeypatch.setattr(probe, "environment_observation", lambda: {"at": 1.0})
+    with dx.instrumented(sink):
+        capture = probe.capture_arm(
+            Player(), {"verdicts": []}, continuous_expected=True,
+            host_kind=probe.HOST_HEADLESS_CHROME, environment={"qualificationIdentity": "detach"},
+        )
+
+    assert events == [
+        ("observer-installed", {"verdicts": []}),
+        ("drive",),
+        ("observer-read", 9),
+    ]
+    assert capture["evidence"] == {"retirement": {"ordinal": 9}}
+    assert capture["sampler"]["schema"] == 7
+    assert capture["continuousExpected"] is True and capture["hostKind"] == probe.HOST_HEADLESS_CHROME
+    assert capture["environment"] == {
+        "qualificationIdentity": "detach",
+        "observations": {"before": {"at": 1.0}, "during": {"at": 1.0}, "after": {"at": 1.0}},
+    }
+    assert capture["scope"] == {"kind": "full-deck"}
+    assert sink["instrumentRead"] is True
+
+
 # --- event extraction and classification ----------------------------------------------------------------------
 
 

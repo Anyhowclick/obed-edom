@@ -1310,7 +1310,10 @@ class Args:
 
 def captured_sessions(monkeypatch, arm: str, rate: int = 25) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(q, "run_session", lambda name, script, ctx, **kw: calls.append({"name": name, **kw}) or {"session": name})
+    monkeypatch.setattr(
+        q, "run_session",
+        lambda name, script, ctx, **kw: calls.append({"name": name, "script": script, **kw}) or {"session": name},
+    )
     q.sessions_for(arm, {"rate": rate, "fixture": q.FIXTURE}, Args(), ARMED)
     return calls
 
@@ -1344,10 +1347,170 @@ def test_mmo_cef_arm_runs_every_probe_arm_per_gl_mode_with_the_logger(monkeypatc
 
 
 def test_feed_arm_registers_continuous_and_qualification_only_once_sessions(monkeypatch):
+    monkeypatch.setattr(q, "feed_script", lambda continuous_expected: continuous_expected)
     calls = captured_sessions(monkeypatch, "feed")
     assert [call["name"] for call in calls] == ["feed", "feed-off"]
+    assert calls[0]["script"] is True and calls[1]["script"] is True
     assert calls[0]["mm_feed"] == "on" and not calls[0].get("mm_feed_qualify_once")
     assert calls[1]["mm_feed"] == "off" and calls[1]["mm_feed_qualify_once"] is True
+
+
+class FeedCaptureTransport:
+    def evaluate(self, expression: str, deadline_s: float | None = None) -> Any:
+        return []
+
+    def call(self, method: str) -> dict[str, Any]:
+        assert method == "Browser.getVersion"
+        return {"product": "Chrome/127.0.0.0", "userAgent": "CEF"}
+
+
+class FeedCaptureHost:
+    def __init__(self) -> None:
+        self.output = {"continuity": {"mode": "qualified"}}
+        self.slides = []
+        self.transport = FeedCaptureTransport()
+        self.operations: list[str] = []
+
+    def execute(self, operation: str) -> None:
+        self.operations.append(operation)
+
+    def _require_transport(self) -> FeedCaptureTransport:
+        return self.transport
+
+
+def feed_capture_session(host: FeedCaptureHost, facts: dict[str, Any], rate: int = 25) -> Any:
+    return types.SimpleNamespace(
+        host=host,
+        ctx={
+            "feedFacts": facts, "rate": rate, "source": rate * 2, "canvasFps": float(rate),
+            "obsVersion": "32.2.2", "head": "abc123",
+            "videoSettings": {"fpsNumerator": rate, "fpsDenominator": 1},
+            "sourceSettings": {"fps": rate * 2, "width": 1920, "height": 1080},
+        },
+        out={},
+    )
+
+
+def test_obs_and_headless_capture_the_same_observer_and_sampler_evidence(monkeypatch):
+    facts = {"canvas": {"width": 1920, "height": 1080}, "verdicts": []}
+    row = {"t": 1.0, "scene": 0, "sceneCount": 1, "stageMap": {}, "videos": []}
+    events: list[str] = []
+
+    def observer(player, selected, evidence):
+        return lambda ordinal: evidence.update({"retirement": {"ordinal": ordinal}})
+
+    def drive(player, *, observer, feed_sink, **kwargs):
+        events.append("drive-start")
+        observer(9)
+        events.append("drive-end")
+        return [row]
+
+    def observe_environment():
+        events.append("observation")
+        return {"at": 1.0, "loadAverage": [1.0], "uptime": "up", "chromeCounts": {"owned": 0, "foreign": 0}}
+
+    monkeypatch.setattr(lcp, "boundary_observer", observer)
+    monkeypatch.setattr(lcp, "drive_and_sample", drive)
+    monkeypatch.setattr(lcp, "sampler_record", lambda transport, rows: {
+        "schema": 2, "meta": {"rows": len(rows)}, "selfCheck": {"ok": True},
+    })
+    monkeypatch.setattr(lcp, "environment_observation", observe_environment)
+    monkeypatch.setattr(q, "score_arm", lambda capture, selected, expected: {**capture, "samples": capture["samples"]})
+
+    headless = lcp.capture_arm(
+        FeedCaptureHost(), facts, continuous_expected=True, host_kind=lcp.HOST_HEADLESS_CHROME,
+        environment={"qualificationIdentity": "headless"},
+    )
+    assert events == ["observation", "drive-start", "observation", "drive-end", "observation"]
+    events.clear()
+    session = feed_capture_session(FeedCaptureHost(), facts)
+    q.feed_script(True)(session)
+    assert events == ["observation", "drive-start", "observation", "drive-end", "observation"]
+
+    assert session.out["evidence"] == headless["evidence"] == {"retirement": {"ordinal": 9}}
+    assert session.out["sampler"] == headless["sampler"]
+    assert "samples" not in session.out
+    assert session.out["sampleRows"] == headless["samples"] == [row]
+    assert session.out["continuousExpected"] is True
+    assert session.out["hostKind"] == lcp.HOST_MANAGED_OBS_25
+
+
+def test_feed_capture_scores_both_retirements_with_final_environment(monkeypatch):
+    stage_map = {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0, "offsetWidth": 1920, "offsetHeight": 1080}
+    keys = ("b8to9:a->end:retire", "b8to9:b->end:retire")
+    facts = {
+        "canvas": {"width": 1920, "height": 1080},
+        "retires": [{"verdictKey": key, "originalOrdinal": 9} for key in keys],
+        "verdicts": [
+            {"id": key, "alias": None, "expect": True, "kind": "retire"}
+            for key in keys
+        ],
+    }
+    seen: dict[str, Any] = {}
+    observations = iter((
+        {"at": 1.0, "loadAverage": [1.0], "uptime": "before", "chromeCounts": {"owned": 0, "foreign": 1}},
+        {"at": 2.0, "loadAverage": [1.5], "uptime": "during", "chromeCounts": {"owned": 0, "foreign": 1}},
+        {"at": 3.0, "loadAverage": [2.0], "uptime": "after", "chromeCounts": {"owned": 0, "foreign": 1}},
+    ))
+
+    def drive(player, *, observer, feed_sink, **kwargs):
+        observer(9)
+        feed_sink["producer"] = {"kind": "mm-feed", "module": {"entries": {}}}
+        return [{
+            "t": 1.0, "seq": 1, "ts": 1.0, "scene": 8, "playerState": "IdleAtFinalState", "busy": False,
+            "hash": "#9", "sceneCount": 9, "stageMap": stage_map, "videos": [],
+        }]
+
+    def score(samples, evidence, selected, runtime, continuity, **kwargs):
+        seen["evidence"] = evidence
+        seen["schema"] = kwargs.get("schema")
+        seen["feedEvidence"] = kwargs.get("feed_evidence")
+        return {key: {"verdict": True} for key in keys}
+
+    monkeypatch.setattr(lcp, "environment_observation", lambda: next(observations))
+    monkeypatch.setattr(lcp, "wait_until_settled", lambda player: None)
+    monkeypatch.setattr(lcp, "refusal_evidence", lambda transport: {
+        "stageMap": stage_map, "painting": [], "poolSnapshot": [],
+    })
+    monkeypatch.setattr(lcp, "drive_and_sample", drive)
+    monkeypatch.setattr(lcp, "sampler_record", lambda transport, rows: {
+        "schema": 7, "meta": {"stoppedAt": 1.0}, "selfCheck": {"ok": True},
+    })
+    monkeypatch.setattr(lcp.mm_feed_instrument, "verdict_records", lambda producer, entries, *, continuous_expected: {
+        key: {"continuousExpected": continuous_expected} for key in keys
+    })
+    monkeypatch.setattr(lcp, "score_verdicts", score)
+    monkeypatch.setattr(lcp, "arm_paint_census", lambda samples, scored, specs: {"rows": len(samples)})
+
+    session = feed_capture_session(FeedCaptureHost(), facts, rate=30)
+    q.feed_script(True)(session)
+
+    assert set(seen["evidence"]) == set(keys)
+    assert seen["evidence"][keys[0]] == seen["evidence"][keys[1]]
+    assert seen["schema"] == 7
+    assert all(row["continuousExpected"] is True for row in seen["feedEvidence"]["verdicts"].values())
+    assert session.out["continuousExpected"] is True
+    assert session.out["hostKind"] == lcp.HOST_MANAGED_OBS_30
+    assert session.out["environment"]["obsVersion"] == "32.2.2"
+    assert session.out["environment"]["gitHead"] == "abc123"
+    assert session.out["environment"]["outputRate"] == {"configuredHz": 30, "observedHz": 30.0}
+    assert session.out["environment"]["browserSourceRate"] == {"configuredHz": 60, "settingHz": 60}
+    assert list(session.out["environment"]["observations"]) == ["before", "during", "after"]
+    assert set(session.out["feedVerdicts"]) == set(keys)
+    assert "samples" not in session.out
+    assert session.out["sampleRows"][0]["seq"] == 1
+    assert q.contract_problem({"sessions": [session.out]}) is None
+
+
+@pytest.mark.parametrize(("video_settings", "observed"), [
+    pytest.param({"fpsNumerator": 24, "fpsDenominator": 1}, 24.0, id="mismatched"),
+    pytest.param(None, None, id="missing"),
+])
+def test_feed_environment_reports_only_raw_obs_output_rate(video_settings, observed):
+    session = feed_capture_session(FeedCaptureHost(), {"verdicts": []}, rate=30)
+    session.ctx["videoSettings"] = video_settings
+    environment = q.feed_environment(session, lcp.HOST_MANAGED_OBS_30)
+    assert environment["outputRate"] == {"configuredHz": 30, "observedHz": observed}
 
 
 def test_feed_gate_requires_continuous_green_and_feed_off_exact_hold_green_with_continuous_red() -> None:

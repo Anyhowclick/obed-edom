@@ -108,6 +108,8 @@ import mm_opacity_probe  # noqa: E402
 import obs_cadence_decode  # noqa: E402
 from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
+    HOST_MANAGED_OBS_25,
+    HOST_MANAGED_OBS_30,
     PAINTING_VIDEOS_JS,
     P2_PLAN_SHA256,
     _carried_el_id,
@@ -117,8 +119,10 @@ from live_continuity_probe import (  # noqa: E402
     _movie_entries,
     _notes,
     armed_evidence,
-    bind_feed_source_fps,
+    capture_arm,
     combine_verdicts,
+    complete_facts,
+    expected_stage_fit,
     forced_fail_seed,
     ground_truth_facts,
     ground_truth_plan,
@@ -127,10 +131,9 @@ from live_continuity_probe import (  # noqa: E402
     load_slides,
     matches_asset_keys,
     rects_overlap,
+    score_arm,
     score_armed,
-    score_verdicts,
-    convert_samples_to_authored,
-    drive_and_sample,
+    static_environment,
     wait_for_destination_hash,
 )
 from live_host_probe import wait_for_settlement  # noqa: E402
@@ -1930,10 +1933,9 @@ def feed_fixture_facts(fixture: Path) -> dict[str, Any]:
     dest, slides = make_export("feed-facts", fixture)
     try:
         identity = require_feed_fixture(dest, slides)
-        facts = ground_truth_facts(ground_truth_plan(dest, slides))
+        facts = complete_facts(ground_truth_plan(dest, slides), dest, slides)
         if not any(spec.get("underArtwork") is True for spec in facts.get("verdicts") or []):
             raise SystemExit("feed fixture derives no under-artwork carries")
-        bind_feed_source_fps(facts, dest, slides)
         facts["fixtureIdentity"] = identity
         return facts
     finally:
@@ -2264,22 +2266,50 @@ def g2_script(kb: str | None, armed: dict[str, Any]) -> Callable[[Session], None
 def feed_script(continuous_expected: bool) -> Callable[[Session], None]:
     def script(s: Session) -> None:
         facts = s.ctx["feedFacts"]
-        sink: dict[str, Any] = {}
+        host_kind = {25: HOST_MANAGED_OBS_25, 30: HOST_MANAGED_OBS_30}.get(s.ctx["rate"])
+        if host_kind is None:
+            raise ValueError(f"unsupported managed OBS rate {s.ctx['rate']!r}")
+        environment = feed_environment(s, host_kind)
         s.host.execute("show")
-        raw = drive_and_sample(
-            s.host, carry_into={spec["toPlayer"] for spec in facts["verdicts"] if spec["kind"] == "carry"},
-            feed_facts=facts, feed_sink=sink,
+        capture = capture_arm(
+            s.host, facts, continuous_expected=continuous_expected,
+            host_kind=host_kind, environment=environment,
         )
-        samples = convert_samples_to_authored(raw)[0]
-        for record in (sink.get("verdicts") or {}).values():
-            if isinstance(record, dict):
-                record["continuousExpected"] = continuous_expected
-        s.out["feedEvidence"] = sink
-        s.out["feedVerdicts"] = score_verdicts(
-            samples, {}, facts, True, s.host.output.get("continuity"), schema=2, feed_evidence=sink,
-        )
-        s.out["sampleRows"] = samples
+        source_settings = s.ctx.get("sourceSettings") or {}
+        viewport = {"width": source_settings.get("width"), "height": source_settings.get("height")}
+        expected_stage = expected_stage_fit(facts["canvas"], viewport) if all(
+            isinstance(viewport[key], (int, float)) and not isinstance(viewport[key], bool) and viewport[key] > 0
+            for key in ("width", "height")
+        ) else {}
+        scored = score_arm(capture, facts, expected_stage)
+        scored["sampleRows"] = scored.pop("samples")
+        s.out.update(scored)
     return script
+
+
+def _settings_fps(settings: Any) -> float | None:
+    if not isinstance(settings, dict):
+        return None
+    numerator, denominator = settings.get("fpsNumerator"), settings.get("fpsDenominator")
+    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in (numerator, denominator)):
+        return None
+    return numerator / denominator
+
+
+def feed_environment(s: Session, host_kind: str) -> dict[str, Any]:
+    source_settings = s.ctx.get("sourceSettings") or {}
+    environment = static_environment(s.host, host_kind)
+    environment.update({
+        "obsVersion": s.ctx.get("obsVersion"),
+        "gitHead": s.ctx.get("head"),
+        "outputRate": {"configuredHz": s.ctx["rate"], "observedHz": _settings_fps(s.ctx.get("videoSettings"))},
+        "browserSourceRate": {"configuredHz": s.ctx.get("source"), "settingHz": source_settings.get("fps")},
+        "browserSourceSize": {
+            "configured": [1920, 1080],
+            "observed": [source_settings.get("width"), source_settings.get("height")],
+        },
+    })
+    return environment
 
 
 def g2_state(s: Session) -> Any:
@@ -4742,6 +4772,7 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
             run["placementLaunchId"] = launch_id
         ctx = {"endpoint": engine.cdp_endpoint, "target": engine.target_id, "rate": rate, "take": take, "creds": creds, "shots": shots,
                "fixture": args.fixture, "tag": f"{arm}{rate}{take}{ts}",
+               "source": source, "head": run["head"], "sourceSettings": run.get("sourceSettings"),
                "tier": args.tier, "devProfile": args.dev_profile, "placementLaunchId": launch_id,
                "calibration": engine.calibration_adapter(), "obsVersion": run.get("obsVersion"),
                "videoSettings": run.get("videoSettings"), "canvasFps": canvas_fps(run.get("videoSettings"), rate),
