@@ -32,6 +32,7 @@
 
 **Verdict:** Chrome 155 meets the same written bar as 154 did at #262's merge, the `m-snap` run plus `grant-chrome`. On `reference` it is stronger: it was INCONCLUSIVE at merge and is PASS here.
 
+**Full suites (merged-on-main tree `31191d76`/`c6675241`):** Python 3.13.11 and the 3.10.10 floor each 10996 passed, 38 skipped, 1 xfailed, 1 failed — the known #278 load race `test_live_host.py::test_managed_probe_state_machine_renews_suppresses_and_stops` (`InvalidStateError`), which passes alone (3/3 on 3.13, 1/1 on 3.10). Dashboard `test:ui` 330 passed; `test:maps` 542 + 2 passed.
+
 **Pending:**
-- Full suites.
 - Owner eye on a live (headed) Dissolve 7→8 with the host log showing `placement.reason == "granted"`. This covers the review's headed-Chrome check.
