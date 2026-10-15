@@ -36,10 +36,18 @@ Scratch copy of `F2-html` under a scratch `OBED_EDOM_OUTPUT_ROOT`, `manifest_fro
 - Negative control (alpha encode forced to `yuv420p`): refused "lost transparency during conversion"; export
   byte-identical.
 
-## AM-2 to AM-4
+## AM-2 — full prepare without Keynote (HEAD e4d5f864, on main 60c53c85 with the #289 slide-4 fix)
 
-Blocked on the separate F2 slide-4 text-identity fix (owner D6). Managed-OBS physical fill/key eye rides on the
-DeckLink field test (owner D3).
+Real `propose_preview` + `apply_preview` on current `F2.key` (`f99a68ef…`), `OBED_EDOM_OUTPUT_ROOT` =
+`~/Desktop/Convert wall to 16x9 CGs/alpha-am2` (outside every `output/`), `export_html_fn` copying the retained
+`F2-html` export of that deck: PASS. Texture repair "Repaired slide 4 176×205 image: D2" (1 repaired, no refusal), then
+"Converting pin drop wave.mov to VP9 alpha"; manifest `movieConversion.converted[0].targetCodec` = "VP9 alpha"
+(246,543 B); ready in 3.1 s. A second propose + apply reused the cache (0.6 s, export copy not called again).
+
+## AM-3 / AM-4
+
+Owner eye on the product path (HDMI Chrome, managed-OBS Keyer, beside native Keynote) — PENDING. Managed-OBS physical
+fill/key at the DeckLink field test (owner D3).
 
 ## AM-5 — suites (rebased on origin/main 60c53c85, HEAD 62dde6c9)
 
