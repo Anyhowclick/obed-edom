@@ -9,7 +9,7 @@
 | Planner | GPT-6 Astra | |
 | Plan critique | Opus 5.5 high | 2 rounds, closed |
 | Implementer | Codex GPT-5.6 Sol high | `ab58fdd6`, plus the UH-1 driver |
-| Code review | Opus 5.5 high | r1: approved after 3 lows (`code-review-r1.md`) |
+| Code review | Opus 5.5 high | r1: approved after 3 lows (plan §9 review log) |
 | Coordinator (Opus) | | See below |
 
 The coordinator's edits were mechanical:
