@@ -1,0 +1,1062 @@
+{
+ "gate": "G1",
+ "rows": [
+  {
+   "export": "F2",
+   "root": "/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/F2-html",
+   "inputHashes": {
+    "sourceSha256": "9fc882c130dffd2d600d816d98f97ea01a2f3a1e38ae9ef4127254c6296a55e1",
+    "exportTreeSha256": "25495ad190eacdfe298310be41e2400f911e8acb8e92a3ef07ec2889edfe428f"
+   },
+   "slidesFrom": "source+header",
+   "hitsBefore": [
+    "slide 4 0/baseLayer/layers/5/layers/0/layers/0: 176×205 leaf uses 5850×4368 texture DF3DB700"
+   ],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "repaired",
+    "rules": {
+     "D2": 1
+    }
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91",
+    "repaired": [
+     {
+      "ordinal": 4,
+      "uuid": "2C214651-FBDF-4698-B8D4-A16E2D803A56",
+      "leaves": [
+       "0/baseLayer/layers/5/layers/0/layers/0"
+      ],
+      "rule": "D2",
+      "from": "DF3DB700EEDF01B099F884EDCEAB50D3",
+      "to": "32960D80133984B95E511FFD85B6061B",
+      "donor": {
+       "uuid": "6B05DE14-37DB-4505-B242-8996669A30BD",
+       "id": "DF3DB700EEDF01B099F884EDCEAB50D3",
+       "page": 15
+      },
+      "verify": {
+       "corr": 0.9847192302404504,
+       "object": "15348427",
+       "sourceObject": "15355064",
+       "data": "44137"
+      }
+     }
+    ],
+    "pdfs": [
+     {
+      "path": "assets/2C214651-FBDF-4698-B8D4-A16E2D803A56/assets/2C214651-FBDF-4698-B8D4-A16E2D803A56.pdf",
+      "sourceSha256": "6562dade1e0a3f889b51919b60359fc23b186e574abf0b3e7a0a2128efe39e0e",
+      "sha256": "bb4347d60713207f57edf8e3503f9de1e48f6ad150e5972f93d87f3c7b4b3f32"
+     }
+    ]
+   },
+   "log": [
+    "Repaired slide 4 176×205 image: D2 DF3DB700 → 32960D80",
+    "Repaired 1 mis-mapped texture",
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": {
+    "exactRepairs": true,
+    "fullDetectorHits": [],
+    "textureBlindUnchanged": true,
+    "winnerUnchanged": true,
+    "jsonJsonpAgreement": true,
+    "pdfPdfpAgreement": true,
+    "secondPassEmpty": true,
+    "continuityPlanUnchanged": true,
+    "ok": true
+   },
+   "expected": {
+    "kind": "repaired",
+    "rules": {
+     "D2": 1
+    }
+   },
+   "ok": true
+  },
+  {
+   "export": "F2/synthetic-357",
+   "root": "/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/F2-html",
+   "inputHashes": {
+    "sourceSha256": "9fc882c130dffd2d600d816d98f97ea01a2f3a1e38ae9ef4127254c6296a55e1",
+    "exportTreeSha256": "25495ad190eacdfe298310be41e2400f911e8acb8e92a3ef07ec2889edfe428f"
+   },
+   "injection": {
+    "label": "synthetic defect, real chain/donor",
+    "field": "events/0/baseLayer/layers/3/layers/0/layers/0/texture",
+    "from": "B37026D59346E052B9E3697C923C552D",
+    "to": "DF3DB700EEDF01B099F884EDCEAB50D3",
+    "before": {
+     "json": "40fb95273584bfb5db0020cae3fe9b48f80b17f10f32b8fb386e6d29a46967b7",
+     "jsonp": "f6216f8e00bac161f6fb83f30a58f66c5b69376dcd37a93645e47029502ebb1a"
+    },
+    "after": {
+     "json": "61252a4d91bffa4092aab13704dae2c3fbf3047ac67780adb7e855d7bcc193e6",
+     "jsonp": "98c9b1d3f5df0544c2d5b7573714506f81d8b9a104b184a7fa5b35ae231a444d"
+    }
+   },
+   "slidesFrom": "source+header",
+   "hitsBefore": [
+    "slide 4 0/baseLayer/layers/3/layers/0/layers/0: 357×235 leaf uses 5850×4368 texture DF3DB700",
+    "slide 4 0/baseLayer/layers/5/layers/0/layers/0: 176×205 leaf uses 5850×4368 texture DF3DB700"
+   ],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "repaired",
+    "rules": {
+     "D2": 2
+    }
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91",
+    "repaired": [
+     {
+      "ordinal": 4,
+      "uuid": "2C214651-FBDF-4698-B8D4-A16E2D803A56",
+      "leaves": [
+       "0/baseLayer/layers/3/layers/0/layers/0"
+      ],
+      "rule": "D2",
+      "from": "DF3DB700EEDF01B099F884EDCEAB50D3",
+      "to": "0D48D8BAE5A1D031E513865499F78D3B",
+      "donor": {
+       "uuid": "6B05DE14-37DB-4505-B242-8996669A30BD",
+       "id": "B37026D59346E052B9E3697C923C552D",
+       "page": 14
+      },
+      "verify": {
+       "corr": 0.9957348362708102,
+       "object": "15348425",
+       "sourceObject": "15355057",
+       "data": "44140"
+      }
+     },
+     {
+      "ordinal": 4,
+      "uuid": "2C214651-FBDF-4698-B8D4-A16E2D803A56",
+      "leaves": [
+       "0/baseLayer/layers/5/layers/0/layers/0"
+      ],
+      "rule": "D2",
+      "from": "DF3DB700EEDF01B099F884EDCEAB50D3",
+      "to": "32960D80133984B95E511FFD85B6061B",
+      "donor": {
+       "uuid": "6B05DE14-37DB-4505-B242-8996669A30BD",
+       "id": "DF3DB700EEDF01B099F884EDCEAB50D3",
+       "page": 15
+      },
+      "verify": {
+       "corr": 0.9847192302404504,
+       "object": "15348427",
+       "sourceObject": "15355064",
+       "data": "44137"
+      }
+     }
+    ],
+    "pdfs": [
+     {
+      "path": "assets/2C214651-FBDF-4698-B8D4-A16E2D803A56/assets/2C214651-FBDF-4698-B8D4-A16E2D803A56.pdf",
+      "sourceSha256": "6562dade1e0a3f889b51919b60359fc23b186e574abf0b3e7a0a2128efe39e0e",
+      "sha256": "1973282751ee1788be8c1026d016a0f22f7f19e7dd0b44ec3284da9bd30e20ae"
+     }
+    ]
+   },
+   "log": [
+    "Repaired slide 4 357×235 image: D2 DF3DB700 → 0D48D8BA",
+    "Repaired slide 4 176×205 image: D2 DF3DB700 → 32960D80",
+    "Repaired 2 mis-mapped textures",
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": {
+    "exactRepairs": true,
+    "fullDetectorHits": [],
+    "textureBlindUnchanged": true,
+    "winnerUnchanged": true,
+    "jsonJsonpAgreement": true,
+    "pdfPdfpAgreement": true,
+    "secondPassEmpty": true,
+    "continuityPlanUnchanged": true,
+    "ok": true
+   },
+   "expected": {
+    "kind": "repaired",
+    "rules": {
+     "D2": 2
+    }
+   },
+   "ok": true
+  },
+  {
+   "export": "alpha-dsk-textures/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/alpha-dsk-textures/html-unmodified",
+   "slidesFrom": "manifest",
+   "hitsBefore": [
+    "slide 8 0/baseLayer/layers/3/layers/0/layers/0: 224×36 leaf uses 824×463 texture B9507741",
+    "slide 9 0/baseLayer/layers/7/layers/0/layers/0: 223×36 leaf uses 13×404 texture 8194C7E9",
+    "slide 9 1/baseLayer/layers/7/layers/0: 223×36 leaf uses 13×404 texture 8194C7E9",
+    "slide 9 1/effects/0/baseLayer/layers/7/layers/0: 223×36 leaf uses 13×404 texture 8194C7E9",
+    "slide 10 0/baseLayer/layers/5/layers/0/layers/0: 256×31 leaf uses 582×327 texture C6571BA8",
+    "slide 10 0/baseLayer/layers/7/layers/0/layers/0: 224×36 leaf uses 582×327 texture F89B74A4"
+   ],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "repaired",
+    "rules": {
+     "D1": 1,
+     "D2": 3,
+     "D3": 1
+    }
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91",
+    "repaired": [
+     {
+      "ordinal": 8,
+      "uuid": "02FFC05C-BF37-4E96-8E71-33CA86C5D362",
+      "leaves": [
+       "0/baseLayer/layers/3/layers/0/layers/0"
+      ],
+      "rule": "D1",
+      "from": "B95077414EC2B1BB5C66CA04F894B036",
+      "to": "67C06487A30CA958241198A12BF75288",
+      "donor": null,
+      "verify": {
+       "ocr": "Sunday Service"
+      }
+     },
+     {
+      "ordinal": 9,
+      "uuid": "DAC21D01-4C0B-4292-A009-8B511D36F68D",
+      "leaves": [
+       "0/baseLayer/layers/3/layers/0/layers/0",
+       "0/effects/0/baseLayer/layers/0/layers/0",
+       "1/baseLayer/layers/3/layers/0",
+       "1/effects/0/baseLayer/layers/3/layers/0"
+      ],
+      "rule": "D3",
+      "from": "309718408EEF751D461636D5A3098FAB",
+      "to": "CF6BC17192FB3781818794FB0DE0DAA1",
+      "donor": null,
+      "verify": {
+       "corr": 1.0
+      }
+     },
+     {
+      "ordinal": 9,
+      "uuid": "DAC21D01-4C0B-4292-A009-8B511D36F68D",
+      "leaves": [
+       "0/baseLayer/layers/7/layers/0/layers/0",
+       "1/baseLayer/layers/7/layers/0",
+       "1/effects/0/baseLayer/layers/7/layers/0"
+      ],
+      "rule": "D2",
+      "from": "8194C7E9136EB5921A15D6BFB6A6C6EC",
+      "to": "B49EC9C40219FCAA4FDC135C6A91DE65",
+      "donor": {
+       "uuid": "02FFC05C-BF37-4E96-8E71-33CA86C5D362",
+       "id": "8194C7E9136EB5921A15D6BFB6A6C6EC",
+       "page": 13
+      },
+      "verify": {
+       "ocr": "Sunday Service"
+      }
+     },
+     {
+      "ordinal": 10,
+      "uuid": "D4A1DF22-D248-4A45-8125-8C2288F5AB11",
+      "leaves": [
+       "0/baseLayer/layers/5/layers/0/layers/0"
+      ],
+      "rule": "D2",
+      "from": "C6571BA8E427FB3F47FB5AEC52345071",
+      "to": "5F0081248BEE5103F75CF296698E9126",
+      "donor": {
+       "uuid": "DAC21D01-4C0B-4292-A009-8B511D36F68D",
+       "id": "1A75DB339BF58FBEADDCA56FD76C64D7",
+       "page": 19
+      },
+      "verify": {
+       "ocr": "Children's Church"
+      }
+     },
+     {
+      "ordinal": 10,
+      "uuid": "D4A1DF22-D248-4A45-8125-8C2288F5AB11",
+      "leaves": [
+       "0/baseLayer/layers/7/layers/0/layers/0"
+      ],
+      "rule": "D2",
+      "from": "F89B74A43F5DA70D8613F1A89B8736EC",
+      "to": "6F5E3949209099B9E0424C3C7203BE42",
+      "donor": {
+       "uuid": "DAC21D01-4C0B-4292-A009-8B511D36F68D",
+       "id": "A0B57786302E97A000030F17A91B037B",
+       "page": 20
+      },
+      "verify": {
+       "ocr": "Sunday Service"
+      }
+     }
+    ],
+    "pdfs": [
+     {
+      "path": "assets/D4A1DF22-D248-4A45-8125-8C2288F5AB11/assets/D4A1DF22-D248-4A45-8125-8C2288F5AB11.pdf",
+      "sourceSha256": "3fb22c27edc9740b38862dd8f6042d4b78419b19b65609e36687958721f6c102",
+      "sha256": "42dc5f4ce67e59cc59c304d04c3a5839986a90be31e767e98d839c9c5f459ab0"
+     },
+     {
+      "path": "assets/DAC21D01-4C0B-4292-A009-8B511D36F68D/assets/DAC21D01-4C0B-4292-A009-8B511D36F68D.pdf",
+      "sourceSha256": "a8c40d1472b9615d6f8d37196011c723383115f1f92ff664cb2ff96b7d2a5747",
+      "sha256": "f8230b3d497a3512c6f5835fe420f510d91e6d864d59ece5d81447513cfc3eb2"
+     }
+    ]
+   },
+   "log": [
+    "Repaired slide 8 'Sunday Service' label: D1 B9507741 → 67C06487",
+    "Repaired slide 9 movie vid-20250608-wa0125.mp4: D3 30971840 → CF6BC171",
+    "Repaired slide 9 'Sunday Service' label: D2 8194C7E9 → B49EC9C4",
+    "Repaired slide 10 'Children’s Church' label: D2 C6571BA8 → 5F008124",
+    "Repaired slide 10 'Sunday Service' label: D2 F89B74A4 → 6F5E3949",
+    "Repaired 5 mis-mapped textures"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "repaired",
+    "rules": {
+     "D1": 1,
+     "D2": 3,
+     "D3": 1
+    }
+   },
+   "ok": true
+  },
+  {
+   "export": "qual-decks/D1/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D1/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "qual-decks/D2/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D2/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [
+    "slide 2 0/baseLayer/layers/2/layers/0/layers/0: 800×225 leaf uses 1920×1080 texture 63683314",
+    "slide 2 0/effects/0/baseLayer/layers/0/layers/0: 800×225 leaf uses 1920×1080 texture 63683314",
+    "slide 5 0/baseLayer/layers/2/layers/0/layers/0: 640×180 leaf uses 1920×1080 texture A8B76C19",
+    "slide 5 0/effects/0/baseLayer/layers/0/layers/0: 640×180 leaf uses 1920×1080 texture A8B76C19"
+   ],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "repaired",
+    "rules": {
+     "D3": 2
+    }
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [
+     {
+      "ordinal": 2,
+      "uuid": "9CF0C1FF-B37E-43A2-A3F0-A91215EAD99B",
+      "leaves": [
+       "0/baseLayer/layers/2/layers/0/layers/0",
+       "0/effects/0/baseLayer/layers/0/layers/0"
+      ],
+      "rule": "D3",
+      "from": "636833147196CC7D947490110BCD3542",
+      "to": "E606C252A387C4E3EAAB06B7C19B5A46",
+      "donor": null,
+      "verify": {
+       "corr": 1.0
+      }
+     },
+     {
+      "ordinal": 5,
+      "uuid": "686E061F-36E6-41CA-A090-F98A82A405CA",
+      "leaves": [
+       "0/baseLayer/layers/2/layers/0/layers/0",
+       "0/effects/0/baseLayer/layers/0/layers/0"
+      ],
+      "rule": "D3",
+      "from": "A8B76C19C45D52867EC4842AA1788B40",
+      "to": "B07083CFFFE18A79AC218F386836B5D9",
+      "donor": null,
+      "verify": {
+       "corr": 1.0
+      }
+     }
+    ],
+    "pdfs": []
+   },
+   "log": [
+    "Repaired slide 2 movie counter-a.mov: D3 63683314 → E606C252",
+    "Repaired slide 5 movie counter-a.mov: D3 A8B76C19 → B07083CF",
+    "Repaired 2 mis-mapped textures"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "repaired",
+    "rules": {
+     "D3": 2
+    }
+   },
+   "ok": true
+  },
+  {
+   "export": "qual-decks/D2/html-unmodified.across-first-build",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D2/html-unmodified.across-first-build",
+   "slidesFrom": "header",
+   "hitsBefore": [
+    "slide 5 0/baseLayer/layers/2/layers/0/layers/0: 640×180 leaf uses 1920×1080 texture A8B76C19",
+    "slide 5 0/effects/0/baseLayer/layers/0/layers/0: 640×180 leaf uses 1920×1080 texture A8B76C19"
+   ],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "repaired",
+    "rules": {
+     "D3": 1
+    }
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [
+     {
+      "ordinal": 5,
+      "uuid": "686E061F-36E6-41CA-A090-F98A82A405CA",
+      "leaves": [
+       "0/baseLayer/layers/2/layers/0/layers/0",
+       "0/effects/0/baseLayer/layers/0/layers/0"
+      ],
+      "rule": "D3",
+      "from": "A8B76C19C45D52867EC4842AA1788B40",
+      "to": "B07083CFFFE18A79AC218F386836B5D9",
+      "donor": null,
+      "verify": {
+       "corr": 1.0
+      }
+     }
+    ],
+    "pdfs": []
+   },
+   "log": [
+    "Repaired slide 5 movie counter-a.mov: D3 A8B76C19 → B07083CF",
+    "Repaired 1 mis-mapped texture"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "repaired",
+    "rules": {
+     "D3": 1
+    }
+   },
+   "ok": true
+  },
+  {
+   "export": "qual-decks/D2-across/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D2-across/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "qual-decks/D3/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D3/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "qual-decks/D4/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D4/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "qual-decks/D5/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D5/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "qual-decks/D6/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D6/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-recovery/html-adversarial/gl-replay/html-disposable",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-recovery/html-adversarial/gl-replay/html-disposable",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-recovery/html-adversarial/gl-replay/html-player",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-recovery/html-adversarial/gl-replay/html-player",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-recovery/html-adversarial/gl-replay/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-recovery/html-adversarial/gl-replay/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-recovery/html-adversarial/html-disposable",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-recovery/html-adversarial/html-disposable",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-recovery/html-adversarial/html-player",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-recovery/html-adversarial/html-player",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-recovery/html-adversarial/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-recovery/html-adversarial/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-binary/html-disposable",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-binary/html-disposable",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-binary/html-player",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-binary/html-player",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-binary/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-binary/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-loop/html-player",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-loop/html-player",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-loop/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-loop/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-loop-grey/html-player",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-loop-grey/html-player",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-loop-grey/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-loop-grey/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "p2-soak-loop/html-unmodified",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-soak-loop/html-unmodified",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "gl-decks/Minimal Alpha_DSK/html",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/gl-decks/Minimal Alpha_DSK/html",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "gl-decks/Positive Control/html",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/gl-decks/Positive Control/html",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "e9b2fad41bb6f257aa04c31229aa0d7d80ee6a3d7c400c8e33eac0728428f354",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "minimal-alpha-dsk-17c0c938/html",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/minimal-alpha-dsk-17c0c938/html",
+   "slidesFrom": "header",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  },
+  {
+   "export": "preview/3b9019",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/s2-followups-dsk-deck-902af1/output/.html-preview/3b9019f068d8ef1c14e586c86e75274a2bebad3c65116fd2247362ed9f39a7e3-p3-r1/html",
+   "slidesFrom": "manifest",
+   "hitsBefore": [
+    "slide 9 0/baseLayer/layers/4/layers/0/layers/0: 288×78 leaf uses 714×402 texture 30971840",
+    "slide 10 0/baseLayer/layers/4/layers/0/layers/0: 287×77 leaf uses 582×327 texture C6571BA8",
+    "slide 10 0/baseLayer/layers/7/layers/0/layers/0: 224×36 leaf uses 582×327 texture F89B74A4"
+   ],
+   "hitsAfter": [
+    "slide 9 0/baseLayer/layers/4/layers/0/layers/0: 288×78 leaf uses 714×402 texture 30971840",
+    "slide 10 0/baseLayer/layers/4/layers/0/layers/0: 287×77 leaf uses 582×327 texture C6571BA8",
+    "slide 10 0/baseLayer/layers/7/layers/0/layers/0: 224×36 leaf uses 582×327 texture F89B74A4"
+   ],
+   "outcome": {
+    "kind": "refused",
+    "message": "Cannot repair Keynote's HTML export: slide 10 (287×77 image): its texture is mis-mapped and no verified replacement exists"
+   },
+   "record": null,
+   "log": [],
+   "checks": null,
+   "expected": {
+    "kind": "refused",
+    "message": "Cannot repair Keynote's HTML export: slide 10 (287×77 image): its texture is mis-mapped and no verified replacement exists"
+   },
+   "ok": true
+  },
+  {
+   "export": "preview/59cb",
+   "root": "/Users/anyhowclick/Desktop/work/obed-edom/.claude/worktrees/s2-followups-dsk-deck-902af1/output/.html-preview/59cb220d674317326e710ccdc7d65fe1d7e473c83646227d2f691e6373d6fa0c-p3-r1/html",
+   "slidesFrom": "manifest",
+   "hitsBefore": [],
+   "hitsAfter": [],
+   "outcome": {
+    "kind": "0 hits"
+   },
+   "record": {
+    "version": 1,
+    "playerDigest": "17c0c938caa49d5c70bd83bd5b84f57381faa51602932ca733aa965055026d91",
+    "repaired": [],
+    "pdfs": []
+   },
+   "log": [
+    "Checked textures: none mis-mapped"
+   ],
+   "checks": null,
+   "expected": {
+    "kind": "0 hits"
+   },
+   "ok": true
+  }
+ ],
+ "failed": 0,
+ "inconclusive": 0
+}

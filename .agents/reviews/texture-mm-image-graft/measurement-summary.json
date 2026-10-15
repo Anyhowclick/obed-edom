@@ -1,0 +1,32 @@
+{
+  "exports": 19,
+  "totals": {
+    "slides": 104,
+    "events": 222,
+    "access_entries": 378,
+    "base_leaves": 876,
+    "image_leaves": 417,
+    "ev0_image_leaves": 161,
+    "acc_tight_1": 121,
+    "acc_containment_2": 186,
+    "acc_iwa_0": 75,
+    "acc_tight_0": 243,
+    "image_tight_1": 119,
+    "image_mutual": 119,
+    "image_hidden": 75,
+    "image_opacity0": 0,
+    "image_iwa_resolved": 13,
+    "ev0_image_iwa_resolved": 8,
+    "acc_containment_1": 191,
+    "mm_contents_landings": 96,
+    "acc_iwa_1": 19,
+    "image_tight_0": 286,
+    "acc_containment_0": 1,
+    "json_hits": 13,
+    "acc_tight_2": 14,
+    "image_tight_2": 12
+  },
+  "F2_tight_pairs": 31,
+  "F2_exact_quantized_pairs": 31,
+  "F2_exact_IWA_resolved": 13
+}

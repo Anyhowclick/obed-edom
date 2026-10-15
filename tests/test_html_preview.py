@@ -479,11 +479,13 @@ def test_apply_repairs_textures_before_conversion_with_one_re_export(
             shutil.rmtree(dest)
         _fake_export(deck_path, dest, **kwargs)
 
-    def _repair(export_root, slides, *, player_digest, log):
+    def _repair(export_root, slides, *, player_digest, log, source_path, source_digest):
         calls.append("repair")
         assert (export_root / PLAYER_JS).is_file()
         assert [slide["exportedUuid"] for slide in slides if not slide["skipped"]] == ["aaa", "ccc"]
         assert player_digest == file_sha256(export_root / PLAYER_JS)
+        assert source_path == deck
+        assert source_digest == DIGEST
         outcome = next(pending)
         if outcome == "refuse":
             raise preview_textures.TextureRepairRefused(REFUSAL)

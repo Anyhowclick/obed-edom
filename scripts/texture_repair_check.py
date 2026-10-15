@@ -3,6 +3,9 @@
 
 g1 (offline): every known export is copied to a temp dir (header, player, slide JSON/JSONP, PDF/PDFP only), run through
 `preview_textures.json_hits` and `repair_textures`, and compared with the plan's expected outcome table.
+The F2 row is pinned by source and export-tree SHA-256, passes source_path/source_digest to repair, and covers both
+collided maps in the real export; post-repair invariants are checked, while a missing or mismatched pin or PreviewStale
+makes g1 INCONCLUSIVE (exit 3).
 
 g2 (headless, continuity off, GL replay off): a temp copy of the Alpha 7e3c export with movies is repaired (unless
 `--no-repair`) and driven through `LiveOutputHost`:
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import io
 import json
 import os
@@ -41,13 +45,22 @@ sys.path.insert(0, str(REPO / "src"))
 
 from obed_edom import live_host  # noqa: E402
 from obed_edom.fixture_paths import fixture, main_checkout  # noqa: E402
-from obed_edom.html_preview import PreviewError, file_sha256, read_jsonish  # noqa: E402
-from obed_edom.live_continuity import canonical_asset_name  # noqa: E402
+from obed_edom.html_preview import PreviewError, PreviewStale, file_sha256, read_jsonish, source_slides  # noqa: E402
+from obed_edom.live_continuity import canonical_asset_name, derive_plan  # noqa: E402
 
 PREVIEWS = main_checkout() / ".claude" / "worktrees" / "s2-followups-dsk-deck-902af1" / "output" / ".html-preview"
 ALPHA_7E3C = "7e3c930194d00effe3a21ee0e86a20baddb74223f661b9fa23186282aaf7081d"
 ALPHA_3B9019 = "3b9019f068d8ef1c14e586c86e75274a2bebad3c65116fd2247362ed9f39a7e3"
 MINIMAL_59CB = "59cb220d674317326e710ccdc7d65fe1d7e473c83646227d2f691e6373d6fa0c"
+F2_SOURCE = Path.home() / "Desktop" / "Convert wall to 16x9 CGs" / "F2.key"
+F2_EXPORT = F2_SOURCE.with_name("F2-html")
+F2_SOURCE_SHA256 = "6fea812c38a43f239ab8cd9101bfe9c8ac550596ae8b01dd6ca05fef8ddb0022"
+F2_EXPORT_TREE_SHA256 = "a2c7fd9a19f3caee02595fe8a639a5f8be8dfb319385c838f89caf557dd6647a"
+F2_EXPECTED_REPAIRS = (
+    (4, "D2", 11, "B37026D59346E052B9E3697C923C552D"),
+    (4, "D2", 12, "DF3DB700EEDF01B099F884EDCEAB50D3"),
+)
+F2_COLLIDING_IDS = {donor_id for _ordinal, _rule, _page, donor_id in F2_EXPECTED_REPAIRS}
 G1_FIXTURES = ("alpha-dsk-textures", "qual-decks", "p2-recovery", "p2-binary", "p2-loop", "p2-loop-grey", "p2-soak-loop", "gl-decks")
 UNNAMED_FIXTURES = ("minimal-alpha-dsk-17c0c938",)
 REFUSAL_3B9019 = (
@@ -59,6 +72,7 @@ EXPECT: dict[str, dict[str, Any]] = {
     "qual-decks/D2/html-unmodified": {"kind": "repaired", "rules": {"D3": 2}},
     "qual-decks/D2/html-unmodified.across-first-build": {"kind": "repaired", "rules": {"D3": 1}},
     "preview/3b9019": {"kind": "refused", "message": REFUSAL_3B9019},
+    "F2": {"kind": "repaired", "rules": {"D2": 2}},
 }
 DEFAULT_EXPECT = {"kind": "0 hits"}
 CLEAN_EXPORTS = (
@@ -107,7 +121,7 @@ def export_slides(root: Path) -> tuple[list[dict[str, Any]], str]:
 
 
 def g1_exports() -> list[tuple[str, Path]]:
-    exports = []
+    exports = [("F2", F2_EXPORT)]
     tops = [(name, fixture(name)) for name in G1_FIXTURES] + [(name, main_checkout() / "output" / "fixtures" / name) for name in UNNAMED_FIXTURES]
     for name, top in tops:
         if not top.is_dir():
@@ -121,15 +135,41 @@ def g1_exports() -> list[tuple[str, Path]]:
 
 
 def copy_minimal(src: Path, dst: Path) -> None:
-    for rel in ("assets/header.json", "assets/player/main.js"):
+    for rel in minimal_files(src):
         (dst / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / rel, dst / rel)
+
+
+def minimal_files(src: Path) -> list[Path]:
+    files = [Path("assets/header.json"), Path("assets/player/main.js")]
     for uuid in read_jsonish(src / "assets" / "header.json")["slideList"]:
         for rel in (f"{uuid}.json", f"{uuid}.jsonp", f"assets/{uuid}.pdf", f"assets/{uuid}.pdfp"):
-            path = src / "assets" / uuid / rel
-            if path.is_file():
-                (dst / "assets" / uuid / rel).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dst / "assets" / uuid / rel)
+            path = Path("assets") / uuid / rel
+            if (src / path).is_file():
+                files.append(path)
+    return files
+
+
+def minimal_tree_sha256(src: Path) -> str:
+    rows = [(path.as_posix(), file_sha256(src / path)) for path in sorted(minimal_files(src))]
+    return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
+
+
+def f2_manifest_slides(root: Path) -> list[dict[str, Any]]:
+    source, _canvas = source_slides(F2_SOURCE)
+    uuids = read_jsonish(root / "assets" / "header.json")["slideList"]
+    if len(source) != len(uuids) or any(slide.skipped for slide in source):
+        raise PreviewError("F2 source slides do not map one-to-one onto header.slideList")
+    return [
+        {
+            "originalOrdinal": slide.ordinal,
+            "originalSlideId": slide.slide_id,
+            "skipped": False,
+            "exportedUuid": uuid,
+            "playerIndex": index,
+        }
+        for index, (slide, uuid) in enumerate(zip(source, uuids, strict=True))
+    ]
 
 
 def outcome_of(record: dict[str, Any]) -> dict[str, Any]:
@@ -161,46 +201,213 @@ def matches(outcome: dict[str, Any], expected: dict[str, Any], hits_after: list[
     return True
 
 
+def f2_checks(
+    copy: Path,
+    slides: list[dict[str, Any]],
+    record: dict[str, Any],
+    second: dict[str, Any],
+    blind_before: list[Any],
+    winner_before: set[str],
+    plan_before: Any,
+) -> dict[str, Any]:
+    from obed_edom import preview_textures
+
+    loaded_after = preview_textures._load(copy, slides)
+    full_hits = preview_textures._detect(loaded_after, preview_textures._Renderer())
+    actual = sorted(
+        (entry["ordinal"], entry["rule"], entry["donor"]["page"], entry["donor"]["id"])
+        for entry in record["repaired"]
+    )
+    slide_four = next(slide for slide in loaded_after if slide.ordinal == 4)
+    repaired_leaves = {
+        leaf
+        for entry in record["repaired"]
+        if entry["ordinal"] == 4
+        for leaf in entry["leaves"]
+    }
+    winner_after = {leaf.key for leaf in slide_four.leaves if leaf.texture in F2_COLLIDING_IDS}
+    json_pairs = all(
+        not (jsonp := slide.json_path.with_suffix(".jsonp")).is_file()
+        or read_jsonish(jsonp).get("json") == slide.payload
+        for slide in loaded_after
+    )
+    pdf_pairs = all(
+        not (pdfp := slide.pdf_path.with_suffix(".pdfp")).is_file()
+        or base64.b64decode(read_jsonish(pdfp)["pdf"]) == slide.pdf_path.read_bytes()
+        for slide in loaded_after
+    )
+    checks = {
+        "exactRepairs": actual == sorted(F2_EXPECTED_REPAIRS),
+        "fullDetectorHits": [
+            f"slide {loaded_after[hit.slide].ordinal} {hit.rule} {hit.leaf.key}"
+            for hit in full_hits
+        ],
+        "textureBlindUnchanged": blind_before
+        == [preview_textures._fingerprint(slide.payload) for slide in loaded_after],
+        "winnerUnchanged": bool(winner_after) and winner_after == winner_before - repaired_leaves,
+        "jsonJsonpAgreement": json_pairs,
+        "pdfPdfpAgreement": pdf_pairs,
+        "secondPassEmpty": second["repaired"] == [] and second["pdfs"] == [],
+        "continuityPlanUnchanged": plan_before
+        == derive_plan(copy, slides, resolver=lambda base, relative: base / relative),
+    }
+    checks["ok"] = all(value if isinstance(value, bool) else not value for value in checks.values())
+    return checks
+
+
 def run_g1(out: Path) -> int:
     from obed_edom import preview_textures
 
-    rows, failed = [], 0
+    rows, failed, inconclusive = [], 0, 0
     for label, root in g1_exports():
         row: dict[str, Any] = {"export": label, "root": str(root)}
+        before = after = None
         expected = EXPECT.get(label, DEFAULT_EXPECT)
-        if not (root / "assets" / "header.json").is_file():
+        is_f2 = label == "F2"
+        if is_f2 and (not F2_SOURCE.is_file() or not (root / "assets" / "header.json").is_file()):
+            row.update(
+                outcome={"kind": "inconclusive", "message": "pinned F2 source or export is missing"},
+                hitsBefore=None,
+                hitsAfter=None,
+            )
+        elif not (root / "assets" / "header.json").is_file():
             row.update(outcome={"kind": "missing"}, hitsBefore=None, hitsAfter=None)
         else:
-            slides, source = export_slides(root)
             log: list[str] = []
-            with tempfile.TemporaryDirectory(prefix="texture-g1-") as tmp:
-                copy = Path(tmp) / "html"
-                copy_minimal(root, copy)
-                before = preview_textures.json_hits(copy, slides)
+            try:
+                source_sha = file_sha256(F2_SOURCE) if is_f2 else None
+                tree_sha = minimal_tree_sha256(root) if is_f2 else None
+            except OSError as exc:
+                source_sha = tree_sha = None
+                row.update(
+                    outcome={"kind": "inconclusive", "message": f"pinned F2 input is unreadable: {exc}"},
+                    hitsBefore=None,
+                    hitsAfter=None,
+                )
+            hashes_available = "outcome" not in row
+            if hashes_available and is_f2:
+                row["inputHashes"] = {"sourceSha256": source_sha, "exportTreeSha256": tree_sha}
+            if hashes_available and is_f2 and (
+                source_sha != F2_SOURCE_SHA256 or tree_sha != F2_EXPORT_TREE_SHA256
+            ):
+                row.update(
+                    outcome={"kind": "inconclusive", "message": "pinned F2 source or export digest changed"},
+                    hitsBefore=None,
+                    hitsAfter=None,
+                )
+            elif hashes_available:
                 try:
-                    record = preview_textures.repair_textures(copy, slides, player_digest=file_sha256(copy / "assets/player/main.js"), log=log.append)
-                    outcome = outcome_of(record)
+                    slides, source = (f2_manifest_slides(root), "source+header") if is_f2 else export_slides(root)
+                    with tempfile.TemporaryDirectory(prefix="texture-g1-") as tmp:
+                        copy = Path(tmp) / "html"
+                        copy_minimal(root, copy)
+                        loaded_before = preview_textures._load(copy, slides)
+                        blind_before = [preview_textures._fingerprint(slide.payload) for slide in loaded_before]
+                        winner_before = None
+                        if is_f2:
+                            slide_four = next(slide for slide in loaded_before if slide.ordinal == 4)
+                            winner_before = {
+                                leaf.key for leaf in slide_four.leaves if leaf.texture in F2_COLLIDING_IDS
+                            }
+                        plan_before = (
+                            derive_plan(copy, slides, resolver=lambda base, relative: base / relative)
+                            if is_f2
+                            else None
+                        )
+                        before = preview_textures.json_hits(copy, slides)
+                        kwargs = (
+                            {"source_path": F2_SOURCE, "source_digest": F2_SOURCE_SHA256}
+                            if is_f2
+                            else {}
+                        )
+                        record = None
+                        checks = None
+                        try:
+                            record = preview_textures.repair_textures(
+                                copy,
+                                slides,
+                                player_digest=file_sha256(copy / "assets/player/main.js"),
+                                log=log.append,
+                                **kwargs,
+                            )
+                            outcome = outcome_of(record)
+                            if is_f2:
+                                second = preview_textures.repair_textures(
+                                    copy,
+                                    slides,
+                                    player_digest=file_sha256(copy / "assets/player/main.js"),
+                                    log=log.append,
+                                    **kwargs,
+                                )
+                                checks = f2_checks(
+                                    copy,
+                                    slides,
+                                    record,
+                                    second,
+                                    blind_before,
+                                    winner_before,
+                                    plan_before,
+                                )
+                        except PreviewStale as exc:
+                            row.update(
+                                outcome={"kind": "inconclusive", "message": str(exc)},
+                                hitsBefore=None,
+                                hitsAfter=None,
+                            )
+                        except PreviewError as exc:
+                            record, outcome = None, {"kind": "refused", "message": str(exc)}
+                        except Exception as exc:  # noqa: BLE001
+                            record, outcome = None, {
+                                "kind": "error",
+                                "message": f"{type(exc).__name__}: {exc}",
+                            }
+                        if "outcome" not in row:
+                            after = preview_textures.json_hits(copy, slides)
+                            row.update(
+                                slidesFrom=source,
+                                hitsBefore=before,
+                                hitsAfter=after,
+                                outcome=outcome,
+                                record=record,
+                                log=log,
+                                checks=checks,
+                            )
                 except PreviewError as exc:
-                    record, outcome = None, {"kind": "refused", "message": str(exc)}
-                except Exception as exc:  # noqa: BLE001
-                    record, outcome = None, {"kind": "error", "message": f"{type(exc).__name__}: {exc}"}
-                after = preview_textures.json_hits(copy, slides)
-            row.update(slidesFrom=source, hitsBefore=before, hitsAfter=after, outcome=outcome, record=record, log=log)
+                    row.update(
+                        record=None,
+                        outcome={"kind": "refused", "message": str(exc)},
+                        hitsBefore=before,
+                        hitsAfter=after,
+                    )
         row["expected"] = expected
-        row["ok"] = matches(row["outcome"], expected, row["hitsAfter"] or [])
-        failed += not row["ok"]
+        row["ok"] = matches(row["outcome"], expected, row["hitsAfter"] or []) and (
+            row.get("checks") is None or row["checks"]["ok"]
+        )
+        if row["outcome"]["kind"] == "inconclusive":
+            inconclusive += 1
+        else:
+            failed += not row["ok"]
         rows.append(row)
         before_n = "-" if row["hitsBefore"] is None else len(row["hitsBefore"])
         after_n = "-" if row["hitsAfter"] is None else len(row["hitsAfter"])
-        print(f"{'ok  ' if row['ok'] else 'FAIL'} {label}: hits before {before_n} | {describe(row['outcome'])} | hits after {after_n}", flush=True)
+        marker = "ok  " if row["ok"] else "INC " if row["outcome"]["kind"] == "inconclusive" else "FAIL"
+        print(f"{marker} {label}: hits before {before_n} | {describe(row['outcome'])} | hits after {after_n}", flush=True)
     for label in sorted(set(EXPECT) - {row["export"] for row in rows}):
         rows.append({"export": label, "outcome": {"kind": "missing"}, "expected": EXPECT[label], "ok": False})
         failed += 1
         print(f"FAIL {label}: expected export not found", flush=True)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"gate": "G1", "rows": rows, "failed": failed}, indent=1, ensure_ascii=False, default=str))
-    print(f"G1: {'PASS' if not failed else f'FAIL ({failed} unexpected)'}")
-    return 1 if failed else 0
+    out.write_text(
+        json.dumps(
+            {"gate": "G1", "rows": rows, "failed": failed, "inconclusive": inconclusive},
+            indent=1,
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+    verdict = f"FAIL ({failed} unexpected)" if failed else "INCONCLUSIVE" if inconclusive else "PASS"
+    print(f"G1: {verdict}")
+    return 1 if failed else EXIT_INCONCLUSIVE if inconclusive else 0
 
 
 def load_guard() -> None:

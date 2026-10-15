@@ -8,10 +8,13 @@ import base64
 import difflib
 import hashlib
 import json
+import math
 import os
 import shutil
 import tempfile
 import unicodedata
+import zipfile
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,7 +22,8 @@ from typing import Any
 
 import numpy as np
 
-from obed_edom.html_preview import PreviewError, file_sha256, read_jsonish, rewrite_pdfp_from_pdf
+from obed_edom.baseline import deck_digest
+from obed_edom.html_preview import PreviewError, PreviewStale, file_sha256, read_jsonish, rewrite_pdfp_from_pdf
 from obed_edom.live_continuity import _asset_url, canonical_asset_name
 from obed_edom.live_runtime import SUPPORTED_PLAYERS
 
@@ -86,6 +90,7 @@ class _Slide:
     uuid: str
     folder: Path
     payload: dict[str, Any]
+    slide_id: str | None = None
     leaves: list[_Leaf] = field(default_factory=list)
     movies: dict[str, tuple[str, str | None]] = field(default_factory=dict)
 
@@ -145,6 +150,118 @@ class _Fix:
     donor: tuple[int, str] | None
     verify: dict[str, Any] = field(default_factory=dict)
     raw_corr: float | None = None
+    landings: list[tuple[_Leaf, str, _Leaf]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _ImageIdentity:
+    object_id: str
+    data_id: str
+
+
+class _SourceEvidence:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._loaded = False
+        self._objects: dict[str, dict] | None = None
+        self._members: dict[str, str] = {}
+        self._member_counts: Counter[str] = Counter()
+        self._pdfs: dict[str, Path] = {}
+
+    def _load(self) -> bool:
+        if self._loaded:
+            return self._objects is not None
+        self._loaded = True
+        try:
+            from obed_edom.iwa_runs import UndecodableIWAMember, _load_deck_full  # noqa: PLC0415
+            from obed_edom.offline_inspect import data_member_index  # noqa: PLC0415
+        except ImportError:
+            self._objects = None
+            return False
+        try:
+            self._objects = _load_deck_full(self.path, strict=True)[0]
+            with zipfile.ZipFile(self.path) as archive:
+                names = archive.namelist()
+            self._members = data_member_index(names)
+            for name in names:
+                self._member_counts.update(data_member_index([name]).keys())
+        except (ImportError, UndecodableIWAMember, zipfile.BadZipFile):
+            self._objects = None
+            return False
+        return True
+
+    def identity(self, slide: _Slide, leaf: _Leaf) -> _ImageIdentity | None:
+        if slide.slide_id is None or not self._load():
+            return None
+        source_slide = self._objects.get(slide.slide_id)
+        if not isinstance(source_slide, dict) or source_slide.get("_pbtype") != "KN.SlideArchive":
+            return None
+        from obed_edom.iwa_kindindex import _geometry  # noqa: PLC0415
+
+        drawables = []
+        seen: set[str] = set()
+        for ref in source_slide.get("drawablesZOrder") or []:
+            ident = ref.get("identifier")
+            if ident is None:
+                return None
+            ident = str(ident)
+            if not ident:
+                return None
+            if ident in seen:
+                continue
+            seen.add(ident)
+            obj = self._objects.get(ident)
+            if not isinstance(obj, dict):
+                return None
+            raw = _geometry(obj)
+            try:
+                resolved = tuple(float(value) for value in raw)
+            except (TypeError, ValueError):
+                return None
+            if any(not math.isfinite(value) for value in resolved):
+                return None
+            drawables.append((ident, obj, resolved))
+        exact = [item for item in drawables if _close(_expanded_frame(item[2]), leaf.rect, RECT_TOL)]
+        envelope = [item for item in drawables if _in_frame_envelope(leaf.rect, item[2])]
+        if len(exact) != 1 or len(envelope) != 1 or exact[0][0] != envelope[0][0]:
+            return None
+        ident, obj, raw = exact[0]
+        tree = _leaf_tree(leaf)
+        competitors = [
+            other
+            for other in slide.leaves
+            if _leaf_tree(other) == tree and _in_frame_envelope(other.rect, raw)
+        ]
+        if len(competitors) != 1 or competitors[0].key != leaf.key:
+            return None
+        if (
+            leaf.kind != 5
+            or leaf.node.get("isVideoLayer")
+            or obj.get("_pbtype") != "TSD.ImageArchive"
+            or obj.get("mask")
+        ):
+            return None
+        data_id = (obj.get("data") or {}).get("identifier")
+        if data_id is None or not str(data_id):
+            return None
+        return _ImageIdentity(ident, str(data_id))
+
+    def pdf(self, data_id: str, scratch: Path) -> Path | None:
+        if not self._load() or self._member_counts[data_id] != 1:
+            return None
+        if data_id not in self._pdfs:
+            member = self._members.get(data_id)
+            if member is None:
+                return None
+            try:
+                with zipfile.ZipFile(self.path) as archive:
+                    payload = archive.read(member)
+            except (KeyError, zipfile.BadZipFile):
+                return None
+            path = scratch / f"source-{len(self._pdfs)}.pdf"
+            path.write_bytes(payload)
+            self._pdfs[data_id] = path
+        return self._pdfs[data_id]
 
 
 def _walk(
@@ -204,7 +321,9 @@ def _load(export_root: Path, slides: list[dict[str, Any]]) -> list[_Slide]:
         uuid = entry["exportedUuid"]
         folder = export_root / "assets" / uuid
         payload = read_jsonish(folder / f"{uuid}.json")
-        slide = _Slide(int(entry["originalOrdinal"]), uuid, folder, payload)
+        slide = _Slide(
+            int(entry["originalOrdinal"]), uuid, folder, payload, slide_id=entry.get("originalSlideId")
+        )
         for index, event in enumerate(slide.events):
             slide.leaves.extend(_event_leaves(event, index))
         slide.movies = _movies(payload)
@@ -214,6 +333,34 @@ def _load(export_root: Path, slides: list[dict[str, Any]]) -> list[_Slide]:
 
 def _close(a: tuple[float, ...], b: tuple[float, ...], tol: float) -> bool:
     return all(abs(p - q) <= tol for p, q in zip(a, b, strict=True))
+
+
+def _expanded_frame(raw: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    x, y, w, h = raw
+    if w <= 0 or h <= 0:
+        return (math.nan, math.nan, math.nan, math.nan)
+    left, top = math.floor(x) - 1, math.floor(y) - 1
+    right, bottom = math.ceil(x + w) + 1, math.ceil(y + h) + 1
+    return (left, top, right - left, bottom - top)
+
+
+def _in_frame_envelope(
+    leaf: tuple[float, float, float, float], raw: tuple[float, float, float, float]
+) -> bool:
+    if any(not math.isfinite(value) for value in (*leaf, *raw)) or raw[2] <= 0 or raw[3] <= 0:
+        return False
+    gaps = (
+        raw[0] - leaf[0],
+        raw[1] - leaf[1],
+        leaf[0] + leaf[2] - raw[0] - raw[2],
+        leaf[1] + leaf[3] - raw[1] - raw[3],
+    )
+    return all(-1e-3 <= gap <= 4 + 1e-3 for gap in gaps)
+
+
+def _leaf_tree(leaf: _Leaf) -> tuple[str | int, ...]:
+    last = max(index for index, part in enumerate(leaf.path) if part == "baseLayer")
+    return (leaf.event, *leaf.path[: last + 1])
 
 
 def _fits(entry: dict[str, Any] | None, size: tuple[float, float]) -> bool:
@@ -283,14 +430,19 @@ class _Renderer:
         self._docs: dict[Path, Any] = {}
         self._thumbs: dict[tuple[Path, int], np.ndarray | None] = {}
 
-    def _page(self, pdf: Path, index: int) -> Any:
+    def _doc(self, pdf: Path) -> Any:
         import Quartz  # noqa: PLC0415
         from Foundation import NSURL  # noqa: PLC0415
 
         if pdf not in self._docs:
             url = NSURL.fileURLWithPath_(str(pdf))
             self._docs[pdf] = Quartz.CGPDFDocumentCreateWithURL(url) if pdf.is_file() else None
-        doc = self._docs[pdf]
+        return self._docs[pdf]
+
+    def _page(self, pdf: Path, index: int) -> Any:
+        import Quartz  # noqa: PLC0415
+
+        doc = self._doc(pdf)
         page = Quartz.CGPDFDocumentGetPage(doc, index + 1) if doc is not None else None
         if not page:
             return None, None
@@ -323,6 +475,12 @@ class _Renderer:
                 row = Quartz.CGImageGetBytesPerRow(image)
                 self._thumbs[key] = np.frombuffer(data, np.uint8).reshape(h, row)[:, :w].astype(float)
         return self._thumbs[key]
+
+    def page_count(self, pdf: Path) -> int | None:
+        import Quartz  # noqa: PLC0415
+
+        doc = self._doc(pdf)
+        return int(Quartz.CGPDFDocumentGetNumberOfPages(doc)) if doc is not None else None
 
     def png(self, pdf: Path, index: int, dest: Path) -> bool:
         import Quartz  # noqa: PLC0415
@@ -584,6 +742,7 @@ def _d2(
         return None
     previous, slide = slides[group.slide - 1], slides[group.slide]
     keys = {leaf.key for leaf in group.leaves}
+    landings = [triple for triple in _landings(previous, slide, own=True) if triple[2].key in keys]
     donors = {
         to
         for leaf, to, target in _landings(previous, slide)
@@ -596,7 +755,7 @@ def _d2(
         return None
     donor = donors.pop()
     new = hashlib.sha256(f"{slide.uuid}:{previous.uuid}:{donor}".encode()).hexdigest()[:32].upper()
-    return _Fix(group, "D2", new, (group.slide - 1, donor))
+    return _Fix(group, "D2", new, (group.slide - 1, donor), landings=landings)
 
 
 def _d4(
@@ -660,7 +819,69 @@ def _ocr(renderer: _Renderer, slide: _Slide, texture: str, scratch: Path) -> str
     return " ".join(line.text for line in ocr_lines(png))
 
 
-def _verify(slides: list[_Slide], fix: _Fix, renderer: _Renderer, scratch: Path) -> bool:
+def _verify_image_d2(
+    slides: list[_Slide],
+    fix: _Fix,
+    renderer: _Renderer,
+    scratch: Path,
+    evidence: _SourceEvidence,
+) -> bool:
+    if fix.donor is None or len(fix.landings) != 1:
+        return False
+    witness, _, _ = fix.landings[0]
+    to, _ = _end_rect(witness)
+    if not to or to != fix.donor[1]:
+        return False
+    slide = slides[fix.group.slide]
+    previous = slides[fix.donor[0]]
+    identities = [evidence.identity(slide, leaf) for leaf in fix.group.leaves]
+    if not identities or any(identity is None for identity in identities):
+        return False
+    destination = identities[0]
+    if any(identity.object_id != destination.object_id for identity in identities[1:]):
+        return False
+    source = evidence.identity(previous, witness)
+    if source is None or source.data_id != destination.data_id:
+        return False
+    donor = previous.texture_entry(to)
+    if donor is None or any(
+        not _close((donor["width"], donor["height"]), leaf.rect[2:], RECT_TOL)
+        for leaf in fix.group.leaves
+    ):
+        return False
+    source_pdf = evidence.pdf(destination.data_id, scratch)
+    if source_pdf is None or renderer.page_count(source_pdf) != 1:
+        return False
+    source_thumb = renderer.thumb(source_pdf, 0)
+    donor_thumb = _thumb(renderer, previous, to)
+    if (
+        source_thumb is None
+        or donor_thumb is None
+        or not np.isfinite(source_thumb).all()
+        or not np.isfinite(donor_thumb).all()
+        or source_thumb.std() < FLAT_STD
+        or donor_thumb.std() < FLAT_STD
+    ):
+        return False
+    corr = _corr(source_thumb, donor_thumb)
+    if corr is None or not math.isfinite(corr) or corr < CORR_MATCH:
+        return False
+    fix.verify = {
+        "corr": corr,
+        "object": destination.object_id,
+        "sourceObject": source.object_id,
+        "data": destination.data_id,
+    }
+    return True
+
+
+def _verify(
+    slides: list[_Slide],
+    fix: _Fix,
+    renderer: _Renderer,
+    scratch: Path,
+    evidence: _SourceEvidence | None = None,
+) -> bool:
     slide = slides[fix.group.slide]
     source, texture = (slides[fix.donor[0]], fix.donor[1]) if fix.donor else (slide, fix.new)
     if not _fits(source.texture_entry(texture), fix.group.size) or not _mediabox_ok(source, texture):
@@ -680,11 +901,19 @@ def _verify(slides: list[_Slide], fix: _Fix, renderer: _Renderer, scratch: Path)
         corr = _corr(_thumb(renderer, source, texture), _thumb(renderer, slide, slide.movies[oid][1]))
         fix.verify = {"corr": round(corr, 3) if corr is not None else None}
         return corr is not None and corr >= CORR_MATCH
-    return False
+    return (
+        fix.rule == "D2"
+        and evidence is not None
+        and _verify_image_d2(slides, fix, renderer, scratch, evidence)
+    )
 
 
 def _plan(
-    slides: list[_Slide], hits: list[_Hit], renderer: _Renderer, scratch: Path
+    slides: list[_Slide],
+    hits: list[_Hit],
+    renderer: _Renderer,
+    scratch: Path,
+    evidence: _SourceEvidence | None = None,
 ) -> tuple[list[_Fix], list[tuple[int, str]]]:
     groups, ambiguous = _groups(slides, hits)
     repair_members = {(group.slide, leaf.key) for group in groups for leaf in group.leaves}
@@ -709,7 +938,10 @@ def _plan(
             _d2(slides, group, bad_textures, repair_members),
             _d4(slides, group, bad_textures, repair_members, renderer),
         )
-        fix = next((c for c in candidates if c is not None and _verify(slides, c, renderer, scratch)), None)
+        fix = next(
+            (c for c in candidates if c is not None and _verify(slides, c, renderer, scratch, evidence)),
+            None,
+        )
         if fix is None:
             refused.append((slide.ordinal, _describe(slide, group)))
         elif fix.donor and fix.new in slide.assets:
@@ -868,7 +1100,13 @@ def _postcondition(
 
 
 def repair_textures(
-    export_root: Path, slides: list[dict[str, Any]], *, player_digest: str, log: Callable[[str], None]
+    export_root: Path,
+    slides: list[dict[str, Any]],
+    *,
+    player_digest: str,
+    log: Callable[[str], None],
+    source_path: Path | None = None,
+    source_digest: str | None = None,
 ) -> dict[str, Any]:
     """Detect (R1, R1b, R4, R6), plan donors (D1, D3, D2), verify (V1, V3), write
     (temp + os.replace; .json, .jsonp, .pdf, .pdfp), check the postcondition (V4), return
@@ -883,8 +1121,11 @@ def repair_textures(
     if not hits:
         log("Checked textures: none mis-mapped")
         return record | {"repaired": [], "pdfs": []}
+    evidence = _SourceEvidence(Path(source_path)) if source_path is not None and source_digest is not None else None
     with tempfile.TemporaryDirectory(prefix="obed-texture-repair-") as scratch:
-        fixes, refused = _plan(loaded, hits, renderer, Path(scratch))
+        fixes, refused = _plan(loaded, hits, renderer, Path(scratch), evidence)
+    if evidence is not None and evidence._loaded and deck_digest(evidence.path) != source_digest:
+        raise PreviewStale("source deck changed during texture repair")
     if refused:
         raise TextureRepairRefused(
             "Cannot repair Keynote's HTML export: "
