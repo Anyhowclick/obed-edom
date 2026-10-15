@@ -8,7 +8,8 @@ Plan `.agents/plans/keynote_live_line_draw.plan.md` rev 6, with owner decisions 
 - Code review: Opus 5.5 high (r1, r2).
 
 Deck: owner's `Alpha_DSK.key`, slide 2. The export is a read-only copy of
-`s2-followups-dsk-deck-902af1/output/.html-preview/7e3c9301…-p3-r1`.
+`~/Desktop/Convert wall to 16x9 CGs/Continuity/stage-t-exports/7e3c9301…-p3-r1` (moved from the retired
+`s2-followups-dsk-deck-902af1` worktree).
 
 | Gate | Result |
 |---|---|

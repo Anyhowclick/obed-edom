@@ -18,7 +18,7 @@
 - Pinned worktree at `9056168c`, using the handover recipe (`dx1_paced.py`).
 - Decision record `q0b-2026-10-11/runs/decision_record_q0b1.json`. It was measured on 154 and is reused here: tuple engagement is gated, and tone stays identity.
 
-**Arms run:** the recipe's 16 arms plus the 46-arm `m-snap` matrix (with twins). Scored with `dissolve_probe.py --score` (`dx1-score.log`, `dx1-verdict.json`).
+**Arms run:** the recipe's 16 arms plus the 46-arm `m-snap` matrix (with twins). Scored with `dissolve_probe.py --score` (raw score log and verdict pruned after merge; numbers below are the record).
 
 **Results:**
 - **PASS:** handoff, frozen_frame, frozen_region, cost, grant, cvc.
@@ -34,5 +34,4 @@
 
 **Full suites (merged-on-main tree `31191d76`/`c6675241`):** Python 3.13.11 and the 3.10.10 floor each 10996 passed, 38 skipped, 1 xfailed, 1 failed — the known #278 load race `test_live_host.py::test_managed_probe_state_machine_renews_suppresses_and_stops` (`InvalidStateError`), which passes alone (3/3 on 3.13, 1/1 on 3.10). Dashboard `test:ui` 330 passed; `test:maps` 542 + 2 passed.
 
-**Pending:**
-- Owner eye on a live (headed) Dissolve 7→8 with the host log showing `placement.reason == "granted"`. This covers the review's headed-Chrome check.
+**Owner eye: PASS (2026-10-15).** The check used a copy of F2 (`F2-78.key`) with slide 8's transparent pin-drop removed, so that prepare passes. The live host was in HDMI mode with a headed, host-launched Chrome 155.0.8059.79, on an external display (XG27UCDMG, "looks like" 1920×1080). The host log showed `display` 2, viewport 1920×1080, stage `scale` 1.0, and placement `granted` with GPU compositing `enabled`. The owner reports that the 7→8 frame jump is cleared. The same check on the MacBook's built-in screen (viewport 1512×949, stage scale 0.7875) still jumped, as designed: scaled stages keep the stock jump (dissolve plan decision 12).
