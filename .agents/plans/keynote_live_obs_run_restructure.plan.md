@@ -384,3 +384,26 @@ Retain existing residuals: unchanged-fingerprint GPU fallback, transient alpha b
 - rev2: owner inputs — DEV tier + one pair.
 - r2 Opus 5.5 high: APPROVE-WITH-CHANGES, 1 major / 3 medium / 5 low.
 - rev3: incorporated M1–M4 and L1–L5; recorded all 2026-10-15 owner decisions.- rev3: folded r2 (DEV adopts anchors/injection once fail-closed tests pass; Profile.reported for NOT RUN families; shared live/offline launch-set check; DEV scorer-only rescore; two profiles); owner decisions recorded.
+
+## Implementation status (2026-10-15)
+
+Landed on `claude/obs-run-restructuring-3d0b30`: stage 1 `8899c71c` (DEV tier, shared launch-set verdict, `--takes 1`,
+timers), stage A `f71f0f18` (goTo positioning, verified readiness, caches, verified recording stop), stage B `3268d95c`
+(three anchors + injected grants). Implementers Codex GPT-5.6 Sol high; reviews Opus 5.5 high (stage 1 r1–r3; stage A two
+streams r1–r3; stage B r1–r2). P §5.1 and §11.6.1 carry the approved amendments.
+
+Live results (pinned detached worktree, results-only evidence under
+`output/evidence/s2-dev/obs-run-restructure-2026-10-15/`):
+
+| Run | Commit | Result | Time |
+|---|---|---|---:|
+| `baseline-8899c71c` full pair | stage 1 | PASS, qualified | 2738 s (45.6 min) |
+| `devA-renderer-f71f0f18` | stage A | DEV pass, 17/17 MATCH | 595 s |
+| `pairA-f71f0f18` full pair | stage A | PASS, verdicts identical to baseline | 2108 s (35.2 min) |
+| `devB-renderer-3268d95c` | stage B | DEV pass, 17/17 MATCH | 363 s (6.1 min) |
+| `pairB-3268d95c` full pair | stage B | PASS, qualified, 45/45 verdict items per rate identical to baseline | 1173 s (19.6 min) |
+
+Stage B pair: 70 injected rows, 204 renewal gaps 2.23–2.78 s, 70/70 revokes `invalid`, 76/76 captures via goTo.
+Remaining per-rate cost: acquisition ≈465–504 s, scoring ≈85 s (pixel scoring; the conditional post-quit pool, §3 item 4, is
+the next lever), finalization ≈5 s. Known unrelated flake under full-suite load:
+`tests/test_live_host.py::test_managed_probe_state_machine_renews_suppresses_and_stops` (#278 race; passes alone).
