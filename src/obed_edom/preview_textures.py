@@ -718,6 +718,95 @@ def _d1(slide: _Slide, group: _Group, bad: set[str]) -> _Fix | None:
     return _Fix(group, "D1", donors.pop(), None) if len(donors) == 1 else None
 
 
+def _glyph_twin(slide: _Slide, leaf: _Leaf) -> tuple[str, int, _Leaf] | None:
+    p, event = leaf.path, slide.events[leaf.event]
+    if len(p) != 7:
+        return None
+    if p[:2] == ("baseLayer", "layers") and p[3:6] == ("layers", 0, "layers"):
+        oid, glyph = event["baseLayer"]["layers"][p[2]]["layers"][0].get("objectID"), p[6]
+    elif p[0] == "effects" and p[2:4] == ("baseLayer", "layers") and p[5:] == ("layers", 0):
+        oid, glyph = event["effects"][p[1]].get("objectID"), p[4]
+    else:
+        return None
+    base_slots = (event.get("baseLayer") or {}).get("layers") or []
+    slots = [
+        i
+        for i, slot in enumerate(base_slots)
+        if oid and (slot.get("layers") or [{}])[0].get("objectID") == oid
+    ]
+    event_effects = event.get("effects") or []
+    effects = [i for i, effect in enumerate(event_effects) if oid and effect.get("objectID") == oid]
+    if len(slots) != 1 or len(effects) != 1:
+        return None
+    slot = base_slots[slots[0]]
+    base = ((slot.get("layers") or [{}])[0]).get("layers") or []
+    wrappers = (event_effects[effects[0]].get("baseLayer") or {}).get("layers") or []
+    base_leaves = all(isinstance(item.get("texture"), str) for item in base)
+    effect_leaves = all(
+        len(layers := wrapper.get("layers") or []) == 1
+        and isinstance(layers[0].get("texture"), str)
+        for wrapper in wrappers
+    )
+    if len(base) < 2 or len(wrappers) != len(base) or not base_leaves or not effect_leaves:
+        return None
+    twin_path = (
+        ("effects", effects[0], "baseLayer", "layers", glyph, "layers", 0)
+        if p[0] == "baseLayer"
+        else ("baseLayer", "layers", slots[0], "layers", 0, "layers", glyph)
+    )
+    twin = next(
+        (
+            other
+            for other in slide.leaves
+            if other.key == "/".join(map(str, (leaf.event, *twin_path)))
+        ),
+        None,
+    )
+    if (
+        not twin
+        or twin.kind != TEXT_TYPE
+        or leaf.node.get("texturedRectangle") != twin.node.get("texturedRectangle")
+        or not _close(leaf.rect, twin.rect, RECT_TOL)
+    ):
+        return None
+    return oid, glyph, twin
+
+
+def _d1g(
+    slide: _Slide,
+    group: _Group,
+    bad_keys: set[str],
+    bad_textures: set[str],
+    repair_members: set[tuple[int, str]],
+) -> _Fix | None:
+    if group.first.kind != TEXT_TYPE:
+        return None
+    resolved = [(leaf.event, *twin) for leaf in group.leaves if (twin := _glyph_twin(slide, leaf))]
+    if len(resolved) != len(group.leaves):
+        return None
+    event, oid, glyph, twin = resolved[0]
+    donor = twin.texture
+    for other_event, other_oid, other_glyph, other_twin in resolved:
+        if (other_event, other_oid, other_glyph, other_twin.texture) != (event, oid, glyph, donor):
+            return None
+    if (
+        donor == group.old
+        or donor in bad_textures
+        or any(not _consistent(slide, other_twin) for _, _, _, other_twin in resolved)
+        or any(
+            leaf.texture == donor
+            and (
+                leaf.key in bad_keys
+                or (group.slide, leaf.key) in repair_members
+                or not _close(leaf.rect, twin.rect, GROUP_TOL)
+            )
+            for leaf in slide.leaves
+        )
+    ):
+        return None
+    return _Fix(group, "D1g", donor, None, {"objectID": oid, "glyph": glyph, "twin": twin.key})
+
+
 def _d3(slide: _Slide, group: _Group) -> _Fix | None:
     oid = _group_movie(slide, group)
     poster = slide.movies[oid][1] if oid else None
@@ -888,6 +977,9 @@ def _verify(
         return False
     if fix.rule == "D4":
         return fix.raw_corr is not None and fix.raw_corr >= CORR_MATCH
+    if fix.rule == "D1g":
+        thumb = _thumb(renderer, slide, fix.new)
+        return thumb is not None and np.isfinite(thumb).all() and thumb.std() >= FLAT_STD
     if fix.group.first.kind == TEXT_TYPE:
         read = _ocr(renderer, source, texture, scratch)
         fix.verify = {"ocr": read}
@@ -934,6 +1026,13 @@ def _plan(
         slide = slides[group.slide]
         candidates = (
             _d1(slide, group, bad_keys.get(group.slide, set())),
+            _d1g(
+                slide,
+                group,
+                bad_keys.get(group.slide, set()),
+                bad_textures.get(group.slide, set()),
+                repair_members,
+            ),
             _d3(slide, group),
             _d2(slides, group, bad_textures, repair_members),
             _d4(slides, group, bad_textures, repair_members, renderer),
@@ -1108,7 +1207,7 @@ def repair_textures(
     source_path: Path | None = None,
     source_digest: str | None = None,
 ) -> dict[str, Any]:
-    """Detect (R1, R1b, R4, R6), plan donors (D1, D3, D2), verify (V1, V3), write
+    """Detect (R1, R1b, R4, R6), plan donors (D1, D1g, D3, D2, D4), verify (V1, V3), write
     (temp + os.replace; .json, .jsonp, .pdf, .pdfp), check the postcondition (V4), return
     manifest.textureRepair. Raises PreviewError on refusal or a failed postcondition."""
     record: dict[str, Any] = {"version": TEXTURE_REPAIR_VERSION, "playerDigest": player_digest}
