@@ -46,8 +46,9 @@ Real `propose_preview` + `apply_preview` on current `F2.key` (`f99a68ef…`), `O
 
 ## AM-3 / AM-4
 
-Owner eye on the product path (HDMI Chrome, managed-OBS Keyer, beside native Keynote) — PENDING. Managed-OBS physical
-fill/key at the DeckLink field test (owner D3).
+Owner eye PASS (2026-10-15): "alpha-movie worked in both HDMI & OBS". Dashboard from this branch on the AM-2
+prepared cache (current F2), host-launched HDMI Chrome and a managed-OBS session. Still owed: managed-OBS physical
+fill/key through the UltraStudio and switcher at the DeckLink field test (owner D3).
 
 ## AM-5 — suites (rebased on origin/main 60c53c85, HEAD 62dde6c9)
 
