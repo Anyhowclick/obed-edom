@@ -139,6 +139,7 @@ PRESERVE_CORE_JS = r"""
       // restart measurement is not polluted by continued slide-1/2 clocks.
       remountEpoch += 1;
       preserveGeneration += 1;
+      departureHides.clear();
       suppressRemount = true;
       try {
         pool.clear();
@@ -834,7 +835,34 @@ PRESERVE_CORE_JS = r"""
   }
   const glCalls = new WeakMap();
   const lingers = new Set();
+  const departureHides = new Map();
   let glToken = null, glTokenSeq = 0;
+  function feedEntry(boundary) {
+    const m = window.__OBED_MM_FEED__;
+    const entries = m && m.entries;
+    return entries && boundary && boundary.src ? entries[boundary.src.objectId] : null;
+  }
+  function deferDepartureHide(v, boundary) {
+    const entry = feedEntry(boundary);
+    if (!entry || typeof entry.framesFed !== 'number' || !isFinite(entry.framesFed)) return false;
+    departureHides.set(v, {
+      boundary: boundary, generation: preserveGeneration, framesFed: entry.framesFed
+    });
+    return true;
+  }
+  function finishDepartureHides() {
+    departureHides.forEach(function(pending, v) {
+      if (pending.generation !== preserveGeneration || v.__obedGen === -1 || v.ended
+          || !document.contains(v) || currentHashNum() !== pending.boundary.atScene - 1) {
+        departureHides.delete(v);
+        return;
+      }
+      const entry = feedEntry(pending.boundary);
+      if (!entry || !(entry.framesFed > pending.framesFed)) return;
+      v.style.opacity = '0';
+      departureHides.delete(v);
+    });
+  }
   function runGlCall(token, ts) {
     const call = glCalls.get(token);
     const prev = glToken;
@@ -847,6 +875,7 @@ PRESERVE_CORE_JS = r"""
       call.threw = false;
       return out;
     } finally {
+      if (!call.threw) finishDepartureHides();
       inGlFrame = false;
       glToken = prev;
     }
@@ -1287,7 +1316,8 @@ PRESERVE_CORE_JS = r"""
     v.style.position = 'absolute';
     v.style.visibility = 'visible';
     v.style.display = 'block';
-    v.style.opacity = hidden ? '0' : '1';
+    const waitForGl = hidden && deferDepartureHide(v, boundary);
+    v.style.opacity = hidden && !waitForGl ? '0' : '1';
     v.style.pointerEvents = 'none';
     v.dataset.obedRemounted = '1';
     function frame() {
@@ -2381,6 +2411,7 @@ PRESERVE_CORE_JS = r"""
     const key = assetKey(value);
     const bridge = entry.action === 'bridge';
     unpool(preserved);
+    departureHides.delete(preserved);
     hold(preserved, entry);
     tag(preserved);
     note(bridge ? 'bridge-3to4' : 'reuse-decoder', {

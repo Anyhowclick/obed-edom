@@ -35,6 +35,7 @@ def test_the_variant_names_are_the_shared_contract() -> None:
         "settle-on-stage",
         "no-pause",
         "interim-delay",
+        "departure-early-hide",
     )
 
 
@@ -153,6 +154,25 @@ def test_interim_delay_defers_only_the_interim_scan_by_one_animation_frame() -> 
     assert replacement in core
     assert variants._INTERIM_SCAN not in core
     assert core.replace(replacement, variants._INTERIM_SCAN) == PRESERVE_CORE_JS
+
+
+def test_departure_early_hide_restores_only_the_pre_draw_opacity_change() -> None:
+    core = variants.variant_core("departure-early-hide")
+    replacement = variants._TRANSFORMS["departure-early-hide"][0][1]
+    assert replacement in core
+    assert variants._DEPARTURE_HIDE not in core
+    assert core.replace(replacement, variants._DEPARTURE_HIDE) == PRESERVE_CORE_JS
+
+
+def test_departure_early_hide_is_the_behavioural_red_control(monkeypatch) -> None:
+    from test_live_continuity_js import _departure_hide
+
+    from obed_edom import live_continuity_js
+
+    monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variants.variant_core("departure-early-hide"))
+    result = _departure_hide("continuous")
+    assert result["beforeDraw"]["opacity"] == "0"
+    assert result["afterEmptyCallback"] == "0"
 
 
 @pytest.mark.parametrize(("name", "anchor"), ANCHORS)

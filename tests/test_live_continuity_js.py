@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "4c917be4d1d495c59dbbb2e388597c8a61a55e5e8180aaddc70f440741664eef"
+PINNED_CORE_SHA256 = "71d8ead2d8edbbf8503b6fab32907051dcbbe51d97a8ac231dc2b02d8831568e"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -3936,9 +3936,16 @@ detach = function(v) {
 """
 
 
-def _run_chain(plan: dict, script: str, *, src: str = "https://host/untitled.mov", stage: dict = _IDENTITY_STAGE) -> dict:
+def _run_chain(
+    plan: dict,
+    script: str,
+    *,
+    src: str = "https://host/untitled.mov",
+    stage: dict = _IDENTITY_STAGE,
+    after_core: str = _LOADED,
+) -> dict:
     prelude = _CHAIN_PRELUDE.replace("__SRC__", src).replace("__IDS__", json.dumps(_ids(plan)))
-    return _run_full_core_in_node(plan=plan, stage=stage, script=prelude + script)
+    return _run_full_core_in_node(plan=plan, stage=stage, script=prelude + script, after_core=after_core)
 
 
 _FEED = {"draw": 2, "drawCount": 4, "from": {"upload": 3, "size": [640, 360]}, "to": None}
@@ -3959,6 +3966,72 @@ _UNDER_ARTWORK_BRIDGE_PLAN = {
         }
     ],
 }
+
+
+def _departure_hide(mode: str) -> dict:
+    claim = "const claimed = P.feed.claim('A1');" if mode == "continuous" else "const claimed = null;"
+    return _run_chain(
+        _UNDER_ARTWORK_BRIDGE_PLAN,
+        rf"""
+const entry = {{mode: '{mode}', state: 'armed', framesFed: 0}};
+let once = 0;
+window.__OBED_MM_FEED__ = {{
+  entries: {{A1: entry}},
+  once() {{ once += 1; return true; }},
+}};
+goToScene(0);
+const a = playing('A1');
+{claim}
+goToScene(1);
+a.pause();
+detach(a);
+const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once}};
+let insideBefore = null, insideAfter = null;
+window.requestAnimFrame(function() {{ insideBefore = a.style.opacity; }});
+glFrames.shift()(8);
+const afterEmptyCallback = a.style.opacity;
+window.requestAnimFrame(function() {{
+  insideBefore = a.style.opacity;
+  entry.framesFed += 1;
+  entry.state = '{'fed' if mode == 'continuous' else 'held'}';
+  insideAfter = a.style.opacity;
+}});
+glFrames.shift()(16);
+console.log(JSON.stringify({{
+  claimed, beforeDraw, afterEmptyCallback, insideBefore, insideAfter, afterCallback: a.style.opacity,
+  frameCount: entry.framesFed,
+}}));
+""",
+        after_core=(
+            "const glFrames = []; "
+            "window.requestAnimFrame = function(cb) { glFrames.push(cb); return glFrames.length; };\n"
+            + _LOADED
+        ),
+    )
+
+
+def test_under_artwork_decoder_hides_after_the_first_fed_gl_callback_returns():
+    assert _departure_hide("continuous") == {
+        "claimed": True,
+        "beforeDraw": {"opacity": "1", "paused": False, "once": 0},
+        "afterEmptyCallback": "1",
+        "insideBefore": "1",
+        "insideAfter": "1",
+        "afterCallback": "0",
+        "frameCount": 1,
+    }
+
+
+def test_feed_off_once_decoder_holds_its_departure_frame_until_the_first_gl_draw():
+    assert _departure_hide("once") == {
+        "claimed": None,
+        "beforeDraw": {"opacity": "1", "paused": True, "once": 1},
+        "afterEmptyCallback": "1",
+        "insideBefore": "1",
+        "insideAfter": "1",
+        "afterCallback": "0",
+        "frameCount": 1,
+    }
 
 
 def test_under_artwork_bridge_holds_hidden_then_rehomes_without_loading_the_stub():

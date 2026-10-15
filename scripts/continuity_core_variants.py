@@ -32,6 +32,7 @@ VARIANTS: tuple[str, ...] = (
     "settle-on-stage",
     "no-pause",
     "interim-delay",
+    "departure-early-hide",
 )
 
 _POOL_PLANNED_ONLY = "    if (!armedPool && !poolable(v)) return;\n"
@@ -46,6 +47,10 @@ _POSTER_PAUSE = (
     "    try { v.pause(); } catch (e) {}\n"
 )
 _INTERIM_SCAN = "    interimScan(roots, performance.now());\n"
+_DEPARTURE_HIDE = (
+    "    const waitForGl = hidden && deferDepartureHide(v, boundary);\n"
+    "    v.style.opacity = hidden && !waitForGl ? '0' : '1';\n"
+)
 
 _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     # Pool every decoder: neither the plan-asset filter nor the planned-instance filter.
@@ -88,6 +93,7 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
         "      interimScan(roots.filter(function(r) { return r.isConnected; }), observedAt);\n"
         "    });\n",
     ),),
+    "departure-early-hide": ((_DEPARTURE_HIDE, "    v.style.opacity = hidden ? '0' : '1';\n"),),
 }
 
 
