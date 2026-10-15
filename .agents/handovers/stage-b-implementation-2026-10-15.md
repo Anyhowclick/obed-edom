@@ -4,27 +4,30 @@ Read with `stage-b-implementation-2026-10-14.md` (history, Q7 fix round) and the
 `.agents/plans/keynote_live_continuity_stage_b_q7_handback.plan.md` (owner-approved option A).
 
 ## Resume here
-This worktree (`s2-followups-dsk-deck-902af1`) is RETIRED (owner 2026-10-15); continue on branch `claude/stage-b-implementation`
-in a fresh worktree (sync all extras + `npm ci`; run tests with that worktree's `.venv`). Reports/briefs: `output/evidence/stage-b-2026-10-13/q7-round2/impl/`.
-1. **`af3edf73` move-start snap fix — UNREVIEWED.** Core keeps the carried decoder painting until the first GL callback that
-   advances the feed (owner saw "a very brief snap to frame 0 just before the MM transitions"); red control core variant
-   `departure-early-hide`. Report `impl/R-departure-report.md`. Next: Opus 5.5 high review r1–r3, then a departure-exposure
-   verdict in the instrument (the paint census already sees "2 unpainted frames (checkVisibility)" before glInterval.start).
-2. **`47bc3698` instrument gaps — UNREVIEWED, DO NOT MERGE AS IS.** Report `impl/G-gaps-report.md` (D7 feed-off 6/6 green after
-   lifecycle/hold/dropped-callback fixes; Alpha b5to6 readable). **Disputed by the Alpha-stall session:** (a) slow settled pre/post-GL
-   cadence made report-only — the owner's Alpha jitter matches 67–233 ms browser frames on slides 6–8, likely caused by the
-   instrument's own per-frame `capture()` (21 drawImage + getImageData per video frame while hash == atScene-1; callbackCostP95Ms
-   41 OBS / 114 headless) → observer effect must invalidate/fail, not be excused; (b) "paint starts at the decoded source scene"
-   correctly moves the b3to4 not-decoded frames out of the carry, but leaves the slide-4 ENTRY cold start (Untitled-H264 readyState 1
-   for ~340 ms after mount) unscored — keep it a readable finding. Revise before use.
-3. **Alpha product issues** (pre-existing): b6to7 and both b7to8 fed carries read artworkAbove false on every read, and the second
-   presented hand-back frame has the decoder on `#body` (`inStage=false`) before it returns to the stage. Plus the b3to4 entry cold
-   start. The Alpha-stall session (`Investigate Alpha 3→4 decoder stall (feed on)`, notes `alpha-b3to4-stall-notes.md`) owns the
-   stall; coordinate before fixing.
-4. Then Q7 attempt 4 on all three decks + step 3 (dashboard: D1, Alpha to the end + press past end — not done), Q2–Q6, full suites
-   (3.12 + 3.10 lockfile venv + dashboard ui/maps), PR. Core sha now `71d8ead2…` (pins updated); targeted suites 3463 passed.
-5. Stage T gate exports moved to `~/Desktop/Convert wall to 16x9 CGs/Continuity/stage-t-exports/` (`aa6c74d2` repoints
-   `scripts/texture_repair_check.py`); main's copy still points at this retired worktree until Stage B merges.
+Worktree `.claude/worktrees/stage-b-impl` (branch `claude/stage-b-implementation`, pushed, HEAD `1c95d5f1`; extras + `npm ci` synced,
+`output/{fixtures,evidence,bank}` linked). Reports/briefs/reviews: `output/evidence/stage-b-2026-10-13/q7-round2/impl/` (`R-dep-*`, `M-merge287*`).
+1. **Departure snap fix — REVIEWED (Opus 5.5 high r1 NOT READY → fold → r2 READY → L1 note).** `af3edf73` + `a538cf7f` + `adad9570`:
+   the carried decoder stays in its source slot (or an interim anchor above the static movie canvas, below labels) until the feed
+   advances or stands down, then moves to `#body` hidden; refused one-shots / stood-down feeds hide at once; `departure-interim`
+   note records the placement. Core `302c218d…`. Red control `departure-early-hide`. Record `impl/R-dep-reviews.md` (theoretical
+   T-a..T-c await owner evidence). Not yet run live or headless.
+2. **Main merged (#278–#287) — `1f728371`, merge review r1 clean, folds `1c95d5f1`.** MM feed's Chrome renderer stays keyed on
+   `QUALIFIED_SNAP_MAJORS` (now 154/155). #284 qualified only the freeze, so **Q3/Q5 headless feed arms must pass on Chrome
+   155.0.8059.79 (record browserVersion) BEFORE any Q7 external-attach Chrome arm** (plan WS-H). Record `impl/M-merge287-review.md`.
+3. **`47bc3698` instrument gaps — UNREVIEWED, DO NOT MERGE AS IS.** Report `impl/G-gaps-report.md`. Disputed by the Alpha-stall
+   session: (a) slow settled cadence must INVALIDATE a run (observer effect: per-frame `capture()` while hash == atScene-1,
+   callbackCostP95 41 OBS / 114 headless), never be excused, AND capture cost cut; (b) keep the slide-4 ENTRY cold start
+   (readyState 1 for 150–340 ms) a readable finding. Revision waits on the Alpha-stall A/B (new feed on/off, old feed on, new with
+   pre-move capture disabled) and its proposed thresholds. The departure-exposure verdict (no rider above labels from ride start to
+   first draw) goes into the same revision.
+4. **Alpha product issues** (pre-existing): b6to7 and both b7to8 fed carries read artworkAbove false; the second hand-back frame has
+   the decoder on `#body` before it returns. Alpha-stall session (`Investigate Alpha 3→4 decoder stall (feed on)`) owns the stall;
+   coordinate before fixing.
+5. Then: Q3/Q5 feed arms on 155 headless → Q7 attempt 4 (owner; all three decks; wait for placement to leave `probing` before the
+   first advance in dashboard managed-OBS sessions) + step 3 (dashboard D1, Alpha to the end + press past end), Q2–Q6, full suites
+   (3.12 + 3.10 lockfile venv + dashboard ui/maps; known #278 load flake), PR. The `stage-b-q7` worktree (@`03a35b28`, read-only by
+   the Alpha-stall session) must be rebuilt at the new HEAD before Q7 attempt 4.
+6. Stage T gate exports live in `~/Desktop/Convert wall to 16x9 CGs/Continuity/stage-t-exports/` (main repointed in #286).
 
 ## What this round did (commits on `claude/stage-b-implementation`)
 | Commit | What |
