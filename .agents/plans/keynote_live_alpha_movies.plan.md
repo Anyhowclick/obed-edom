@@ -98,7 +98,7 @@ References are under `src/obed_edom/` unless otherwise stated.
 | `live_codec.py:22`, `:311`, `:328`, `:351` — codec recognition | Add bounded WebM parsing; return `V_VP9`, mapped to `vp9`. Preserve BMFF `vp09` recognition. |
 | `live_codec.py:255`, `:287`, `:334`, `:340`, `:346` — timing/geometry | Keep BMFF structures. WebM helper exposes dimensions, duration and available DefaultDuration; `movie_fps` uses that rate when readable. Never invent BMFF sample counts/timescales or infer CFR. |
 | `live_continuity.py:2303`, `:2336` — codec census | Keep shared-reader propagation across referenced copies, independent of continuity; census remains best-effort diagnostics. |
-| `live_host.py:203`, `:1271` — support/warnings | Increment 1 admits ordinary VP9 in headful launch only (the HEVC pattern); managed OBS joins in the follow-up once its CEF passes, external attach never. Preserve warning-and-proceed for unqualified outputs (owner D4). |
+| `live_host.py:203`, `:1271` — support/warnings | Admit ordinary VP9 in headful launch (the HEVC pattern), and in managed OBS if its CEF Step 0 passes; external attach never. Preserve warning-and-proceed for unqualified outputs (owner D4). |
 | `live_host.py:1305`, `:1323` — continuity/G2 | Explicitly refuse planned VP9 despite ordinary-playback admission; retain G2 cleanup. No deck-wide alpha shutdown. |
 | `live_host.py:1030`, `:1041` — rate/Program guard | Preserve rate warnings, including 25→30; no resampling or new cadence metric. |
 | `live_host.py:493`, `:556`, `:575`; `web/app.py:1211`, `:1235` — serving | Calibration MP4 unchanged; preserve Range handling and suffix MIME unless an output proves a MIME change necessary. |
@@ -119,7 +119,7 @@ Harness H.264 assumptions remain controls: `scripts/binary_counter_movie.py:103`
 
 Use one small probe and existing capture infrastructure. Retain inputs, argv, hashes, raw PNGs, frame timestamps and offline scores outside `output/`. No synthetic movie, browser framework or trail metric.
 
-Increment 1 runs headless and host-launched headful Chrome; pinned OBS **32.2.2** CEF runs in the follow-up increment (owner D3). Record actual engines, GPU/settings, player digest, viewport/DPR, `VideoFrame.colorSpace` and HTTP responses. Qualify OBS 25/30 separately when both rates are advertised.
+Run headless Chrome, host-launched headful Chrome and one hidden managed-OBS **32.2.2** CEF launch (scheduled with the OBS-run owner). The CEF result decides whether managed OBS ships in increment 1 (owner D3). Record actual engines, GPU/settings, player digest, viewport/DPR, `VideoFrame.colorSpace` and HTTP responses. Qualify OBS 25/30 separately when both rates are advertised.
 
 The planning-session headless row is not AM-0 evidence: its raw captures were not retained and it used the coarse 16/239 classes. Step 0 repeats headless at **2/253** with frame-identity evidence.
 
@@ -187,7 +187,7 @@ Extend `movieConversion` with `converted[].targetCodec` and encoder descriptions
 
 ### Ordinary playback, continuity and freeze
 
-Extend `_codec_supported` so `vp9` is supported in headful launch (increment 1), and in managed OBS only after its follow-up Step 0; the managed-OBS/external-attach distinction lands with that follow-up. Retain census, `codecWarnings` and rate warnings. Record engine builds as evidence; preserve `PINNED_OBS`. Mode-based support, no Chrome version gate (owner D5): a Chrome update keeps alpha playing; Step 0 evidence names the build it ran on. No exact-build/provenance admission table.
+Extend `_codec_supported` so `vp9` is supported in headful launch and, if CEF Step 0 passes, in managed OBS. Today managed OBS and external attach share `attach=True`, so add the minimal managed-OBS flag; external attach stays unsupported. Retain census, `codecWarnings` and rate warnings. Record engine builds as evidence; preserve `PINNED_OBS`. Mode-based support, no Chrome version gate (owner D5): a Chrome update keeps alpha playing; Step 0 evidence names the build it ran on. No exact-build/provenance admission table.
 
 Unqualified outputs warn and proceed through the existing `codecWarnings` path, as for other codecs today (owner D4). No start block, so the census's fail-open `[], []` on exceptions (`live_host.py:1275`) needs no change.
 
@@ -213,7 +213,7 @@ No changes to peer-owned continuity JS, MM feed or G2 hooks; no player patch pla
 | **AM-1 offline F2 conversion** | Scratch export outside `output/`: baseline reproduces refusal; candidate converts only the alpha movie. Existing H.264 bytes, filenames, JSON/JSONP and player remain unchanged. Repeated conversion/cache checks accept it; forced alpha loss refuses. |
 | **AM-2 full prepare** | Real `apply_preview` without Keynote: `OBED_EDOM_OUTPUT_ROOT` set to a scratch root outside every `output/` (`paths.py:16`), and an `export_html_fn` (`html_preview.py:1048`) that copies a retained export. Run on current F2 once the separate slide-4 texture fix lands. Acceptance: texture repair then conversion completes, `movieConversion` records the VP9 target, and a second apply reuses the cache. AM-1 carries the positive/negative controls. Never bypass repair to claim current-F2 success. |
 | **AM-3 product playback** | Prepared current F2 (after the slide-4 fix): automatic start, advance/go-to, restart/seek, end, hide/show; no opaque poster rectangle or stale image. Check 7→8. Check 8→9 against peer Revolve implementation/status and record the dependency. |
-| **AM-4 output eye** | Increment 1: host-launched HDMI Chrome beside native Keynote. Follow-up increment: managed-OBS physical fill/key at every advertised rate (owner D3). Repeat Build Preview specifically in Chrome; another dashboard browser does not qualify Chrome. |
+| **AM-4 output eye** | Host-launched HDMI Chrome beside native Keynote; if CEF passed, managed-OBS physical fill/key (UltraStudio key out + switcher composite) at every advertised rate, folded into the DeckLink field test (owner D3). Repeat Build Preview specifically in Chrome; another dashboard browser does not qualify Chrome. |
 | **AM-5 regressions** | Focused tests, then required full local suites on the composed base; diagnose failures before changing expectations. |
 
 Keep committed tests small:
@@ -226,7 +226,7 @@ Keep committed tests small:
 
 No tamper, exact-version or bypass framework. Add a focused serving assertion only if serving code changes.
 
-Delivery: **W0** Chrome evidence (headless + headful) → **W1** codec/conversion/cache metadata → **W2** host support and conversion UI → **W3** HDMI Chrome eye on current F2, peer composition. **Follow-up increment:** OBS CEF Step 0, `_codec_supported` for managed OBS, managed-OBS fill/key eye (owner D3).
+Delivery: **W0** evidence (headless + headful Chrome, managed-OBS CEF) → **W1** codec/conversion/cache metadata → **W2** host support (managed-OBS flag only if CEF passed) and conversion UI → **W3** eye on current F2 (HDMI Chrome; managed-OBS fill/key at the DeckLink field test), peer composition. If CEF fails, Chrome ships alone and OBS becomes a separate design question (packed matte).
 
 Before any code PR: full Python suites in the worktree **3.13 venv** and **3.10 floor**, plus dashboard `npm run test:ui` and `npm run test:maps`. Dashboard source changes require `npm install`, `npm run build` and restart before eye checks. No CI substitute; minimal comments and local patterns.
 
@@ -265,7 +265,7 @@ Out of scope: HEVC-alpha, packed-matte implementation, alpha audio, nonidentity 
 
 1. **D1 conversion:** convert silently, like opaque conversion today: any structurally verified, silent ProRes 4444 with real alpha, no size or duration caps.
 2. **D2 quality:** "the equivalent of H.264 CRF 14". Measured on F2's clip (SSIM of colour premultiplied over black, against the ProRes source): libx264 CRF 14 (`ENCODER`, flattened) **0.9950**, 157,860 B. VP9-alpha: CRF 10 0.9977 / 394,503 B; CRF 14 0.9976 / 315,473 B; **CRF 20 0.9975 / 246,543 B** (alpha PSNR 53.5 dB); CRF 25 0.9974 / 202,605 B; CRF 30 0.9972 / 159,678 B (alpha PSNR 49.7 dB). Every VP9 CRF from 10 to 30 matches or beats H.264 CRF 14, so **CRF 20** stays; edge and halo quality go to the owner's eye.
-3. **D3 outputs:** Chrome (HDMI) ships first; managed-OBS CEF fill/key is a follow-up increment. Both is the goal.
+3. **D3 outputs:** both is the goal; Chrome first is acceptable. Revised later on 2026-10-15: the managed-OBS CEF Step 0 run joins increment 1. If it passes, managed-OBS support ships in the same PR and the physical fill/key eye rides on the DeckLink field test. If it fails, Chrome ships alone.
 4. **D4 unqualified outputs:** warn and proceed (existing `codecWarnings`), no start block.
 5. **D5 Chrome updates:** keep playing (mode-based support, no Chrome-major gate).
 6. **D6 slide 4:** the text-identity refusal is being fixed in another session; current-F2 AM-2 to AM-4 wait for it. No slide-4-skipped copy.
