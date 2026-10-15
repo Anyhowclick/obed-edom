@@ -25,7 +25,7 @@ The coordinator's edits were mechanical:
 | UH-1 headless F2 3→4 (`uh1/`, run `20261015-112435`) | **PASS**, 7/7 arms and every cross-check (see details below) |
 | UH-2 existing regressions (`uh2-mo.log`, `uh2-hb.log`) | **PASS** (see details below) |
 | UH-3 Stage B composition | **Not run here.** Stage B (`claude/stage-b-implementation`, unpushed) lands second. Per plan §5 it rebases, recomputes all six pins plus the detach-experiment served SHAs, and re-runs UH-0, the UH-1 candidate arm with continuity on, and the full suites. Main's own continuity-on path is exercised by the owner-eye step. |
-| UH-4 owner eye, old F2 3→4 on the product path | **Pending (owner).** |
+| UH-4 owner eye, old F2 3→4 | **PASS (owner, 2026-10-15).** Old F2 export, texture-repaired data, Chrome via a local server: stock player shows the two small duplicate maps after 3→4; fixed (`patch_rendering`, `ecff39e1…`) does not; Malaysia map and slide-4 build correct. A first pair built from the raw (unrepaired) export showed the Asia texture on slide 4's Malaysia leaf: that is #280's texture collision, not this fix. The live path was covered headlessly in UH-1. |
 | Full suites on the merged tree (main `6914e169` + branch) | **PASS** (see details below) |
 
 ### UH-0 methods and pins
