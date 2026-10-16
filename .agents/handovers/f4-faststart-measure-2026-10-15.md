@@ -190,6 +190,7 @@ It no longer waits for slide 3.
   - a decision on decks with no H.264 movie, or only VP9: does a WebM warm-up also warm the pipeline? Not measured.
 
 **Owner decision (2026-10-15, ~22:30): agrees with the recommendation.**
+**Landed:** the deck-load warm-up merged into `claude/stage-b-arch` as #295 (plan `.agents/plans/keynote_live_movie_warmup.plan.md`).
 - Take the deck-load movie warm-up forward as a product change.
 - No faststart remux.
 - Implementation goes through the normal plan → critique → implement → review roster. The two pre-adoption checks
