@@ -29,7 +29,11 @@
 New row `pin-rounded-canvases`:
 - **RED on 302c218d:** `landed` False, `1 failed, 5 passed`.
 - **GREEN on the fix:** 6 passed. With the targeted `hidden_ride|find_movie_canvas` selection, 8 passed.
-- **Full suites (3.12 + 3.10 floor): NOT RUN YET.** This is the first item to resume.
+- **Full suites, 2026-10-16 at 91cfaf50 (machine load 34–65 from a macOS update, not from any test job):**
+  - 3.12: `1 failed, 11230 passed, 38 skipped, 1 xfailed`. The single failure passed on `--lf`.
+  - 3.10 floor: `1 failed, 11230 passed, 38 skipped, 1 xfailed`. The failure was
+    `test_run_gates.py::test_the_settle_wait_never_sleeps_past_its_deadline` (a wall-clock check: 5.9 s against 4.5 s),
+    which passed 3/3 when re-run alone. This fix does not touch `run_gates` or its tests.
 
 ## Headless A/B
 Setup:
@@ -83,9 +87,7 @@ arm); `labelsOverFeed` True; ambiguous ×4 / remount-done ×4 / departure-interi
 - D2 and D5 positive host arms: **pass** on both A and B.
 
 ## Not done (resume here)
-1. **Full suites on 3.12 and the 3.10 floor.** Run them with a machine window, including test_live_gl_replay_js,
-   test_detach_experiment and test_live_host.
-2. **Optional r2 low:** the doc line's two parentheticals in a row. It changes the sha; fold it only with another re-pin.
-3. **Owner decision (spec step 5, untouched by this fix):** in every arm, decoders ride on body#body during the scene-9/13
+1. **Optional r2 low:** the doc line's two parentheticals in a row. It changes the sha; fold it only with another re-pin.
+2. **Owner decision (spec step 5, untouched by this fix):** in every arm, decoders ride on body#body during the scene-9/13
    transitions, and `noRiderAboveCanvas` is False on b5to6 and b7to8-wa0121. The Restructure session is asking the owner.
-4. **Live check by the owner in Q7 attempt 4:** the slide 8–9 videos keep moving and the labels stay on top.
+3. **Live check by the owner in Q7 attempt 4:** the slide 8–9 videos keep moving and the labels stay on top.

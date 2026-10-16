@@ -12,7 +12,7 @@ after this commit.
   after its C6 lands. It handles the `scripts/detach_experiment.py` overlap with its uncommitted C6 hunks; ours touches
   only line 76.
 
-**Next, in order:**
+**Next, in order:** (steps 1–3 done 2026-10-16; the tallies are in the gate record)
 1. Ask the linked sessions for a "need window".
 2. Run the full suites: `env -u PYTHONDONTWRITEBYTECODE uv run pytest tests/ -n auto --dist worksteal` on 3.12, then on the
    3.10 floor venv (see `.agents/skills/obed-edom/SKILL.md`). Send "done" afterwards.
