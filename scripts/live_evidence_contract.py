@@ -687,6 +687,10 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
         yield f"mmFeed:object at {path}"
         return
     version = value.get("version")
+    config = value.get("config")
+    counter_layout = config.get("counterLayout") if isinstance(config, dict) else None
+    counter_blocks = counter_layout.get("blockRects") if isinstance(counter_layout, dict) else None
+    strict_counter = isinstance(config, dict) and "counterLayout" in config
     if value.get("kind") != "mm-feed" or version not in (1, 2):
         yield f"mmFeed:version at {path}"
     lists = ("contexts", "frames", "media", "mediaDropped", "artwork", "errors", "killedOnce", "uploads", "claims", "standDowns", "departures")
@@ -699,6 +703,59 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
         yield f"mmFeed.mediaOverflow at {path}"
     if value.get("callbackCostP95Ms") is not None and not (_finite(value.get("callbackCostP95Ms")) and value["callbackCostP95Ms"] >= 0):
         yield f"mmFeed.callbackCostP95Ms at {path}"
+    if strict_counter:
+        if not isinstance(counter_layout, dict):
+            yield f"mmFeed.counterLayout:object at {path}.config.counterLayout"
+        else:
+            yield from _fields(counter_layout, "mmFeed.counterLayout", f"{path}.config.counterLayout", {
+                "format": lambda v: v == "binary-counter-v1",
+                "sourceSize": lambda v: isinstance(v, list) and len(v) == 2 and all(_count(n) for n in v),
+                "blockRects": lambda v: isinstance(v, list) and bool(v) and all(
+                    isinstance(rect, list) and len(rect) == 4 and all(_finite(n) for n in rect) for rect in v
+                ),
+                "dataBits": _id,
+                "start": lambda v: isinstance(v, list) and bool(v) and all(n in (0, 1) for n in v),
+                "end": lambda v: isinstance(v, list) and bool(v) and all(n in (0, 1) for n in v),
+                "parity": lambda v: v == "even",
+                "minContrast": lambda v: _finite(v) and v > 0,
+                "ambiguousRatio": lambda v: _finite(v) and 0 <= v < .5,
+            })
+            if isinstance(counter_blocks, list) and isinstance(counter_layout.get("start"), list) \
+                    and isinstance(counter_layout.get("end"), list) and _id(counter_layout.get("dataBits")) \
+                    and len(counter_blocks) != len(counter_layout["start"]) + counter_layout["dataBits"] + 1 \
+                    + len(counter_layout["end"]):
+                yield f"mmFeed.counterLayout.blockRects at {path}.config.counterLayout"
+        sampling = value.get("sampling")
+        if not isinstance(sampling, dict):
+            yield f"mmFeed.sampling:object at {path}"
+        else:
+            yield from _fields(sampling, "mmFeed.sampling", f"{path}.sampling", {
+                "width": lambda v: v == 192,
+                "referenceCapacity": lambda v: v == 18,
+                "entries": lambda v: isinstance(v, dict),
+            })
+            sampling_entries = sampling.get("entries") if isinstance(sampling.get("entries"), dict) else {}
+            reasons = (None, "bounds", "marker", "ambiguous", "parity", "layout", "read", "source")
+            for entry_id, entry in sampling_entries.items():
+                where = f"{path}.sampling.entries[{entry_id!r}]"
+                if not isinstance(entry, dict):
+                    yield f"mmFeed.sampling.entry:object at {where}"
+                else:
+                    yield from _fields(entry, "mmFeed.sampling.entry", where, {
+                        "references": lambda v: _count(v) and v <= 18,
+                        "latestFrame": lambda v: v is None or _count(v),
+                        "latestCounter": lambda v: v is None or _count(v),
+                        "latestLevels": lambda v: isinstance(v, list) and all(_finite(level) for level in v),
+                        "latestReason": lambda v: v in reasons,
+                    })
+                    levels, reason = entry.get("latestLevels"), entry.get("latestReason")
+                    if isinstance(levels, list) and isinstance(counter_blocks, list) \
+                            and len(levels) != len(counter_blocks) \
+                            and not (not levels and (
+                                reason in ("bounds", "layout", "read", "source")
+                                or entry.get("references") == 0 and entry.get("latestFrame") is None and reason is None
+                            )):
+                        yield f"mmFeed.sampling.entry.latestLevels at {where}"
     contexts_by_serial = {}
     for index, context in enumerate(value.get("contexts") or []):
         where = f"{path}.contexts[{index}]"
@@ -766,6 +823,24 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                 yield from _fields(read, "mmFeed.feedRead", f"{rwhere}.feedRead", {
                     key: lambda v: v is None or _finite(v) for key in fields
                 })
+                if strict_counter and read.get("kind") in ("counter", "alpha"):
+                    reasons = (None, "bounds", "marker", "ambiguous", "parity", "layout", "read", "source")
+                    yield from _fields(read, "mmFeed.feedRead", f"{rwhere}.feedRead", {
+                        "referenceCounter": lambda v: v is None or _count(v),
+                        "referenceLevels": lambda v: isinstance(v, list) and all(_finite(level) for level in v),
+                        "referenceReason": lambda v: v in reasons,
+                    })
+                    if read.get("kind") == "counter":
+                        yield from _fields(read, "mmFeed.feedRead", f"{rwhere}.feedRead", {
+                            "counterLevels": lambda v: isinstance(v, list) and all(_finite(level) for level in v),
+                            "counterReason": lambda v: v in reasons,
+                        })
+                    for prefix in ("counter", "reference"):
+                        levels = read.get(f"{prefix}Levels")
+                        reason = read.get(f"{prefix}Reason")
+                        if isinstance(levels, list) and isinstance(counter_blocks, list) \
+                                and len(levels) != len(counter_blocks) and not (not levels and reason in ("bounds", "layout", "read", "source")):
+                            yield f"mmFeed.feedRead.{prefix}Levels at {rwhere}.feedRead"
                 if read.get("kind") is None and read.get("late") is not True:
                     yield f"mmFeed.feedRead.late at {rwhere}.feedRead"
             match = row.get("holdMatch")

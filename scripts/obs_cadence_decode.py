@@ -66,8 +66,6 @@ SEARCH_SAMPLES = 40
 BINARY_SEARCH_PX = 8
 FIT_GRID = np.linspace(-0.6, 1.2, 181)
 COUNTERS = ("grey", "binary")
-BINARY_MIN_CONTRAST = 128
-BINARY_AMBIGUOUS = 0.25
 AUTO_BINARY_MIN = 0.5
 
 
@@ -112,26 +110,16 @@ def decode_window(window: np.ndarray, offset: tuple[int, int], roi: tuple[int, i
 def read_strip(frame: np.ndarray, origin: tuple[float, float], scale: float) -> tuple[int | None, str]:
     """(frame index, "ok") off the binary strip at `origin` (output px of the movie's top-left) and `scale`, else
     (None, "bounds" | "marker" | "ambiguous" | "parity")."""
-    half = max(1, int(binary.BLOCK * scale / 4))
+    counter_layout = binary.layout()
+    half = max(1, int(counter_layout["block"] * scale / 4))
     levels = []
-    for bx, by, bw, bh in binary.BLOCK_RECTS:
+    for bx, by, bw, bh in counter_layout["blockRects"]:
         cx, cy = int(round(origin[0] + (bx + bw / 2) * scale)), int(round(origin[1] + (by + bh / 2) * scale))
         if cx - half < 0 or cy - half < 0 or cx + half >= frame.shape[1] or cy + half >= frame.shape[0]:
             return None, "bounds"
         levels.append(float(frame[cy - half:cy + half + 1, cx - half:cx + half + 1, :3].mean()))
-    markers = list(zip(binary.START + binary.END, levels[:len(binary.START)] + levels[-len(binary.END):]))
-    whites, blacks = [v for bit, v in markers if bit], [v for bit, v in markers if not bit]
-    if min(whites) - max(blacks) < BINARY_MIN_CONTRAST:
-        return None, "marker"
-    white, black = float(np.mean(whites)), float(np.mean(blacks))
-    threshold = (white + black) / 2
-    coded = levels[len(binary.START):-len(binary.END)]
-    if any(abs(v - threshold) < BINARY_AMBIGUOUS * (white - black) for v in coded):
-        return None, "ambiguous"
-    bits = [int(v > threshold) for v in coded]
-    if sum(bits) % 2:
-        return None, "parity"
-    return int("".join(map(str, bits[:-1])), 2), "ok"
+    decoded = binary.decode_counter(levels, counter_layout)
+    return decoded["counter"], decoded["reason"] or "ok"
 
 
 def strip_window(frame: np.ndarray, geometry: Geometry = MOVIE_GEOMETRY, margin: int = BINARY_SEARCH_PX) -> np.ndarray:

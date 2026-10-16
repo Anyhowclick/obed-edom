@@ -26,6 +26,7 @@ for sub in ("scripts", "src"):
     if str(REPO / sub) not in sys.path:
         sys.path.insert(0, str(REPO / sub))
 
+import binary_counter_movie as binary_counter  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
 from obed_edom import p2_verdict  # noqa: E402
 
@@ -419,6 +420,62 @@ def test_v2_mm_feed_report_accepts_only_empty_unbound_gl_contexts() -> None:
     assert "mmFeed.frame.atScene at mmFeedEvidence.frames[0]" in contract.first_errors(
         contract.mm_feed_report(report), limit=20,
     )
+
+
+def test_v2_counter_sampling_diagnostics_co_land_with_the_layout() -> None:
+    report = _mm_feed_report()
+    report.update(version=2, browserFrames=[{"index": 0, "timestamp": 2.0}], handbacks=[])
+    report["contexts"][0].update(closedAt=None, closedFrameIndex=None)
+    report["frames"][0].update(frameIndex=0, frameTimestamp=2.0)
+    report["departures"][0].update(generation=1, visit=1)
+    report["config"]["counterLayout"] = binary_counter.layout()
+    levels = [255.0 if bit else 0.0 for bit in binary_counter.strip_bits(12)]
+    report["sampling"] = {"width": 192, "referenceCapacity": 18, "entries": {
+        "carry-a": {"references": 18, "latestFrame": 12, "latestCounter": 12,
+                    "latestLevels": levels, "latestReason": None},
+    }}
+    read = report["frames"][0]["rows"][0]["feedRead"]
+    read.update(
+        referenceCounter=None, referenceLevels=list(levels), referenceReason="marker",
+    )
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    report["sampling"]["entries"]["carry-a"] = {
+        "references": 0, "latestFrame": None, "latestCounter": None, "latestLevels": [], "latestReason": None,
+    }
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    report["sampling"]["entries"]["carry-a"] = {
+        "references": 18, "latestFrame": 12, "latestCounter": 12,
+        "latestLevels": levels, "latestReason": None,
+    }
+    read.update(kind="counter", counter=12, referenceCounter=12, counterLevels=list(levels), counterReason=None,
+                referenceReason=None)
+    for key in ("dVideo", "dPoster", "dSep"):
+        read.pop(key)
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    read["counterLevels"] = []
+    read["counterReason"] = "bounds"
+    read["counter"] = None
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    read.pop("referenceLevels")
+    assert "mmFeed.feedRead.referenceLevels:missing" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(report)
+    ]
+    report["config"]["counterLayout"] = None
+    assert "mmFeed.counterLayout:object" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(report)
+    ]
+
+
+def test_v2_replay_without_counter_layout_keeps_the_legacy_contract() -> None:
+    report = _mm_feed_report()
+    report.update(version=2, browserFrames=[], handbacks=[])
+    report["contexts"][0].update(atScene=None, entryIds=[], closedAt=None, closedFrameIndex=None)
+    report["departures"][0].update(generation=1, visit=1)
+    report["frames"][0].update(
+        atScene=None, rows=[], labels=[], riders=[], labelExpected=[], frameIndex=0, frameTimestamp=2.0,
+    )
+    assert "sampling" not in report
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
 
 
 @pytest.mark.parametrize(("mutate", "clause"), [
