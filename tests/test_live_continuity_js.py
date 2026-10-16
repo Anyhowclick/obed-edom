@@ -4015,7 +4015,7 @@ a.pause();
 a.__inStage = false;
 detach(a);
 a.parentElement = null;
-  const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once,
+const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once,
     rect: {{left: a.style.left, top: a.style.top, width: a.style.width, height: a.style.height}},
   parent: a.parentNode === sourceRoot ? 'source-root' : a.parentNode === bodyEl ? 'body' : 'other',
   order: sourceRoot.kids.map((node) => node.id || node.__obedInstance)}};
@@ -4110,12 +4110,15 @@ def test_startup_moved_decoder_restores_source_placement_after_the_first_draw(mo
 
     monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variants.variant_core("startup-moved-decoder"))
     result = _departure_hide("continuous")
+    assert result["beforeDraw"]["parent"] == "body"
+    assert result["beforeDraw"]["opacity"] == "1"
     assert result["beforeDraw"]["rect"] == {
         "left": "108px", "top": "200px", "width": "300px", "height": "150px",
     }
     assert {key: float(value.removesuffix("px")) for key, value in result["afterRect"].items()} == pytest.approx(
         {"left": 100, "top": 200, "width": 300, "height": 150}, abs=.01,
     )
+    assert result["afterCallback"] == "0"
     assert result["onBody"] is True
 
 

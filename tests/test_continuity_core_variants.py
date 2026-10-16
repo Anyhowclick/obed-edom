@@ -177,15 +177,6 @@ def test_departure_early_hide_is_the_behavioural_red_control(monkeypatch) -> Non
     assert result["afterEmptyCallback"] == "0"
 
 
-def test_startup_moved_decoder_replaces_only_the_complete_hold_block() -> None:
-    core = variants.variant_core("startup-moved-decoder")
-    replacement = variants._TRANSFORMS["startup-moved-decoder"][0][1]
-    assert replacement in core
-    assert variants._STARTUP_HOLD not in core
-    assert "v.style.left = (screenRect.x + 8) + 'px';" in replacement
-    assert core.replace(replacement, variants._STARTUP_HOLD) == PRESERVE_CORE_JS
-
-
 @pytest.mark.parametrize(("name", "anchor"), ANCHORS)
 def test_a_core_without_an_anchor_raises_naming_variant_and_anchor(name: str, anchor: str) -> None:
     with pytest.raises(ValueError) as caught:

@@ -56,8 +56,10 @@ _STARTUP_HOLD = """    if (waitForGl && (document.contains(v) || departureInteri
 _STARTUP_MOVED_DECODER = """    if (waitForGl && (document.contains(v) || departureInterimPlace(v, boundary))) {
       const screenRect = toScreen(boundary.src.rect);
       if (screenRect) {
-        beginMove(v);
-        if (v.parentNode !== stage) stage.appendChild(v);
+        if (v.parentNode !== stage) {
+          beginMove(v);
+          stage.appendChild(v);
+        }
         v.style.left = (screenRect.x + 8) + 'px';
         v.style.top = screenRect.y + 'px';
         v.style.width = screenRect.w + 'px';

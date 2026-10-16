@@ -623,8 +623,7 @@ def _visit_record(
                        and frame["draws"] > 0), None)
     first_draw_at = move.get("firstDrawAt")
     pre_draw_ms = float(first_draw_at) - float(move_frames[0]["t"]) \
-        if first_draw is not None and _finite(first_draw_at) and first_draw_at >= first_draw["t"] \
-        and first_draw["t"] >= move_frames[0]["t"] else None
+        if first_draw is not None and _finite(first_draw_at) and first_draw_at >= first_draw["t"] else None
     prefix_geometry = all(
         len(group) == 1 and _finite(group[0].get("sourceRectError"))
         and 0 <= group[0]["sourceRectError"] <= SOURCE_RECT_TOLERANCE_PX

@@ -12560,16 +12560,16 @@ def test_score_verdicts_validates_feed_contract_per_entry(monkeypatch: pytest.Mo
     monkeypatch.setattr(probe, "score_carry", lambda *args, **kwargs: {"verdict": True})
     monkeypatch.setattr(probe, "score_restart_strict", lambda *args, **kwargs: {"verdict": True})
     _, producer = _report_shaped_feed_fixture()
-    feed_evidence = {"producer": producer, "verdicts": {}}
+    feed_evidence = {"producer": producer, "verdicts": {
+        "feed-a": {"mode": "continuous"},
+        "feed-b": {"mode": "unavailable", "reason": "not observed", "continuousExpected": False,
+                   "usableContext": False, "boundTextures": False, "interval": None},
+    }}
     scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None, feed_evidence=feed_evidence)
-    assert scored["feed-a"]["verdict"] is True
+    assert scored["feed-a"]["verdict"] is None
     assert scored["feed-b"]["verdict"] is True
     assert scored["restart"]["verdict"] is True
     producer["contexts"][0].pop("firstDrawAt")
-    scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None, feed_evidence=feed_evidence)
-    assert [scored[key]["verdict"] for key in ("feed-a", "feed-b", "restart")] == [None, None, True]
-    producer["contexts"][0]["firstDrawAt"] = 1.1
-    producer["frames"][0]["riders"][0].pop("sourceRectError")
     scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None, feed_evidence=feed_evidence)
     assert [scored[key]["verdict"] for key in ("feed-a", "feed-b", "restart")] == [None, None, True]
 

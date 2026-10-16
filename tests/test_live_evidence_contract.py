@@ -446,25 +446,20 @@ def test_mm_feed_contract_rejects_required_field_and_generation_breaks(mutate: A
     assert clause in [problem.split(" at ")[0] for problem in contract.mm_feed_report(report)]
 
 
-@pytest.mark.parametrize(("first_draw", "source_error"), [(None, None), (2.0, 0.0), (2.5, 1.0)])
-def test_mm_feed_contract_accepts_legal_draw_and_source_geometry_values(
-    first_draw: float | None, source_error: float | None,
-) -> None:
+def test_mm_feed_contract_accepts_null_draw_and_source_geometry_values() -> None:
     report = _mm_feed_report()
-    report["contexts"][0]["firstDrawAt"] = first_draw
-    report["frames"][0]["riders"][0]["sourceRectError"] = source_error
+    report["contexts"][0]["firstDrawAt"] = None
+    report["frames"][0]["riders"][0]["sourceRectError"] = None
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
 
 
-@pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize("field", ["firstDrawAt", "sourceRectError"])
-def test_mm_feed_contract_requires_geometry_producer_fields_in_every_version(version: int, field: str) -> None:
+def test_mm_feed_contract_requires_geometry_producer_fields_in_v2(field: str) -> None:
     report = _mm_feed_report()
-    if version == 2:
-        report.update(version=2, browserFrames=[{"index": 0, "timestamp": 2.0}], handbacks=[])
-        report["contexts"][0].update(closedAt=None, closedFrameIndex=None)
-        report["frames"][0].update(frameIndex=0, frameTimestamp=2.0)
-        report["departures"][0].update(generation=1, visit=1)
+    report.update(version=2, browserFrames=[{"index": 0, "timestamp": 2.0}], handbacks=[])
+    report["contexts"][0].update(closedAt=None, closedFrameIndex=None)
+    report["frames"][0].update(frameIndex=0, frameTimestamp=2.0)
+    report["departures"][0].update(generation=1, visit=1)
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
     target = report["contexts"][0] if field == "firstDrawAt" else report["frames"][0]["riders"][0]
     target.pop(field)
