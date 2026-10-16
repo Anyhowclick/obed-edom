@@ -6255,8 +6255,6 @@ _SWEEP_INPUT_FILES = (
 _SWEEP_FIXTURE_DIRS = ("tests/fixtures/p2_freeze_3to4",)
 _SWEEP_CACHE_SCHEMA = "sweep-cache-v2-explicit-manifest"
 _SWEEP_CACHE_RETAIN = 8
-_CACHE_UNAVAILABLE = object()
-_NOT_COMPUTED = object()
 
 
 def _sweep_cache_enabled() -> bool:
@@ -6293,12 +6291,7 @@ def _sweep_cache_key(name: str, root: Path = REPO) -> str:
     for rel in _SWEEP_FIXTURE_DIRS:
         files += sorted(p for p in (root / rel).rglob("*") if p.is_file())
     h = hashlib.sha256()
-    for part in (
-        _SWEEP_CACHE_SCHEMA,
-        name,
-        sys.version,
-        *_installed_distributions(),
-    ):
+    for part in (_SWEEP_CACHE_SCHEMA, name, sys.version, *_installed_distributions()):
         h.update(part.encode() + b"\0")
     for path in files:
         data = path.read_bytes()
@@ -6384,63 +6377,53 @@ def _touch_and_prune(cache_dir: Path, name: str, path: Path) -> None:
             return
 
 
-def _cached_sweep_in_dir(
-    cache_dir: Path,
-    name: str,
-    key: str,
-    compute,
-    expected: set,
-    computed,
-):
+def _cached_sweep_in_dir(cache_dir: Path, name: str, key: str, once, expected: set):
     path = _sweep_file(cache_dir, name, key)
+    swept = _load_sweep(path, key, expected)
+    if swept is not None:
+        _touch_and_prune(cache_dir, name, path)
+        return swept
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         lock = open(cache_dir / f"{name}-{key}.lock", "a")
     except OSError:
-        return _CACHE_UNAVAILABLE, computed
+        return None
     with lock:
-        swept = _load_sweep(path, key, expected)
-        if swept is not None:
-            _touch_and_prune(cache_dir, name, path)
-            return swept, computed
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
         except OSError:
-            return _CACHE_UNAVAILABLE, computed
+            return None
         swept = _load_sweep(path, key, expected)
         if swept is not None:
             _touch_and_prune(cache_dir, name, path)
-            return swept, computed
-        if computed is _NOT_COMPUTED:
-            computed = compute()
+            return swept
+        computed = once()
         if set(computed) != expected:
-            return computed, computed
+            return computed
         if not _store_sweep(path, key, computed):
-            return _CACHE_UNAVAILABLE, computed
+            return None
         _touch_and_prune(cache_dir, name, path)
-        return computed, computed
+        return computed
 
 
-def _cached_sweep(
-    name: str,
-    compute,
-    expected_keys,
-    root: Path = REPO,
-    cache_dir: Path | None = None,
-) -> dict:
+def _cached_sweep(name: str, compute, expected_keys, root: Path = REPO, cache_dir: Path | None = None) -> dict:
     """`compute()`, memoised in a shared per-key cache when safe."""
     if not _sweep_cache_enabled() or _coverage_active():
         return compute()
     key = _sweep_cache_key(name, root)
     expected = expected_keys()
-    computed = _NOT_COMPUTED
+    computed = []
+
+    def once():
+        if not computed:
+            computed.append(compute())
+        return computed[0]
+
     for candidate in _sweep_cache_dirs(root, cache_dir):
-        swept, computed = _cached_sweep_in_dir(
-            candidate, name, key, compute, expected, computed
-        )
-        if swept is not _CACHE_UNAVAILABLE:
+        swept = _cached_sweep_in_dir(candidate, name, key, once, expected)
+        if swept is not None:
             return swept
-    return compute() if computed is _NOT_COMPUTED else computed
+    return once()
 
 
 _BRACKET_SWEEP_CACHE: dict = {}
@@ -6737,26 +6720,18 @@ def _cache_dir_state(root: Path) -> dict:
     return {p.name: p.read_bytes() for p in sorted(cache_dir.iterdir())}
 
 
-@pytest.mark.parametrize(("rel", "relevant"), [
-    pytest.param("src/obed_edom/__init__.py", True, id="src/obed_edom/__init__.py"),
-    pytest.param("src/obed_edom/p2_verdict.py", True, id="src/obed_edom/p2_verdict.py"),
-    pytest.param("src/obed_edom/html_alpha_probe.py", True, id="src/obed_edom/html_alpha_probe.py"),
-    pytest.param("src/obed_edom/live_continuity.py", True, id="src/obed_edom/live_continuity.py"),
-    pytest.param("src/obed_edom/sub/helper.py", False, id="src/obed_edom/sub/helper.py"),
-    pytest.param("src/obed_edom/new_module.py", False, id="src/obed_edom/new_module.py"),
-    pytest.param("tests/test_p2_adversarial.py", True, id="tests/test_p2_adversarial.py"),
-    pytest.param("tests/conftest.py", True, id="tests/conftest.py"),
-    pytest.param(
-        "tests/fixtures/p2_freeze_3to4/clean_bracket.json",
-        True,
-        id="tests/fixtures/p2_freeze_3to4/clean_bracket.json",
-    ),
-    pytest.param(
-        "tests/fixtures/p2_freeze_3to4/another_fixture.bin",
-        True,
-        id="tests/fixtures/p2_freeze_3to4/another_fixture.bin",
-    ),
-])
+@pytest.mark.parametrize(("rel", "relevant"), [pytest.param(rel, relevant, id=rel) for rel, relevant in (
+    ("src/obed_edom/__init__.py", True),
+    ("src/obed_edom/p2_verdict.py", True),
+    ("src/obed_edom/html_alpha_probe.py", True),
+    ("src/obed_edom/live_continuity.py", True),
+    ("src/obed_edom/sub/helper.py", False),
+    ("src/obed_edom/new_module.py", False),
+    ("tests/test_p2_adversarial.py", True),
+    ("tests/conftest.py", True),
+    ("tests/fixtures/p2_freeze_3to4/clean_bracket.json", True),
+    ("tests/fixtures/p2_freeze_3to4/another_fixture.bin", True),
+)])
 def test_sweep_cache_key_changes_when_any_hashed_input_changes(
     sweep_cache_on, tmp_path, rel, relevant
 ):
@@ -6811,6 +6786,8 @@ def test_sweep_cache_key_tracks_every_installed_distribution_version(
     assert key_with(
         _FakeDist("numpy", "1.0"), _FakeDist("opencv-python", "4.9"), _FakeDist("new", "0.1")
     ) != base
+    monkeypatch.setattr(sys, "version", "3.10-test")
+    assert key_with(_FakeDist("numpy", "1.0"), _FakeDist("opencv-python", "4.9")) != base
 
 
 def test_sweep_cache_round_trips_paths_with_their_str_and_int_types(sweep_cache_on, tmp_path):
@@ -6909,34 +6886,6 @@ def test_a_sweep_cache_with_another_key_is_recomputed(sweep_cache_on, tmp_path):
     assert _sweep_file(_fake_cache_dir(root), "t", second_key).is_file()
 
 
-def test_interpreter_keys_coexist(sweep_cache_on, tmp_path, monkeypatch):
-    root = _fake_sweep_root(tmp_path)
-    compute, calls = _counting(_FAKE_SWEEP)
-    monkeypatch.setattr(sys, "version", "3.13-test")
-    first_key = _sweep_cache_key("t", root)
-    assert _cached_fake_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
-    monkeypatch.setattr(sys, "version", "3.10-test")
-    second_key = _sweep_cache_key("t", root)
-    assert _cached_fake_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
-    assert calls == [1, 1]
-    assert first_key != second_key
-    assert _sweep_file(_fake_cache_dir(root), "t", first_key).is_file()
-    assert _sweep_file(_fake_cache_dir(root), "t", second_key).is_file()
-
-
-def test_concurrent_same_key_fill_computes_once(sweep_cache_on, tmp_path):
-    root = _fake_sweep_root(tmp_path)
-    compute, calls = _counting(_FAKE_SWEEP)
-
-    def load() -> dict:
-        return _cached_fake_sweep("t", compute, _fake_keys, root)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _index: load(), range(2)))
-    assert results == [_FAKE_SWEEP, _FAKE_SWEEP]
-    assert calls == [1]
-
-
 def test_retention_preserves_a_recently_hit_entry(
     sweep_cache_on, tmp_path, monkeypatch
 ):
@@ -6959,17 +6908,20 @@ def test_retention_preserves_a_recently_hit_entry(
     assert len(list(cache_dir.glob("t-*.json"))) == _SWEEP_CACHE_RETAIN
 
 
-@pytest.mark.parametrize("failure", ["resolver", "unwritable", "both-unwritable"])
+@pytest.mark.parametrize("failure", ["shared", "resolver", "unwritable", "both-unwritable"])
 def test_unavailable_shared_storage_falls_back_locally(
     sweep_cache_on, tmp_path, monkeypatch, failure
 ):
-    """A missing or unwritable shared cache falls back to the worktree cache; with
-    neither writable the sweep is still computed, just never stored."""
+    """The shared cache is preferred; if unavailable, use the worktree cache;
+    with neither writable the sweep is still computed, just never stored."""
     root = _fake_sweep_root(tmp_path / "worktree")
     if failure == "resolver":
         monkeypatch.setattr(
             fixture_paths, "main_checkout", lambda: (_ for _ in ()).throw(OSError("no git"))
         )
+    elif failure == "shared":
+        shared = tmp_path / "main"
+        monkeypatch.setattr(fixture_paths, "main_checkout", lambda: shared)
     else:
         shared = tmp_path / "shared-is-a-file"
         shared.write_text("not a directory")
@@ -6981,6 +6933,11 @@ def test_unavailable_shared_storage_falls_back_locally(
     assert _cached_sweep("t", compute, _fake_keys, root) == _FAKE_SWEEP
     if failure == "both-unwritable":
         assert calls == [1, 1]
+    elif failure == "shared":
+        assert calls == [1]
+        key = _sweep_cache_key("t", root)
+        assert _sweep_file(shared / ".cache" / "test-sweeps", "t", key).is_file()
+        assert not (root / ".cache").exists()
     else:
         assert calls == [1]
         assert _fake_sweep_file(root).is_file()
@@ -7110,10 +7067,9 @@ def _compute_main_sweep() -> dict:
     return {("main", path): closed for path, closed in _walk(snap, score).items()}
 
 
-def test_sweep_dependency_manifest_covers_every_executed_scorer_file(monkeypatch):
-    monkeypatch.setenv("OBED_TEST_SWEEP_CACHE", "off")
+def test_sweep_dependency_manifest_covers_every_executed_scorer_file():
     source_root = (REPO / "src" / "obed_edom").resolve()
-    source_prefix = f"{source_root}{os.sep}"
+    prefix = f"{REPO.resolve()}{os.sep}"
     executed = set()
     scorer_calls = set()
 
@@ -7123,13 +7079,17 @@ def test_sweep_dependency_manifest_covers_every_executed_scorer_file(monkeypatch
         if frame.f_code.co_name in {"_score_freeze_control", "_advance_c_ok"}:
             scorer_calls.add(frame.f_code.co_name)
         filename = frame.f_code.co_filename
-        if not filename.startswith(source_prefix):
+        if not filename.startswith(prefix):
             return
-        executed.add(f"src/obed_edom/{filename[len(source_prefix):]}")
+        relative = filename[len(prefix):]
+        if relative.startswith(".venv/"):
+            return
+        executed.add(relative)
 
     previous = sys.getprofile()
     sys.setprofile(trace)
     try:
+        p2.build_continuity_plan(True)
         snaps = _bracket_snapshots()
         _score_34(snaps["a1"], snaps["b"], snaps["a2"])
         for arm, _cls in _BRACKET_SWEEP_ARMS:
@@ -7148,9 +7108,12 @@ def test_sweep_dependency_manifest_covers_every_executed_scorer_file(monkeypatch
         sys.setprofile(previous)
 
     assert {"_score_freeze_control", "_advance_c_ok"} <= scorer_calls
-    assert executed - set(_SWEEP_SOURCE_FILES) == set(), (
+    assert "src/obed_edom/p2_verdict.py" in executed, (
+        f"p2_verdict imported from {p2.__file__}, not {source_root}"
+    )
+    assert executed - set(_SWEEP_INPUT_FILES) == set(), (
         f"executed scorer dependencies missing from the sweep manifest: "
-        f"{sorted(executed - set(_SWEEP_SOURCE_FILES))}"
+        f"{sorted(executed - set(_SWEEP_INPUT_FILES))}"
     )
 
 

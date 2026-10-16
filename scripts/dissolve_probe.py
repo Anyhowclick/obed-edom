@@ -1967,11 +1967,7 @@ def texture_classes(A: np.ndarray, B: np.ndarray) -> dict[str, np.ndarray]:
     return {"out": (aA == 255) & (aB == 0) & keep, "in": (aA == 0) & (aB == 255) & keep, "overlap": (aA == 255) & (aB == 255) & keep}
 
 
-def far_mask(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    return _far_mask(premul(A), premul(B))
-
-
-def _far_mask(Ap: np.ndarray, Bp: np.ndarray) -> np.ndarray:
+def far_mask(Ap: np.ndarray, Bp: np.ndarray) -> np.ndarray:
     return np.abs(Ap - Bp)[..., :3].sum(axis=2) > OVERLAP_DIFF_MIN
 
 
@@ -1999,30 +1995,25 @@ def over(top: np.ndarray, bottom: np.ndarray) -> np.ndarray:
 
 
 def _prepare_fit(A: np.ndarray, B: np.ndarray, keep: np.ndarray,
-                 screen: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+                 screen: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, np.ndarray, np.ndarray, float]:
     Ap, Bp = premul(A), premul(B)
     if screen:
         Ap, Bp = Ap[..., :3], Bp[..., :3]
     d = (Bp - Ap)[keep]
     fit = np.abs(d).sum(axis=1) > FIT_DIFF_MIN
     den = float((d[fit] ** 2).sum())
-    return Ap, Bp, d, fit, den
+    return Ap, Bp, keep, screen, d, fit, den
 
 
-def _fit_frame(F: np.ndarray, keep: np.ndarray, screen: bool,
-               prepared: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]) -> tuple[float, float]:
-    Ap, Bp, d, fit, den = prepared
+def _fit_frame(F: np.ndarray, prepared: tuple[np.ndarray, np.ndarray, np.ndarray, bool, np.ndarray,
+                                              np.ndarray, float]) -> tuple[float, float]:
+    Ap, Bp, keep, screen, d, fit, den = prepared
     Fp = F[..., :3].astype(np.float32) if screen else premul(F)
     if not den:
         return math.nan, math.nan
     e = float(((Fp - Ap)[keep][fit] * d[fit]).sum() / den)
     residual = np.abs(Fp - ((1 - e) * Ap + e * Bp))[keep]
     return e, float(residual.max()) if residual.size else math.nan
-
-
-def fit_frame(F: np.ndarray, A: np.ndarray, B: np.ndarray, keep: np.ndarray, *, screen: bool = False) -> tuple[float, float]:
-    """(e, max residual) of `F` against (1 - e)·A + e·B, premultiplied, on `keep`; screen pages compare RGB over black."""
-    return _fit_frame(F, keep, screen, _prepare_fit(A, B, keep, screen))
 
 
 def result(ok: bool | None, problems: Iterable[str] = (), *, report: bool = False, **detail: Any) -> dict[str, Any]:
@@ -2087,7 +2078,7 @@ def score_fade(frames: list[np.ndarray], A: np.ndarray, B: np.ndarray, *, exclud
     prepared = _prepare_fit(A, B, keep, screen)
     rows = []
     for F in frames:
-        e, res = _fit_frame(F, keep, screen, prepared)
+        e, res = _fit_frame(F, prepared)
         row: dict[str, Any] = {"e": e, "residual": res}
         if not screen:
             row.update({k: class_range(F, masks[k] & keep) for k in ("out", "in", "overlap")})
@@ -2749,7 +2740,7 @@ def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray],
             problems.append("no textures to qualify the reference states")
         else:
             p = {k: premul(v) for k, v in shots.items()}
-            far = _far_mask(premul(ev.A), premul(ev.B)) & _far_mask(p["A0"], p["B"])
+            far = far_mask(premul(ev.A), premul(ev.B)) & far_mask(p["A0"], p["B"])
             if int(far.sum()) < MIN_CLASS_PX:
                 problems.append(f"{int(far.sum())} px where both the textures and the A0/B captures differ < {MIN_CLASS_PX}")
             elif any(float(np.abs(p[a] - p[b])[far].max()) <= cal.tau for a, b in (("A0", "F50"), ("F50", "B"), ("A0", "B"))):
@@ -2868,7 +2859,7 @@ def score_hide(cast: list[dict[str, Any]], actions: Mapping[str, float], raf: li
         out["after_show"] = result(False, frames=len(after))
     else:
         prepared = _prepare_fit(A, B, keep, screen)
-        fits = [_fit_frame(c["img"], keep, screen, prepared) for c in after]
+        fits = [_fit_frame(c["img"], prepared) for c in after]
         if not all(number(e) and number(r) for e, r in fits):
             out["after_show"] = result(None, ["an after-show frame has no finite fit"])
         else:

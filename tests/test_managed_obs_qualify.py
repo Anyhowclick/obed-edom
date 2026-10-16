@@ -2692,14 +2692,10 @@ def test_placement_rescore_launch_matrix_and_dev_relocation(
         body, encoded = renderer_runs[name]
         return copy.deepcopy(body), encoded
 
-    def write_record(folder: Path, body: dict[str, Any], images: dict[str, np.ndarray | bytes] | None = None) -> None:
+    def write_record(folder: Path, body: dict[str, Any], images: dict[str, bytes] | None = None) -> None:
         folder.mkdir(parents=True, exist_ok=True)
         for name, image in (images or {}).items():
-            path = folder / f"{name}.png"
-            if isinstance(image, bytes):
-                path.write_bytes(image)
-            else:
-                Image.fromarray(image).save(path)
+            (folder / f"{name}.png").write_bytes(image)
         (folder / "record.json").write_text(json.dumps(body))
 
     def build(root: Path, rate: int, token: int, *, tier: str = "full", dev_profile: str | None = None,
