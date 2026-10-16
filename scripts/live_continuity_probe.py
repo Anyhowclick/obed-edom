@@ -2472,14 +2472,6 @@ def _wrap_seek_unowned(rows: list[dict[str, Any]], row: dict[str, Any], wrap_tim
     )
 
 
-def _visit_start(samples: list[dict[str, Any]], scene: float) -> float:
-    """The last row before `scene`'s own visit: the latest on a readable earlier scene (-inf if none)."""
-    return max(
-        (s["t"] for s in samples if (value := _finite_number(s.get("scene"))) is not None and value < scene),
-        default=-math.inf,
-    )
-
-
 def _carry_spec(
     asset: str, boundary_scene: float, transition_scene: float | None,
     spec: Mapping[str, Any] | None,
@@ -2493,24 +2485,25 @@ def _carry_spec(
     }
 
 
-def _legacy_carry_window(carry: Mapping[str, Any], element_id: Any = None) -> dict[str, Any] | None:
+def _legacy_carry_window(
+    carry: Mapping[str, Any], phases: paint_instrument.Phases | None = None, element_id: Any = None,
+) -> dict[str, Any] | None:
     crossing = carry.get("crossing")
     if not isinstance(crossing, Mapping):
         return None
-    decoded = carry.get("decodedStarts") if isinstance(carry.get("decodedStarts"), Mapping) else {}
-    grounded = decoded.get(element_id, decoded.get(str(element_id))) if element_id is not None else carry.get("candidateStart")
-    start, end = paint_instrument.window_bounds(carry, element_id) if element_id is not None else (None, None)
-    if element_id is None:
-        floors = []
-        for constraint in (carry.get("chainClip"), carry.get("forcedSeek")):
-            if isinstance(constraint, Mapping) and _finite_number(constraint.get("start")) is not None:
-                floors.append(float(constraint["start"]))
-        start = max([grounded, *floors]) if _finite_number(grounded) is not None else None
-        ends = [float(crossing["end"])]
-        clip = carry.get("chainClip")
-        if isinstance(clip, Mapping) and _finite_number(clip.get("end")) is not None:
-            ends.append(float(clip["end"]))
-        end = min(ends)
+    grounded = _finite_number(carry.get("groundedStart"))
+    floors = []
+    for constraint in (carry.get("chainClip"), carry.get("forcedSeek")):
+        if isinstance(constraint, Mapping) and _finite_number(constraint.get("start")) is not None:
+            floors.append(float(constraint["start"]))
+    start = max([grounded, *floors]) if grounded is not None else None
+    ends = [float(crossing["end"])]
+    clip = carry.get("chainClip")
+    if isinstance(clip, Mapping) and _finite_number(clip.get("end")) is not None:
+        ends.append(float(clip["end"]))
+    end = min(ends)
+    if element_id is not None and phases is not None:
+        start, end = paint_instrument.window_bounds(phases, carry, element_id)
     if start is None or end is None:
         return None
     window = {
@@ -2519,9 +2512,7 @@ def _legacy_carry_window(carry: Mapping[str, Any], element_id: Any = None) -> di
         "lastBeforeT": crossing.get("lastBeforeT"),
         "firstAfterT": crossing.get("firstAfterT"),
         "groundedStart": grounded,
-        "coldStart": (carry.get("excludedColdStart") or {}).get(
-            element_id, (carry.get("excludedColdStart") or {}).get(str(element_id))
-        ) if element_id is not None else None,
+        "coldStart": carry.get("coldStart") if element_id is not None else None,
     }
     clip = carry.get("chainClip") if isinstance(carry.get("chainClip"), Mapping) else {}
     clipped = {}
@@ -2536,10 +2527,6 @@ def _legacy_carry_window(carry: Mapping[str, Any], element_id: Any = None) -> di
     forced = carry.get("forcedSeek")
     if isinstance(forced, Mapping):
         window["forcedSeek"] = dict(forced)
-    replacements = carry.get("replacedFrom") if isinstance(carry.get("replacedFrom"), Mapping) else {}
-    replaced = replacements.get(element_id, replacements.get(str(element_id))) if element_id is not None else None
-    if replaced:
-        window["replacedFrom"] = list(replaced)
     grounding = next(
         (item.get("times") or [] for item in carry.get("unreadable") or []
          if item.get("reason") == "a row that could ground the start earlier has an unreadable phase"),
@@ -2564,8 +2551,6 @@ def _carry_window_problem(carry: Mapping[str, Any]) -> tuple[str, dict[str, Any]
         return "boundary crossing not observed in samples", {"unplaced": reasons["boundary crossing has an unplaced row after sampling began"]}
     if "boundary crossing not observed" in reasons:
         return "boundary crossing not observed in samples", {}
-    if "carried decoder never decoded on the settled source" in reasons:
-        return "carried decoder never decoded on the settled source", {}
     if reasons:
         return next(iter(reasons)), {}
     if carry.get("crossing") is None:
@@ -2595,32 +2580,7 @@ def score_continuity(
     phases: paint_instrument.Phases | None = None,
     spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Pure: samples in, verdict dict out. Scores one decoder over the decoded-source
-    carry window through `boundary_scene`, requiring:
-      - the same element id present in every sampled frame in the window;
-      - when `runtime_installed`, every after-cut sample reports that element (by
-        the continuity runtime's own `footprintOwnerDecoderId`) as footprint owner;
-      - connected at the authored source before / destination after (3px);
-      - only a specified Playing transition scene may use a monotonic shared
-        source-to-destination path; its IdleAtFinalState must be at destination;
-      - a monotonic clock (no drop beyond float jitter);
-      - the longest zero-advance run at or under `max_stall_s`;
-      - total clock advance within the window at least `min_advance_s`.
-    With `loop_period_s`, the clock is unwrapped across loop wraps (`unwrap_clock`) before
-    the drop, stall and advance checks, and `wraps` is reported; `None` is the strict clock.
-    `min_window_start` is the forced-seek floor and disables the plan's chain bounds.
-    Schema-2 rows (`seq`) are also scored per frame (`carry_paint`) unless `paint` is False, on
-    every exit once the window is known (the no-spanning-decoder False included): a failing paint
-    score is False and an incomplete one makes the verdict None, whatever the legacy checks said.
-    GL-interval rows are excluded only from the checks explicitly counted as GL excuses.
-    Any row whose phase is unreadable (`phase_unreadable`, the source scene's settle state included
-    when a transition's or the paint's grounding reads it) in the window or anywhere back through
-    the decoded source's predecessor, or that could have grounded the window earlier
-    (`paint_instrument.carry_window`), is INCONCLUSIVE, never dropped from the before/after partition or from
-    grounding; so is a tracked decoder's row there whose source no longer names the asset
-    (`unnamed_rows`, identity before source), or an untracked decoding row that names no source
-    (`unidentified_decoders`), or a row listing one decoder id twice (`duplicate_ids`).
-    """
+    """Score one carried decoder after its initial cold-start prefix."""
     if not (
         isinstance(gl_interval, dict) and _finite_number(gl_interval.get("start")) is not None
         and _finite_number(gl_interval.get("end")) is not None and gl_interval["end"] >= gl_interval["start"]
@@ -2641,7 +2601,7 @@ def score_continuity(
         return _inconclusive(reason, **detail)
     window = _legacy_carry_window(carry)
     if window is None:
-        return _inconclusive("carried decoder never decoded on the settled source")
+        return _inconclusive("boundary crossing not observed in samples")
 
     def paint_gated(scored: dict[str, Any], element_id: Any) -> dict[str, Any]:
         if not (paint and any("seq" in sample for sample in samples)):
@@ -2661,53 +2621,69 @@ def score_continuity(
             scored["reason"] = f"inconclusive: paint {'; '.join(map(str, scored['paint'].get('reasons') or [])) or status}"
         return scored
 
-    decoded_ids = {
-        identity for identity in tracks
-        if identity in (carry.get("decodedStarts") or {}) or str(identity) in (carry.get("decodedStarts") or {})
-    }
     windowed = {
         element_id: [r for r in rows if window["start"] <= r["t"] <= window["end"]]
-        for element_id, rows in tracks.items() if element_id in decoded_ids
+        for element_id, rows in tracks.items()
     }
     windowed = {element_id: rows for element_id, rows in windowed.items() if rows}
     source = (boundary_scene if transition_scene is None else transition_scene) - 1
-    requested_source = _finite_number(carry_spec.get("sourceScene"))
-    source_start = requested_source if requested_source is not None and requested_source <= source else source
-    prior = [s["t"] for s in samples if (scene := _finite_number(s.get("scene"))) is not None and scene < source_start]
+    prior = [s["t"] for s in samples if (scene := _finite_number(s.get("scene"))) is not None and scene < source]
     crossing = carry["crossing"]
     forced_floor = min_window_start if min_window_start is not None else -math.inf
-    reach = min(window["start"], crossing["start"], max(max(prior, default=-math.inf), forced_floor))
+    clipped = window.get("chainClipped") if isinstance(window.get("chainClipped"), Mapping) else {}
+    reach = min(clipped.get("start", window["start"]), max(max(prior, default=-math.inf), forced_floor))
     grounded = transition_scene is not None or (paint and any("seq" in sample for sample in samples))
-    unplaced = [
-        {"t": s["t"], "reason": why} for s in samples
-        if reach <= s["t"] <= window["end"] and (why := phase_unreadable(s, transition_scene, source if grounded else None))
-    ]
-    if unplaced:
-        return _inconclusive(
-            "a row the carry window or its grounding reaches has an unreadable phase", unplaced=unplaced[:5], window=window,
-        )
-    unnamed = unnamed_rows(tracks, asset, reach, window["end"])
-    if unnamed:
-        return _inconclusive(
-            "a tracked decoder's row the carry window reaches does not name the asset", unnamed=unnamed[:5], window=window,
-        )
-    unidentified = unidentified_decoders(samples, tracks, reach, window["end"])
-    if unidentified:
-        return _inconclusive("a decoder the carry window reaches names no source", unidentified=unidentified[:5], window=window)
-    doubled = duplicate_ids([s for s in samples if reach <= s["t"] <= window["end"]])
-    if doubled:
-        return _inconclusive("a row the carry window reaches lists one decoder id twice", doubled=doubled[:5], window=window)
+
+    def integrity_problem(integrity_reach: float) -> dict[str, Any] | None:
+        unplaced = [
+            {"t": s["t"], "reason": why} for s in samples
+            if integrity_reach <= s["t"] <= window["end"]
+            and (why := phase_unreadable(s, transition_scene, source if grounded else None))
+        ]
+        if unplaced:
+            return _inconclusive(
+                "a row the carry window or its grounding reaches has an unreadable phase",
+                unplaced=unplaced[:5], window=window,
+            )
+        unnamed = unnamed_rows(tracks, asset, integrity_reach, window["end"])
+        if unnamed:
+            return _inconclusive(
+                "a tracked decoder's row the carry window reaches does not name the asset",
+                unnamed=unnamed[:5], window=window,
+            )
+        unidentified = unidentified_decoders(samples, tracks, integrity_reach, window["end"])
+        if unidentified:
+            return _inconclusive(
+                "a decoder the carry window reaches names no source", unidentified=unidentified[:5], window=window,
+            )
+        doubled = duplicate_ids([s for s in samples if integrity_reach <= s["t"] <= window["end"]])
+        if doubled:
+            return _inconclusive(
+                "a row the carry window reaches lists one decoder id twice", doubled=doubled[:5], window=window,
+            )
+        return None
+
+    if (problem := integrity_problem(reach)) is not None:
+        return problem
     before_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] < boundary_scene for r in rows)}
     after_ids = {i for i, rows in windowed.items() if any(r["scene"] is not None and r["scene"] >= boundary_scene for r in rows)}
     common = before_ids & after_ids
     if not common:
+        element_id = min(before_ids or after_ids, default=None)
+        if element_id is not None:
+            shared = _legacy_carry_window(carry, phases, element_id)
+            if shared is not None:
+                window = shared
+                if window["start"] < reach and (problem := integrity_problem(window["start"])) is not None:
+                    return problem
+                reach = min(reach, window["start"])
         return paint_gated({
             "verdict": False,
             "reason": "no decoder id spans the boundary within the window",
             "beforeIds": sorted(before_ids),
             "afterIds": sorted(after_ids),
             "window": window,
-        }, min(before_ids or after_ids, default=None))
+        }, element_id)
     def _at_expected_rect(row: dict[str, Any]) -> bool:
         if is_move_sample(row, transition_scene):
             return path_progress(row.get("rect"), src_rect, dst_rect, rect_tolerance) is not None
@@ -2742,9 +2718,30 @@ def score_continuity(
             "an unreadable footprint owner or element id decides which decoder is the carried one",
             elementId=element_id, contested=contested, window=window,
         )
-    window = _legacy_carry_window(carry, element_id)
+    def carried_decoded(row: Mapping[str, Any]) -> bool:
+        ready = _finite_number(row.get("readyState"))
+        width = _finite_number(row.get("videoWidth")) if "videoWidth" in row else 1.0
+        connected = row.get("isConnected") if "isConnected" in row else row.get("connected")
+        rect = row.get("rect") if isinstance(row.get("rect"), Mapping) else row.get("rectScreen")
+        rect_ok = isinstance(rect, Mapping) and all(
+            _finite_number(rect.get(key)) is not None for key in ("x", "y", "w", "h")
+        ) and rect["w"] > 0 and rect["h"] > 0
+        return bool(
+            row["t"] <= crossing["firstAfterT"]
+            and matches_asset_keys(row.get("src"), [asset])
+            and ready is not None and ready >= 2
+            and width is not None and width > 0
+            and connected is True and rect_ok
+        )
+
+    if not any(carried_decoded(row) for row in tracks[element_id]):
+        return _inconclusive("carried decoder never decoded before the crossing", elementId=element_id, window=window)
+    window = _legacy_carry_window(carry, phases, element_id)
     if window is None:
-        return _inconclusive("carried decoder never decoded on the settled source")
+        return _inconclusive("boundary crossing not observed in samples")
+    if window["start"] < reach and (problem := integrity_problem(window["start"])) is not None:
+        return problem
+    reach = min(reach, window["start"])
     windowed = {
         identity: [row for row in rows if window["start"] <= row["t"] <= window["end"]]
         for identity, rows in tracks.items()
@@ -8182,24 +8179,10 @@ def forced_window(
     ):
         return None
     if element_id is not None:
-        window = _legacy_carry_window(carry, element_id)
+        window = _legacy_carry_window(carry, phases, element_id)
         if window is not None:
             return window
-    window = _legacy_carry_window(carry)
-    if window is not None:
-        return window
-    crossing = carry["crossing"]
-    forced = carry["forcedSeek"]
-    candidate = _finite_number(carry.get("candidateStart"))
-    return {
-        "start": max(forced["start"], candidate if candidate is not None else -math.inf),
-        "end": crossing["end"],
-        "lastBeforeT": crossing["lastBeforeT"],
-        "firstAfterT": crossing["firstAfterT"],
-        "groundedStart": candidate,
-        "forcedSeek": dict(forced),
-        "coldStart": None,
-    }
+    return _legacy_carry_window(carry)
 
 
 def score_recorder_clock(

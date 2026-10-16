@@ -627,11 +627,11 @@ class TestMovingBoundary:
         result = probe.score_motion(rows, SRC_RECT, DST_RECT, probe.RECT_TOLERANCE_PX)
         assert "transition progress reverses" in result["errors"]
 
-    def test_transition_without_settled_source_decode_is_inconclusive(self) -> None:
+    def test_transition_without_settled_source_evidence_fails(self) -> None:
         samples = [row for row in moving_boundary_samples() if row["scene"] >= 7]
         result = score_moving_boundary(samples)
-        assert result["verdict"] is None
-        assert result["reason"] == "inconclusive: carried decoder never decoded on the settled source"
+        assert result["verdict"] is False
+        assert "settled source not observed" in result["motion"]["errors"]
 
     def test_static_same_asset_ghost_cannot_displace_actual_moving_owner(self) -> None:
         samples = moving_boundary_samples()
@@ -9363,25 +9363,15 @@ class TestChainCarryWindow:
 
 @pytest.mark.parametrize("case", [
     "alpha-cold-start", "d7-decoded-source", "never-decoded", "later-decode-loss",
-    "remount", "chain-clip", "forced-seek", "differing-clocks", "prior-decode-loss",
-    "multi-scene-source", "busy-first-decode", "unreadable-ready", "gl-excused-missing", "goto-initial",
-    "restart-at-entry", "concurrent-copy", "hidden-premount", "hidden-predecessor", "multi-scene-duplicate",
+    "decoded-then-lost-entering-source", "mid-source-replacement", "hidden-premounted-successor",
+    "entry-hidden-decoded", "multi-scene-source", "chain-clip", "forced-seek",
+    "gl-excused-missing", "differing-clocks", "schema2-visible-undecoded", "union-start",
 ])
 def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
-    boundary = 9 if case == "differing-clocks" else 3 if case in ("multi-scene-source", "hidden-premount", "multi-scene-duplicate") else 2
+    boundary = 9 if case == "differing-clocks" else 3 if case == "multi-scene-source" else 2
     rows = rows_around_boundary(boundary_scene=boundary, n_before=40, n_after=40, dt_ms=20.0, start_time=0.0)
     for row in rows:
         row["scene"] = int(row["scene"])
-    _v2(rows)
-    for row in rows:
-        row["hash"] = "#9" if case == "differing-clocks" else f"#{int(row['scene'])}"
-        row["nextSceneId"] = 9 if case == "differing-clocks" and row["scene"] == 8 else None
-        row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
-        for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
-            pv.update(
-                elId=decoder["elId"], instance=None, paused=decoder["paused"], ended=decoder["ended"],
-                currentTime=decoder["currentTime"], clippedBy=None,
-            )
     spec = {
         "id": f"c3-{case}", "kind": "carry", "asset": ASSET, "atScene": boundary,
         "transitionScene": None, "sourceScene": boundary - 1, "untilScene": None,
@@ -9395,31 +9385,27 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
     elif case == "never-decoded":
         for row in rows:
             row["videos"][0]["readyState"] = 1
+        rows[0]["videos"].append(video(
+            id=2, el_id=2, t=rows[0]["t"], scene=rows[0]["scene"], current_time=1.0,
+            rect={"x": 900.0, "y": 600.0, "w": 200.0, "h": 100.0},
+        ))
     elif case == "later-decode-loss":
         for row in rows[55:]:
             row["videos"][0]["readyState"] = 1
-    elif case == "remount":
+    elif case == "mid-source-replacement":
         for row in rows[20:]:
             row["videos"][0].update(id=2, elId=2)
             row["videos"][0]["footprintOwner"]["elId"] = 2
-    elif case == "prior-decode-loss":
+    elif case == "decoded-then-lost-entering-source":
         prior = []
         for index in range(5):
             t = -100.0 + index * 20.0
             prior.append(sample(
                 t, 0, video(id=1, el_id=1, t=t, scene=0, current_time=4.9 + index * 0.02, rect=dict(SRC_RECT)),
             ))
-        for row in rows[1:40]:
+        for row in rows[:40]:
             row["videos"][0].update(readyState=1, currentTime=5.0)
         rows = prior + rows
-        _v2(rows)
-        for row in rows:
-            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
-            for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
-                pv.update(
-                    elId=decoder["elId"], instance=None, readyState=decoder["readyState"],
-                    currentTime=decoder["currentTime"], paused=decoder["paused"], ended=decoder["ended"], clippedBy=None,
-                )
     elif case == "multi-scene-source":
         rows = []
         for index, scene in enumerate([0] * 5 + [1] * 15 + [2] * 10 + [3] * 30):
@@ -9429,110 +9415,20 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
             row = sample(t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=current, rect=rect))
             row.update(playerState="IdleAtFinalState", busy=False, hash=f"#{scene}", nextSceneId=None)
             rows.append(row)
-        _v2(rows)
-        for row in rows:
-            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
-            for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
-                pv.update(
-                    elId=decoder["elId"], instance=None, currentTime=decoder["currentTime"],
-                    paused=decoder["paused"], ended=decoder["ended"], clippedBy=None,
-                )
         spec["sourceScene"] = 1
-    elif case == "busy-first-decode":
-        for row in rows[:10]:
-            row["busy"] = True
-    elif case == "unreadable-ready":
-        for row in rows[:10]:
-            row["videos"][0]["readyState"] = None
-    elif case == "gl-excused-missing":
-        rows[55]["videos"] = []
-        rows[55]["pp"]["videos"] = []
-        rows[56]["videos"][0]["readyState"] = 1
-        rows[56]["pp"]["videos"][0]["readyState"] = 1
-    elif case == "goto-initial":
+    elif case == "hidden-premounted-successor":
         rows = []
-        phases = (
-            [(1, "IdleAtInitialState", False, 0.0)] * 20
-            + [(1, "Playing", True, index / 20.0) for index in range(21)]
-            + [(1, "IdleAtFinalState", False, 1.0)] * 5
-            + [(2, "IdleAtInitialState", False, 1.0)] * 20
-        )
-        for index, (scene, state, busy, progress) in enumerate(phases):
-            t = index * 20.0
-            rect = {key: SRC_RECT[key] + progress * (DST_RECT[key] - SRC_RECT[key]) for key in SRC_RECT}
-            row = sample(t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=rect))
-            row.update(playerState=state, busy=busy)
-            rows.append(row)
-        _v2(rows)
-        for row in rows:
-            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
-        spec.update(atScene=2, transitionScene=1, sourceScene=0)
-    elif case == "restart-at-entry":
-        rows = []
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
         for index, scene in enumerate([0] * 10 + [1] * 40 + [2] * 40):
             t = index * 20.0
             videos = []
-            if scene == 0:
+            if index < 30:
                 videos.append(video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000))
-            if scene >= 1:
-                source_index = index - 10
-                ready = 1 if source_index < 5 else 4
-                videos.append(video(
-                    id=2, el_id=2, t=t, scene=scene,
-                    current_time=max(0, source_index - 5) * 0.02, ready_state=ready,
-                    rect=dict(DST_RECT if scene >= 2 else SRC_RECT),
-                ))
+            videos.append(video(
+                id=2, el_id=2, t=t, scene=scene, current_time=max(0, index - 30) * 0.02,
+                paused=index < 30, rect=zero if index < 30 else dict(DST_RECT if scene >= 2 else SRC_RECT),
+            ))
             rows.append(sample(t, scene, *videos))
-    elif case == "concurrent-copy":
-        rows = []
-        other = {"x": 900.0, "y": 600.0, "w": 200.0, "h": 100.0}
-        for index, scene in enumerate([1] * 40 + [2] * 40):
-            t = index * 20.0
-            videos = []
-            if index < 45:
-                videos.append(video(id=1, el_id=1, t=t, scene=scene, current_time=3 + t / 1000, rect=other))
-            if index >= 10:
-                videos.append(video(
-                    id=2, el_id=2, t=t, scene=scene, current_time=5 + t / 1000,
-                    rect=dict(DST_RECT if scene >= 2 else SRC_RECT),
-                ))
-            rows.append(sample(t, scene, *videos))
-    elif case == "hidden-premount":
-        rows = []
-        for index, scene in enumerate([0] * 5 + [1] * 20 + [2] * 20 + [3] * 40):
-            t = index * 20.0
-            videos = [] if scene == 0 else [video(
-                id=1, el_id=1, t=t, scene=scene, current_time=max(0, index - 25) * 0.02,
-                paused=scene == 1, rect=dict(DST_RECT if scene >= 3 else SRC_RECT),
-            )]
-            rows.append(sample(t, scene, *videos))
-        spec["sourceScene"] = 1
-    elif case == "hidden-predecessor":
-        rows = []
-        for index, scene in enumerate([1] * 40 + [2] * 40):
-            t = index * 20.0
-            videos = [video(
-                id=1, el_id=1, t=t, scene=scene, current_time=min(index, 15) * 0.02,
-                paused=index >= 15, rect=dict(SRC_RECT), owner_el_id=2 if index >= 15 else "SELF",
-            )]
-            if index >= 15:
-                ready = 1 if index < 20 else 4
-                videos.append(video(
-                    id=2, el_id=2, t=t, scene=scene, current_time=max(0, index - 20) * 0.02,
-                    ready_state=ready, rect=dict(DST_RECT if scene >= 2 else SRC_RECT),
-                ))
-            rows.append(sample(t, scene, *videos))
-    elif case == "multi-scene-duplicate":
-        rows = []
-        for index, scene in enumerate([0] * 5 + [1] * 30 + [2] * 10 + [3] * 40):
-            t = index * 20.0
-            carried = video(
-                id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000,
-                rect=dict(DST_RECT if scene >= 3 else SRC_RECT),
-            )
-            videos = [carried, dict(carried)] if index == 15 else [carried]
-            rows.append(sample(t, scene, *videos))
-        spec["sourceScene"] = 1
     elif case == "forced-seek":
         spec["untilScene"] = 4
     elif case == "chain-clip":
@@ -9543,30 +9439,41 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
                 t, 3,
                 video(id=1, el_id=1, t=t, scene=3, current_time=2.0 + index / 50, rect=dict(DST_RECT)),
             ))
-        _v2(rows[-10:])
-        for offset, row in enumerate(rows[-10:], start=len(rows) - 9):
-            row["seq"] = offset
-            row["pp"]["seq"] = offset
-            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
-            for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
-                pv.update(
-                    elId=decoder["elId"], instance=None, paused=decoder["paused"], ended=decoder["ended"],
-                    currentTime=decoder["currentTime"], clippedBy=None,
-                )
+    elif case == "schema2-visible-undecoded":
+        for row in rows[:5]:
+            row["videos"][0]["readyState"] = 1
+    elif case == "union-start":
+        rows = []
+        for index, scene in enumerate([0] * 5 + [1] * 180 + [2] * 40):
+            t = index * 20.0
+            rect = dict(DST_RECT if scene >= 2 else SRC_RECT)
+            rows.append(sample(
+                t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=rect),
+            ))
 
-    if case in {"restart-at-entry", "concurrent-copy", "hidden-premount", "hidden-predecessor", "multi-scene-duplicate"}:
-        _v2(rows)
-        for row in rows:
-            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
-            for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
-                pv.update(
-                    elId=decoder["elId"], instance=None, readyState=decoder["readyState"],
-                    currentTime=decoder["currentTime"], paused=decoder["paused"], ended=decoder["ended"], clippedBy=None,
-                )
-                if case == "hidden-premount" and row["scene"] == 1:
-                    pv["opacity"] = 0.0
-                if case == "hidden-predecessor" and decoder["id"] == 1 and decoder["paused"]:
-                    pv["opacity"] = 0.0
+    _v2(rows)
+    for row in rows:
+        row["hash"] = "#9" if case == "differing-clocks" else f"#{int(row['scene'])}"
+        row["nextSceneId"] = 9 if case == "differing-clocks" and row["scene"] == 8 else None
+        row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+        for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
+            pv.update(
+                elId=decoder["elId"], instance=None, readyState=decoder["readyState"],
+                currentTime=decoder["currentTime"], paused=decoder["paused"], ended=decoder["ended"], clippedBy=None,
+            )
+    if case == "entry-hidden-decoded":
+        for row in rows[:10]:
+            row["pp"]["videos"][0]["opacity"] = 0.0
+    if case == "hidden-premounted-successor":
+        for row in rows[:30]:
+            row["pp"]["videos"][1].update(rect=dict(SRC_RECT), visibleRect=dict(SRC_RECT), opacity=0.0)
+    if case == "gl-excused-missing":
+        rows[54]["videos"] = []
+        rows[54]["pp"]["videos"] = []
+        rows[55]["videos"] = []
+        rows[55]["pp"]["videos"] = []
+        rows[56]["videos"][0]["readyState"] = 1
+        rows[56]["pp"]["videos"][0]["readyState"] = 1
 
     capture = {
         "samples": rows, "sampleSpace": "authored", "sampler": {"schema": 2},
@@ -9581,7 +9488,7 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
         assert cold["durationMs"] is None and cold["rows"] == 15
         assert scored["window"]["start"] == 300.0
         assert scored["window"]["coldStart"] == {
-            "coldRows": 15, "absentRows": 0, "durationMs": 300.0,
+            "rows": 15, "durationMs": 300.0, "firstSeenT": 0.0,
         }
     elif case in ("d7-decoded-source", "differing-clocks"):
         assert scored["verdict"] is True
@@ -9593,31 +9500,28 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
             assert start["scene"] == 8 and start["playerState"] == "IdleAtFinalState"
     elif case == "never-decoded":
         assert scored["verdict"] is None
-        assert scored["reason"] == "inconclusive: movie never decoded"
+        assert scored["reason"] == "inconclusive: carried decoder never decoded before the crossing"
         assert cold["firstDecodedT"] is None
     elif case == "later-decode-loss":
         assert scored["verdict"] is False and scored["decodeLoss"]
-    elif case == "remount":
+    elif case == "decoded-then-lost-entering-source":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+        assert scored["longestStallS"] >= 0.78
+    elif case in ("mid-source-replacement", "hidden-premounted-successor", "entry-hidden-decoded"):
         assert scored["verdict"] is False
-        assert scored["missingSamples"]
-        assert scored["window"]["replacedFrom"] == [1]
     elif case == "chain-clip":
         first_scene_3 = min(row["t"] for row in rows if row["scene"] == 3)
         assert spec["untilScene"] - 1 > spec["atScene"]
         assert scored["verdict"] is True
         assert scored["window"]["end"] < first_scene_3 and "end" in scored["window"]["chainClipped"]
-    elif case == "prior-decode-loss":
-        assert scored["verdict"] is False, scored
-        assert scored["longestStallS"] >= 0.76 and scored["decodeLoss"]
+        single = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            phases=None, spec={**spec, "untilScene": 3},
+        )
+        assert single["verdict"] is True and "end" not in single["window"].get("chainClipped", {})
     elif case == "multi-scene-source":
         assert scored["verdict"] is False and scored["maxDropS"] >= 0.48, scored
         assert scored["window"]["start"] == 100.0
-    elif case == "busy-first-decode":
-        assert scored["verdict"] is True and scored["window"]["start"] == 200.0
-    elif case == "unreadable-ready":
-        scored = probe.score_continuity(rows, ASSET, boundary, SRC_RECT, DST_RECT, True, paint=False, spec=spec)
-        assert scored["verdict"] is None
-        assert scored["reason"] == "inconclusive: a row that could ground the carry window has an unreadable phase"
     elif case == "gl-excused-missing":
         first, second = rows[55], rows[56]
         assert scored["verdict"] is False and scored["missingSamples"] and scored["decodeLoss"]
@@ -9625,36 +9529,22 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
             rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
             gl_interval={"start": first["ts"] - 1.0, "end": second["ts"] + 1.0}, phases=None, spec=spec,
         )
-        assert scored["verdict"] is True and scored["glExcusedMissing"] == 1
-    elif case == "goto-initial":
-        assert scored["verdict"] is None
-        scored = probe.score_continuity(
-            rows, ASSET, 2, SRC_RECT, DST_RECT, True, transition_scene=1, paint=False, spec=spec,
-        )
-        assert scored["verdict"] is None
-        assert scored["reason"] == "inconclusive: source settled at the transition scene's initial state is not interpreted"
-    elif case == "restart-at-entry":
+        assert scored["verdict"] is False and scored["glExcusedMissing"] == 1
+        assert len(scored["missingSamples"]) == 1 and "decodeLoss" not in scored
+    elif case == "schema2-visible-undecoded":
         assert scored["verdict"] is True
-        assert scored["window"]["coldStart"]["coldRows"] == 5
-        assert "replacedFrom" not in scored["window"]
-    elif case == "concurrent-copy":
-        assert scored["verdict"] is True and scored["elementId"] == 2
-        assert "replacedFrom" not in scored["window"]
-    elif case == "hidden-premount":
-        assert scored["verdict"] is True
-        assert arm["entryColdStart"]["1"]["firstDecodedT"] == 500.0
-    elif case == "hidden-predecessor":
-        assert scored["verdict"] is False, scored
-        assert scored["window"]["replacedFrom"] == [1]
-        assert "replacedFrom" not in scored["window"]["coldStart"]
-    elif case == "multi-scene-duplicate":
-        assert scored["verdict"] is None
+        assert cold["visibleUndecodedRows"] == 5 and cold["visibleUndecodedDurationMs"] > 0
+    elif case == "union-start":
+        gl_interval = {"start": 1600.0, "end": 1760.0}
         scored = probe.score_continuity(
-            rows, ASSET, boundary, SRC_RECT, DST_RECT, True, paint=False, spec=spec,
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            gl_interval=gl_interval, phases=None, spec=spec,
         )
-        assert scored["verdict"] is None
-        assert scored["reason"] == "inconclusive: a row the carry window reaches lists one decoder id twice"
-    else:
+        assert gl_interval["start"] < 1680.0 < gl_interval["end"]
+        assert scored["verdict"] is True
+        assert scored["window"]["start"] == 100.0
+        assert scored["window"]["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
+    elif case == "forced-seek":
         phases = probe.paint_instrument.read_phases(rows, {"verdicts": [spec]})
         forced = probe.score_continuity(
             rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
@@ -10661,7 +10551,8 @@ class TestCarryPaintWiring:
             paint = scored["paint"]
             assert (paint["status"], bool(paint["unreadable"])) == ("inconclusive", True)
         else:
-            assert scored["verdict"] is None and "paint" not in scored
+            paint = scored["paint"]
+            assert (scored["verdict"], paint["status"], bool(paint["unreadable"])) == (False, "fail", False)
 
     @pytest.mark.parametrize(("gap", "verdict", "status"), [
         pytest.param(False, False, "fail", id="identity-change-on-complete-evidence-stays-red"),
@@ -11552,34 +11443,14 @@ class TestFold5IdentityBeforeSourceAndGrounding:
         assert score_moving_boundary(samples)["verdict"] is expected
         assert (probe.forced_window(samples, 8, 7, -2000.0) is None) is (expected is None)
 
-    @pytest.mark.parametrize(("case", "expected"), [
-        ("dark", False),
-        ("darkBusyUnreadable", None),  # inv R2: busy None moved paintStart past the dark frames
-    ])
-    def test_paint_grounding_validates_the_source_settle_state(self, case: str, expected: bool | None) -> None:
-        samples = _v2(rows_around_boundary(n_before=250))
-        for row in samples[10:30]:
-            row["pp"]["videos"][0]["opacity"] = 0.0
-        if case == "darkBusyUnreadable":
-            for row in samples[:31]:
-                row["busy"] = None
-        assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
-
     @pytest.mark.parametrize(("unplaced", "expected"), [
-        (False, True),
+        (False, False),
         (True, None),  # inv R10: an unreadable scene moved the chain clip's start past the missing sample
     ])
-    def test_source_range_scores_entry_absence_but_keeps_unplaced_rows_inconclusive(
-        self, unplaced: bool, expected: bool | None,
-    ) -> None:
+    def test_chain_clip_validates_the_rows_it_could_start_at(self, unplaced: bool, expected: bool | None) -> None:
         spec = {"asset": ASSET, "atScene": 3, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None,
                 "sourceScene": 1}
-        scored = probe.score_carry(_fold5_source_clip_samples(unplaced), spec, True)
-        assert scored["verdict"] is expected
-        if not unplaced:
-            assert scored["window"]["start"] == 550.0
-            assert scored["missingSamples"] == []
-            assert scored["window"]["coldStart"] == {"coldRows": 0, "absentRows": 1, "durationMs": 50.0}
+        assert probe.score_carry(_fold5_source_clip_samples(unplaced), spec, True)["verdict"] is expected
 
     @pytest.mark.parametrize(("case", "strict", "legacy", "raw"), [
         ("priorNamed", False, False, False),

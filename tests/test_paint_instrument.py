@@ -97,20 +97,20 @@ def test_read_phases_and_carry_window() -> None:
         "visibleUndecodedDurationMs": 300.0, "scene": 8, "scenes": [8],
         "missingEndpoints": {"mountTime": False, "firstDecoded": False},
     }
-    assert set(phases["mounts"]) == {1, 2}
-    assert window["decodedStarts"] == {1: 1300.0}
-    assert window["candidateStart"] == 1300.0
-    assert window["excludedColdStart"][1] == {"coldRows": 2, "absentRows": 0, "durationMs": 300.0}
+    assert set(phases["mounts"]) == {(1, "movie-a.mov"), (2, "movie-a.mov")}
     assert "chainClip" not in window
     assert window["forcedSeek"] == {"seekedT": 250.0, "start": 1250.0}
-    assert pi.window_bounds(window, 1) == (1300.0, 2000.0)
+    assert pi.window_bounds(phases, window, 1) == (1250.0, 2000.0)
+    assert window["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
     assert window["glSegments"][1] == [
-        {"start": 1300.0, "end": 1400.0},
+        {"start": 1250.0, "end": 1400.0},
         {"start": 1600.0, "end": 2000.0},
     ]
     assert window["unreadable"] == []
     clipped = pi.carry_window(phases, spec)
     assert clipped["chainClip"] == {"start": 1000.0, "end": pytest.approx(1999.999999)}
+    assert pi.window_bounds(phases, clipped, 1) == (1300.0, pytest.approx(1999.999999))
+    assert clipped["coldStart"] == {"rows": 2, "durationMs": 300.0, "firstSeenT": 1000.0}
 
 
 # ---------------------------------------------------------------- painted_state truth table (§2.3)

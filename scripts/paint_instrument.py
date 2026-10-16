@@ -44,27 +44,20 @@ def _connected(video: Mapping[str, Any]) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _visible(source_row: Mapping[str, Any], video: Mapping[str, Any]) -> bool:
+def _readable_nonzero_rect(video: Mapping[str, Any]) -> bool:
     rect = video.get("rect")
     if not isinstance(rect, Mapping):
         rect = video.get("rectScreen")
-    visible = bool(
-        _connected(video) is True
-        and isinstance(rect, Mapping)
-        and (_finite(rect.get("w")) or 0.0) > 0.0
-        and (_finite(rect.get("h")) or 0.0) > 0.0
+    return bool(
+        isinstance(rect, Mapping)
+        and all(_finite(rect.get(key)) is not None for key in ("x", "y", "w", "h"))
+        and float(rect["w"]) > 0.0
+        and float(rect["h"]) > 0.0
     )
-    pp = source_row.get("pp")
-    if not visible or not isinstance(source_row.get("seq"), int) or not isinstance(pp, Mapping):
-        return visible
-    pv = next(
-        (item for item in pp.get("videos") or [] if isinstance(item, Mapping) and item.get("id") == video.get("id")),
-        None,
-    )
-    if pv is None:
-        return visible
-    state = painted_state(dict(pv), cover=bool(pp.get("cover")))[0]
-    return visible if state == UNREADABLE else state == PAINTED
+
+
+def _visible_observation(observation: Mapping[str, Any]) -> bool:
+    return observation.get("connected") is True and observation.get("readableNonzeroRect") is True
 
 
 def _decoded_observation(observation: Mapping[str, Any]) -> bool:
@@ -73,27 +66,10 @@ def _decoded_observation(observation: Mapping[str, Any]) -> bool:
     return "videoWidth" not in observation or (_finite(observation.get("videoWidth")) or 0.0) > 0.0
 
 
-def _clock_spec(spec: Mapping[str, Any]) -> dict[str, Any] | None:
-    if spec.get("kind") != "carry":
-        return None
-    at_scene = _finite(spec.get("atScene"))
-    transition = _finite(spec.get("transitionScene"))
-    if at_scene is None:
-        return None
-    source = (transition if transition is not None else at_scene) - 1.0
-    requested = _finite(spec.get("sourceScene"))
-    return {
-        "atScene": at_scene,
-        "transitionScene": transition,
-        "sourceScene": source,
-        "sourceStart": requested if requested is not None and requested <= source else source,
-    }
-
-
 def read_phases(rows: Sequence[Mapping[str, Any]], plan: Mapping[str, Any]) -> Phases:
-    """Read sampler rows and decoder lifecycles once for an arm."""
+    """Read row phases and decoder mounts once."""
     phase_rows: list[dict[str, Any]] = []
-    mounts: dict[Any, dict[str, Any]] = {}
+    mounts: dict[tuple[Any, str], dict[str, Any]] = {}
     for index, source_row in enumerate(rows):
         row = {
             "index": index,
@@ -105,6 +81,7 @@ def read_phases(rows: Sequence[Mapping[str, Any]], plan: Mapping[str, Any]) -> P
             "busy": source_row.get("busy"),
             "nextSceneId": source_row.get("nextSceneId"),
             "hash": source_row.get("hash"),
+            "videos": [],
         }
         phase_rows.append(row)
         videos = source_row.get("videos")
@@ -116,37 +93,40 @@ def read_phases(rows: Sequence[Mapping[str, Any]], plan: Mapping[str, Any]) -> P
             identity = video["id"]
             asset = canonical_asset_name(video.get("src"))
             observation = {
+                "id": identity,
+                "asset": asset,
                 "rowIndex": index,
                 "t": source_row.get("t"),
                 "scene": source_row.get("scene"),
                 "readyState": video.get("readyState"),
-                "visible": _visible(source_row, video),
+                "connected": _connected(video),
+                "readableNonzeroRect": _readable_nonzero_rect(video),
             }
             if "videoWidth" in video:
                 observation["videoWidth"] = video.get("videoWidth")
-            mount = mounts.setdefault(identity, {
+            row["videos"].append(observation)
+            if not asset:
+                continue
+            mount = mounts.setdefault((identity, asset), {
+                "id": identity,
                 "asset": asset,
-                "assets": [],
                 "observations": [],
             })
-            if asset and asset not in mount["assets"]:
-                mount["assets"].append(asset)
-                if not mount["asset"]:
-                    mount["asset"] = asset
             mount["observations"].append(observation)
 
     entry_cold: dict[str, dict[str, Any]] = {}
-    for identity, mount in mounts.items():
+    for mount in mounts.values():
+        identity = mount["id"]
         observations = sorted(
             (obs for obs in mount["observations"] if _finite(obs.get("t")) is not None), key=lambda obs: obs["t"]
         )
         first = observations[0] if observations else None
-        decoded = [obs for obs in observations if obs["visible"] and _decoded_observation(obs)]
+        decoded = [obs for obs in observations if _visible_observation(obs) and _decoded_observation(obs)]
         first_decoded = decoded[0] if decoded else None
         before_decode = [obs for obs in observations if first_decoded is None or obs["t"] < first_decoded["t"]]
         visible_undecoded = [
             obs for obs in before_decode
-            if obs["visible"] and (_finite(obs.get("readyState")) or -math.inf) < 2.0
+            if _visible_observation(obs) and (_finite(obs.get("readyState")) or -math.inf) < 2.0
         ]
         first_t = first["t"] if first is not None else None
         decoded_t = first_decoded["t"] if first_decoded is not None else None
@@ -154,10 +134,6 @@ def read_phases(rows: Sequence[Mapping[str, Any]], plan: Mapping[str, Any]) -> P
             "mountTime": first is not None and first["rowIndex"] == 0,
             "firstDecoded": first_decoded is None,
         }
-        mount.update(
-            firstDecodedT=decoded_t,
-            lastVisibleT=max((obs["t"] for obs in observations if obs["visible"]), default=None),
-        )
         cold_scenes = sorted({obs["scene"] for obs in before_decode if _finite(obs.get("scene")) is not None})
         if not before_decode and first is not None and _finite(first.get("scene")) is not None:
             cold_scenes = [first["scene"]]
@@ -211,27 +187,104 @@ def _clip_for(phases: Phases, spec: Mapping[str, Any]) -> dict[str, float | None
     return {"start": start, "end": end}
 
 
-def _decoder_start(starts: Mapping[Any, Any], element_id: Any) -> float | None:
-    value = starts.get(element_id)
-    if value is None:
-        value = starts.get(str(element_id))
-    return _finite(value)
-
-
-def window_bounds(window: CarryWindow, element_id: Any) -> tuple[float | None, float | None]:
-    """Return the decoder-grounded start and clipped end."""
+def _base_bounds(window: CarryWindow) -> tuple[float | None, float | None]:
     crossing = window.get("crossing")
     if not isinstance(crossing, Mapping):
         return None, None
     clip = window.get("chainClip") if isinstance(window.get("chainClip"), Mapping) else {}
     forced = window.get("forcedSeek") if isinstance(window.get("forcedSeek"), Mapping) else {}
     floors = [value for value in (_finite(clip.get("start")), _finite(forced.get("start"))) if value is not None]
-    decoded = _decoder_start(window.get("decodedStarts") or {}, element_id)
-    if decoded is None:
+    grounded = _finite(window.get("groundedStart"))
+    if grounded is None:
         return None, None
-    start = max([decoded, *floors])
+    start = max([grounded, *floors])
     ends = [value for value in (_finite(crossing.get("end")), _finite(clip.get("end"))) if value is not None]
     return start, min(ends) if ends else None
+
+
+def window_bounds(phases: Phases, window: CarryWindow, element_id: Any) -> tuple[float | None, float | None]:
+    """Union the legacy and settled-source starts, then skip one unambiguous cold-start prefix."""
+    start, end = _base_bounds(window)
+    if start is None or end is None:
+        return None, None
+    floors = [
+        value for value in (
+            _finite((window.get("chainClip") or {}).get("start")),
+            _finite((window.get("forcedSeek") or {}).get("start")),
+        ) if value is not None
+    ]
+    source = _finite(window.get("sourceScene"))
+    if source is not None:
+        def decoded_in_scene(scene: float) -> list[float]:
+            visit = max(
+                (row["t"] for row in phases.get("rows") or []
+                 if _finite(row.get("t")) is not None
+                 and (value := _finite(row.get("scene"))) is not None and value < scene),
+                default=-math.inf,
+            )
+            return [
+                row["t"] for row in phases.get("rows") or []
+                if _finite(row.get("t")) is not None and row["t"] > visit
+                and _finite(row.get("scene")) == scene and row.get("busy") is False
+                and any(
+                    observation.get("id") == element_id
+                    and (_finite(observation.get("readyState")) or -math.inf) >= 2.0
+                    for observation in row.get("videos") or []
+                )
+            ]
+
+        decoded = decoded_in_scene(source)
+        fallback = _finite(window.get("sourceSceneFallback"))
+        if not decoded and fallback is not None and fallback != source:
+            decoded = decoded_in_scene(fallback)
+        paint_start = min(decoded) if decoded else start
+        start = min(start, max([paint_start, *floors]))
+    asset = window.get("asset")
+    rows = sorted(
+        (row for row in phases.get("rows") or [] if _finite(row.get("t")) is not None and start <= row["t"] <= end),
+        key=lambda row: row["t"],
+    )
+    decoded_before = any(
+        observation.get("id") == element_id
+        and observation.get("asset") == asset
+        and _finite(observation.get("t")) is not None
+        and observation["t"] < start
+        and _visible_observation(observation)
+        and _decoded_observation(observation)
+        for mount in (phases.get("mounts") or {}).values()
+        for observation in mount.get("observations") or []
+    )
+    prefix: list[dict[str, Any]] = []
+    for row in rows:
+        observations = [
+            observation for observation in row.get("videos") or []
+            if observation.get("id") == element_id and observation.get("asset") == asset
+        ]
+        observation = observations[0] if len(observations) == 1 else None
+        ready = _finite(observation.get("readyState")) if observation is not None else None
+        if (
+            decoded_before
+            or observation is None
+            or not _visible_observation(observation)
+            or ready is None
+            or ready >= 2.0
+        ):
+            break
+        prefix.append(row)
+    if prefix:
+        following = rows[len(prefix)] if len(prefix) < len(rows) else None
+        if following is not None:
+            start = following["t"]
+        first_seen = prefix[0]["t"]
+        duration = round(start - first_seen, 3)
+    else:
+        first_seen = None
+        duration = 0.0
+    window["coldStart"] = {"rows": len(prefix), "durationMs": duration, "firstSeenT": first_seen}
+    interval = window.get("glInterval")
+    if isinstance(interval, Mapping):
+        window.setdefault("glSegments", {})[element_id] = _gl_segments(phases, start, end, interval)
+    return start, end
 
 
 def _gl_segments(phases: Phases, start: float, end: float, interval: Mapping[str, Any]) -> list[dict[str, float]]:
@@ -259,14 +312,15 @@ def carry_window(
     forced_seek: Mapping[str, Any] | None = None,
     gl_interval: Mapping[str, Any] | None = None,
 ) -> CarryWindow:
-    """Build one carry's decoded-source scoring window."""
+    """Build the legacy base window and its constraints."""
     unreadable: list[dict[str, Any]] = []
-    clock = _clock_spec(spec)
     rows = sorted(
         (row for row in phases.get("rows") or [] if _finite(row.get("t")) is not None), key=lambda row: row["t"]
     )
+    boundary = _finite(spec.get("atScene"))
+    transition = _finite(spec.get("transitionScene"))
     crossing = None
-    if clock is None:
+    if boundary is None:
         _add_unreadable(unreadable, "carry spec has no readable atScene")
     elif not rows:
         _add_unreadable(unreadable, "boundary crossing not observed")
@@ -276,9 +330,9 @@ def carry_window(
             row["t"] for row in rows[first_placed:] if _finite(row.get("scene")) is None
         ]
         before = [row["t"] for row in rows if (scene := _finite(row.get("scene"))) is not None
-                  and scene < clock["atScene"]]
+                  and scene < boundary]
         after = [row["t"] for row in rows if (scene := _finite(row.get("scene"))) is not None
-                 and scene >= clock["atScene"]]
+                 and scene >= boundary]
         if unplaced:
             _add_unreadable(unreadable, "boundary crossing has an unplaced row after sampling began", unplaced)
         elif before and after and max(before) < min(after):
@@ -291,131 +345,34 @@ def carry_window(
         else:
             _add_unreadable(unreadable, "boundary crossing not observed", [*(before[-2:] if before else []), *(after[:2] if after else [])])
 
-    decoded_starts: dict[Any, float] = {}
-    replaced_from: dict[Any, list[Any]] = {}
-    excluded: dict[Any, dict[str, Any]] = {}
-    if clock is not None and crossing is not None:
+    grounded_start = crossing["start"] if crossing is not None else None
+    if crossing is not None and transition is not None:
+        source = transition - 1.0
         earlier = max(
-            (row["t"] for row in rows if (scene := _finite(row.get("scene"))) is not None
-             and scene < clock["sourceStart"] and row["t"] < crossing["firstAfterT"]),
+            (row["t"] for row in rows if (scene := _finite(row.get("scene"))) is not None and scene < source),
             default=-math.inf,
         )
-        source_rows = [
-            row for row in rows
-            if earlier < row["t"] < crossing["firstAfterT"]
-            and (scene := _finite(row.get("scene"))) is not None
-            and clock["sourceStart"] <= scene <= clock["sourceScene"]
+        settled = [
+            row["t"] for row in rows
+            if row["t"] > earlier and _finite(row.get("scene")) == source and row.get("busy") is False
         ]
-        settled = [row for row in source_rows if row.get("busy") is False]
-        asset = canonical_asset_name(spec.get("asset"))
-        for identity, mount in (phases.get("mounts") or {}).items():
-            if asset not in mount.get("assets", ()):
-                continue
-            first_decoded = _finite(mount.get("firstDecodedT"))
-            if first_decoded is None:
-                continue
-            observations = {obs["rowIndex"]: obs for obs in mount.get("observations") or []}
-            if not any(observations.get(row["index"], {}).get("visible") for row in settled):
-                continue
-            start = next(
-                (row["t"] for row in settled if row["t"] >= first_decoded and row["index"] in observations), None
-            )
-            if start is not None:
-                decoded_starts[identity] = start
-
-        original_starts = dict(decoded_starts)
-        mounts = phases.get("mounts") or {}
-        for identity in original_starts:
-            observations = mounts.get(identity, {}).get("observations") or []
-            first_observed = min(
-                (value for observation in observations if (value := _finite(observation.get("t"))) is not None),
-                default=None,
-            )
-            first_decoded = _finite(mounts.get(identity, {}).get("firstDecodedT"))
-            predecessors = [
-                other_id for other_id, other_start in original_starts.items()
-                if other_id != identity
-                and first_observed is not None and first_observed > other_start
-                and first_decoded is not None
-                and mounts.get(other_id, {}).get("asset") == mounts.get(identity, {}).get("asset")
-                and _finite(mounts.get(other_id, {}).get("lastVisibleT")) is not None
-                and mounts[other_id]["lastVisibleT"] <= first_decoded
-            ]
-            if predecessors:
-                decoded_starts[identity] = min(original_starts[other_id] for other_id in predecessors)
-                replaced_from[identity] = sorted(predecessors, key=str)
-
-        first_settled = settled[0]["t"] if settled else None
-        for identity, start in decoded_starts.items():
-            observations = {
-                obs["rowIndex"]: obs for obs in mounts[identity].get("observations") or []
-            }
-            before = [row for row in settled if row["t"] < start]
-            cold = [
-                row for row in before
-                if (obs := observations.get(row["index"])) is not None
-                and _finite(obs.get("readyState")) is not None and float(obs["readyState"]) < 2.0
-            ]
-            absent = [row for row in before if row["index"] not in observations]
-            excluded[identity] = {
-                "coldRows": len(cold),
-                "absentRows": len(absent),
-                "durationMs": round(start - first_settled, 3) if first_settled is not None else 0.0,
-            }
-
-        for identity, original_start in original_starts.items():
-            observations = {
-                obs["rowIndex"]: obs for obs in mounts[identity].get("observations") or []
-            }
-            unreadable_ready = [
-                row["t"] for row in settled
-                if first_settled is not None and first_settled <= row["t"] < original_start
-                and (obs := observations.get(row["index"])) is not None
-                and _finite(obs.get("readyState")) is None
-            ]
-            if unreadable_ready:
-                _add_unreadable(
-                    unreadable, "a row that could ground the start earlier has an unreadable phase", unreadable_ready,
-                )
-
-        candidate = min(decoded_starts.values()) if decoded_starts else None
-        grounding_end = candidate if candidate is not None else crossing["firstAfterT"]
+        if settled:
+            grounded_start = min(grounded_start, min(settled))
+        else:
+            move_before = [row["t"] for row in rows if (scene := _finite(row.get("scene"))) is not None and scene < transition]
+            move_after = [row["t"] for row in rows if (scene := _finite(row.get("scene"))) is not None and scene >= transition]
+            if move_before and move_after and max(move_before) < min(move_after):
+                move_start = max(max(move_before) - WINDOW_PAD_S * 1000.0, rows[0]["t"])
+                grounded_start = min(grounded_start, move_start)
         grounding = [
-            row["t"] for row in source_rows if row["t"] < grounding_end and not isinstance(row.get("busy"), bool)
+            row["t"] for row in rows
+            if earlier < row["t"] < grounded_start and (
+                _finite(row.get("scene")) is None
+                or _finite(row.get("scene")) == source and not isinstance(row.get("busy"), bool)
+            )
         ]
         if grounding:
-            _add_unreadable(
-                unreadable, "a row that could ground the start earlier has an unreadable phase", grounding
-            )
-        if not decoded_starts:
-            move_start = min((
-                row["t"] for row in rows
-                if _finite(row.get("scene")) == clock["transitionScene"]
-                and row.get("playerState") == "Playing" and row.get("busy") is True
-            ), default=crossing["firstAfterT"])
-            initial = [
-                row for row in rows
-                if earlier < row["t"] < move_start
-                and _finite(row.get("scene")) == clock["transitionScene"]
-                and row.get("busy") is False
-            ]
-            if (
-                clock["transitionScene"] is not None
-                and initial
-                and all(row.get("playerState") == "IdleAtInitialState" for row in initial)
-            ):
-                _add_unreadable(
-                    unreadable,
-                    "source settled at the transition scene's initial state is not interpreted",
-                    [row["t"] for row in initial],
-                )
-            else:
-                _add_unreadable(
-                    unreadable, "carried decoder never decoded on the settled source",
-                    [row["t"] for row in settled],
-                )
-    else:
-        candidate = None
+            _add_unreadable(unreadable, "a row that could ground the start earlier has an unreadable phase", grounding)
 
     chain_clip = None if forced_seek is not None else _clip_for(phases, spec)
     forced = None
@@ -436,10 +393,10 @@ def carry_window(
     )
     window: CarryWindow = {
         "crossing": crossing,
-        "decodedStarts": decoded_starts,
-        "candidateStart": candidate,
-        "excludedColdStart": excluded,
-        "replacedFrom": replaced_from,
+        "groundedStart": grounded_start,
+        "sourceScene": (transition if transition is not None else boundary) - 1.0 if boundary is not None else None,
+        "sourceSceneFallback": _finite(spec.get("sourceScene")),
+        "asset": canonical_asset_name(spec.get("asset")),
         "forcedSeek": forced,
         "glInterval": dict(gl_interval) if valid_gl else None,
         "glSegments": {},
@@ -447,11 +404,6 @@ def carry_window(
     }
     if chain_clip is not None:
         window["chainClip"] = chain_clip
-    if valid_gl:
-        for identity in decoded_starts:
-            start, end = window_bounds(window, identity)
-            if start is not None and end is not None:
-                window["glSegments"][identity] = _gl_segments(phases, start, end, window["glInterval"])
     return window
 
 PAINT_READ_FN_JS = r"""
