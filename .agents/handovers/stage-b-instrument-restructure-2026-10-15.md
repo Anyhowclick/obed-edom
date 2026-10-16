@@ -38,7 +38,7 @@ Before Sol's probe-side step, stream F alone gave 2455 passed and 1 failed (the 
 - **Implementation (UNREVIEWED), on `claude/stage-b-c1`:** Codex GPT-5.6 Sol high implemented it.
   - Stream F: `sample()`/`decodeCounter()`, the layout from `binary_counter_movie.layout()`, the shared Python decoder in `obs_cadence_decode.py`, the 18-reference ring, `report()` shutdown, the contract patch, and a new `tests/test_mm_feed_instrument.py`.
   - The tiny P side: the probe passes `counterLayout`, and the old probe fake-GL test (`test_instrument_js_runs_realistic_fake_gl_end_to_end`) is deleted after its assertions moved to the new file.
-  - Sol's reports: `c1-f-report.md` and `c1-p-report.md` in the coordinator scratchpad. The C1 commit message summarises them.
+  - WIP commit `b77ae598`. Sol's briefs and reports are in `output/evidence/stage-b-2026-10-13/c1-timing/sol-reports/`.
 - **C1 next steps:**
   1. Opus 5.5 high review, in rounds 1–3, folding all severities.
   2. Fresh paired Alpha captures (gate 2). Measure `callbackCostP95Ms` ≤ ~4 ms and scene medians ≤ 33 ms.
@@ -46,7 +46,7 @@ Before Sol's probe-side step, stream F alone gave 2455 passed and 1 failed (the 
   4. Full suites.
   5. Merge into `claude/stage-b-arch`. Expect a small probe/probe-test merge against C3.
 - Then delete `claude/stage-b-c1-unbriefed` (`0abf8772`); its ideas are reused and justified by the timing split.
-- Timing harness (scratch, reusable): `<coordinator scratchpad>/c1-timing/`. It contains `variant_builder.py`, `run.sh`, `summarize.py` and `matrix.txt`. `run_probe_c1.py` pins the worktree HEAD, so re-pin it before reuse. Results summary: `output/evidence/stage-b-2026-10-13/c1-timing/`.
+- Timing harness (reusable): `output/evidence/stage-b-2026-10-13/c1-timing/harness/`. It contains `variant_builder.py`, `run.sh`, `summarize.py` and `matrix.txt`. `run_probe_c1.py` pins the worktree HEAD, so re-pin it before reuse. Results summary: `output/evidence/stage-b-2026-10-13/c1-timing/`.
 
 **C3: phases and carry windows (plan §5), running in parallel**
 - Session "Stage B C3: arm-wide phases, carry windows" (`local_a393024c-7f20-4969-9cdf-f4fe6eec32ab`), branch `claude/stage-b-c3-adadcc`, worktree `distracted-cartwright-b450e1`.
