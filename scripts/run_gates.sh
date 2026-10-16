@@ -256,22 +256,27 @@ print(f"    expected red: {sorted(want) or '{}'}; expected inconclusive: {sorted
 sys.exit(0 if ok else 1)
 PYEOF
 }
-# Every run (host gates, host red arms, Pass G, P2 arms) goes through one queue, GATE_JOBS at a time (1..5, default 3;
-# GATE_JOBS=1 runs them serially), launched in the listed order. <outdir> starts empty; each run runs in its own process
-# group and atomically writes <name>.rc as "<round nonce> <exit>"; a missing .rc or one from another round fails its
-# check. The checks run and print in the listed order once every run has finished. Exit, HUP, INT or TERM stops the running groups (TERM, then KILL after 5 s).
-NONCE="$$-$(date +%s)-$RANDOM"; PIDS=(); echo "round nonce $NONCE"
+# Every run goes through one queue, GATE_JOBS at a time, refilled whenever any slot opens; the launch section below
+# starts the long groups first. Each run has its own process group and atomically writes <name>.rc as "<round
+# nonce> <exit>"; a missing .rc or one from another round fails its check. Checks run in their own order once every
+# run has finished. Exit, HUP, INT or TERM stops the running groups (TERM, then KILL after 5 s).
+NONCE="$$-$(date +%s)-$RANDOM"; echo "round nonce $NONCE"
 zmodload zsh/parameter
+zmodload zsh/zselect
 stop_jobs(){ local s g n live=(); for s in $jobstates; do [[ $s == running:* ]] && live+=(${${(s.:.)${s#*:*:}}%%=*}); done; (( ${#live} )) || return 0
   for g in $live; do kill -TERM -$g $g 2>/dev/null; done
   for n in {1..20}; do for g in $live; do kill -0 -$g 2>/dev/null && break; done || break; sleep 0.25; done
   for g in $live; do kill -KILL -$g $g 2>/dev/null; done; }
 trap stop_jobs EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 JOB='out=$1 nonce=$2; shift 2; "$@" > "$out.log" 2>&1; rc=$?; print -r -- "$nonce $rc" > "$out.rc.tmp" && mv -f "$out.rc.tmp" "$out.rc"'
-queue(){ local out=$1; shift
-  while (( ${#PIDS} >= GATE_JOBS )); do wait $PIDS[1] 2>/dev/null; shift PIDS; done
+queue(){ local out=$1 N; shift
+  while true; do
+    N=${#${(M)${(v)jobstates}:#running:*}}
+    (( N < GATE_JOBS )) && break
+    zselect -t 1
+  done
   $PY -c 'import os,sys; os.setpgrp(); os.execv(sys.argv[1], sys.argv[1:])' /bin/zsh -fc "$JOB" job "$out" "$NONCE" "$@" &
-  PIDS+=($!); }
+}
 status_of(){ local s; s=$(<"$1.rc") 2>/dev/null || { echo missing; return; }; [[ $s == "$NONCE "<-> ]] && echo ${s#"$NONCE "} || echo "stale($s)"; }
 # Fill the disposable H.264 pattern cache before any timed run, so no P2 arm's ffmpeg encode overlaps a capture: every
 # duration needs a cache key, and a second lookup must be a sha-verified hit of the same entry, else no run launches.
@@ -305,9 +310,6 @@ while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do
 done
 [[ -n $LAUNCH_LOAD ]] || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
 echo "load average (1 min) at launch $LAUNCH_LOAD"
-for V in $HOST_VIEWPORTS; do
-  queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json ${HOST_SKIP[$V]:+--skip-arms} ${HOST_SKIP[$V]}
-done
 check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" "${HOST_SKIP[$1]}" || fail "HOST $1 status"
   paint_report $O/host-$1.json "HOST $1"; }
 # Host red arms (probe-owned pre-registered sets, keyed in the probe by the P2 off-plan sha). The artifact contract is
@@ -388,8 +390,6 @@ for o,c in sorted((census or {}).items()):
 sys.exit((3 if exp=="record" else 0) if ok else 1)
 PYEOF
   local r=$?; paint_report "$O/host-red$n.json" "HOST ${HOST_DECK:+$HOST_DECK }$*"; return $r; }
-for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
-for DA in "${DECK_ARMS[@]}"; do d=${DA%% *}; A=${DA#* }; HOST_DECK=$d run_host_red ${=A}; done
 # A Pass G run passes only with this round's exit 0 and a Pass G artifact whose top-level status is pass; anything else
 # (fail, inconclusive, error, no artifact, a missing or stale status) is FAILED, never pending.
 run_passg(){ fix=$F/html-player; idx=$F/html-unmodified/index.html
@@ -408,7 +408,6 @@ if d.get("error"): print(f"    error: {d['error']}")
 sys.exit(0 if rc=="0" and d.get("pass")=="G" and d.get("status")=="pass" else 1)
 PYEOF
   paint_report "$O/passG-$1.json" "PASSG $1"; }
-for P in $PASSG_FIXTURES; do run_passg $P; done
 # Painted-instrument report (S2 instrument plan §5), report only: per scored carry its unpainted/partial/double/substitute
 # frames and longest run, each sampler's schema and selfCheck, and every paint census entry, which is a finding whatever
 # its class (endOfShow included; decision 8) and is appended to <outdir>/paint-findings.txt for the DONE line.
@@ -503,7 +502,6 @@ for p in problems: print(f"    MISMATCH: {p}")
 sys.exit(1 if problems else 0)
 PYEOF
   paint_report "$O/passG-red$n.json" "PASSG-RED $*"; }
-for PR in "${PASSG_RED_ARMS[@]}"; do run_passg_red ${=PR}; done
 # A paint control run matches only with this round's exit 0 and a paint-control artifact whose control is the arm's,
 # whose core is today's, whose sampler is schema 2 with selfCheck ok, whose injector fired and hid exactly N ticks on a
 # consecutive seq set, whose target carry reads exactly that set (unpaintedSeqs; partialSeqs for ancestor-half, with no
@@ -564,7 +562,6 @@ for p in problems: print(f"    MISMATCH: {p}")
 sys.exit(1 if problems else 0)
 PYEOF
 }
-for PC in "${PAINT_CONTROL_ARMS[@]}"; do run_paint_control ${=PC}; done
 # A carry-cover run matches only with this round's exit (0 for pass, 1 for fail), a carry-cover artifact whose status is
 # the expected one, whose fixture is its deck's, whose control and core variant are the ones its arguments imply, whose
 # installed continuity core sha is that variant's (else today's), and, but on the null arm, whose bridges are non-empty
@@ -612,12 +609,21 @@ for p in problems: print(f"    MISMATCH: {p}")
 sys.exit(1 if problems else 0)
 PYEOF
 }
-for A in $CARRY_COVER_ARMS; do run_cc ${=A}; done
 # Each P2 arm runs in its own --out-dir.
 run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')
   queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
 check_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); rc=$(status_of "$O/p2$n"); echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; if [[ $rc == <-> ]]; then expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; else echo "    no fresh status ($rc) -> MISMATCH"; false; fi; tally $? "P2 $*"; }
-for A in "${P2_ARMS[@]}"; do run_p2 "${(@Q)${(z)A}}"; done
+for A in "${P2_ARMS[@]}"; do [[ $A == *--skip-freeze-bracket* ]] || run_p2 "${(@Q)${(z)A}}"; done
+for P in $PASSG_FIXTURES; do run_passg $P; done
+for V in $HOST_VIEWPORTS; do
+  queue $O/host-$V $PY -u scripts/live_continuity_probe.py --fixture $F/html-player --original-index $F/html-unmodified/index.html --viewport $V --artifact $O/host-$V.json ${HOST_SKIP[$V]:+--skip-arms} ${HOST_SKIP[$V]}
+done
+for PR in "${PASSG_RED_ARMS[@]}"; do run_passg_red ${=PR}; done
+for A in "${P2_ARMS[@]}"; do [[ $A == *--skip-freeze-bracket* ]] && run_p2 "${(@Q)${(z)A}}"; done
+for A in $HOST_RED_ARMS; do run_host_red ${=A}; done
+for DA in "${DECK_ARMS[@]}"; do d=${DA%% *}; A=${DA#* }; HOST_DECK=$d run_host_red ${=A}; done
+for A in $CARRY_COVER_ARMS; do run_cc ${=A}; done
+for PC in "${PAINT_CONTROL_ARMS[@]}"; do run_paint_control ${=PC}; done
 wait
 for V in $HOST_VIEWPORTS; do check_host $V; done
 for A in $HOST_RED_ARMS; do check_host_red ${=A}; tally $? "HOST red $A"; done

@@ -24,6 +24,19 @@ _TEST_CACHE_ROOT = tempfile.mkdtemp(prefix="obed-edom-tests-cache-")
 os.environ.setdefault("OBED_EDOM_CACHE_DIR", _TEST_CACHE_ROOT)
 
 
+_SWEEP_TESTS = (
+    "test_bracket_absence_sweep_is_exhaustive", "test_bracket_sweep_allowlist_has_no_dead_entries",
+    "test_main_absence_sweep_is_exhaustive", "test_main_sweep_allowlist_has_no_dead_entries",
+)
+
+
+def pytest_collection_modifyitems(items) -> None:
+    """A cold P2 sweep is the suite's longest item: collect its tests first so it overlaps the
+    rest of the run on one worker instead of trailing it."""
+    first = sorted((i for i in items if i.name in _SWEEP_TESTS), key=lambda i: _SWEEP_TESTS.index(i.name))
+    items[:] = first + [i for i in items if i.name not in _SWEEP_TESTS]
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:
     shutil.rmtree(_TEST_OUTPUT_ROOT, ignore_errors=True)
     shutil.rmtree(_TEST_CACHE_ROOT, ignore_errors=True)

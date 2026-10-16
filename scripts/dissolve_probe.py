@@ -1925,7 +1925,7 @@ def build_lut(snapshot: np.ndarray, live: np.ndarray, *, agree: float = 1.0, ana
 
 
 def premul(img: np.ndarray) -> np.ndarray:
-    out = np.asarray(img, dtype=np.float32).copy()
+    out = np.array(img, dtype=np.float32, copy=True)
     out[..., :3] *= out[..., 3:4] / 255.0
     return out
 
@@ -1967,8 +1967,8 @@ def texture_classes(A: np.ndarray, B: np.ndarray) -> dict[str, np.ndarray]:
     return {"out": (aA == 255) & (aB == 0) & keep, "in": (aA == 0) & (aB == 255) & keep, "overlap": (aA == 255) & (aB == 255) & keep}
 
 
-def far_mask(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    return np.abs(premul(A) - premul(B))[..., :3].sum(axis=2) > OVERLAP_DIFF_MIN
+def far_mask(Ap: np.ndarray, Bp: np.ndarray) -> np.ndarray:
+    return np.abs(Ap - Bp)[..., :3].sum(axis=2) > OVERLAP_DIFF_MIN
 
 
 def place(image: np.ndarray, canvas_rect: Iterable[float], clip_rect: Iterable[float], shape: tuple[int, int]) -> np.ndarray:
@@ -1994,15 +1994,21 @@ def over(top: np.ndarray, bottom: np.ndarray) -> np.ndarray:
     return np.clip(np.rint(np.concatenate([rgb, a], axis=2)), 0, 255).astype(np.uint8)
 
 
-def fit_frame(F: np.ndarray, A: np.ndarray, B: np.ndarray, keep: np.ndarray, *, screen: bool = False) -> tuple[float, float]:
-    """(e, max residual) of `F` against (1 - e)·A + e·B, premultiplied, on `keep`; screen pages compare RGB over black."""
+def _prepare_fit(A: np.ndarray, B: np.ndarray, keep: np.ndarray,
+                 screen: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, np.ndarray, np.ndarray, float]:
     Ap, Bp = premul(A), premul(B)
-    Fp = F[..., :3].astype(np.float32) if screen else premul(F)
     if screen:
         Ap, Bp = Ap[..., :3], Bp[..., :3]
     d = (Bp - Ap)[keep]
     fit = np.abs(d).sum(axis=1) > FIT_DIFF_MIN
     den = float((d[fit] ** 2).sum())
+    return Ap, Bp, keep, screen, d, fit, den
+
+
+def _fit_frame(F: np.ndarray, prepared: tuple[np.ndarray, np.ndarray, np.ndarray, bool, np.ndarray,
+                                              np.ndarray, float]) -> tuple[float, float]:
+    Ap, Bp, keep, screen, d, fit, den = prepared
+    Fp = F[..., :3].astype(np.float32) if screen else premul(F)
     if not den:
         return math.nan, math.nan
     e = float(((Fp - Ap)[keep][fit] * d[fit]).sum() / den)
@@ -2069,9 +2075,10 @@ def score_fade(frames: list[np.ndarray], A: np.ndarray, B: np.ndarray, *, exclud
     keep = ~rect_mask(shape, exclude, MEDIA_PAD_PX)
     sizes = {k: int((masks[k] & keep).sum()) for k in masks}
     problems += [f"class {k}: {sizes[k]} px < {min_class_px}" for k in classes if sizes[k] < min_class_px]
+    prepared = _prepare_fit(A, B, keep, screen)
     rows = []
     for F in frames:
-        e, res = fit_frame(F, A, B, keep, screen=screen)
+        e, res = _fit_frame(F, prepared)
         row: dict[str, Any] = {"e": e, "residual": res}
         if not screen:
             row.update({k: class_range(F, masks[k] & keep) for k in ("out", "in", "overlap")})
@@ -2732,8 +2739,8 @@ def reference_problems(record: dict[str, Any], images: Mapping[str, np.ndarray],
         if ev.A is None or ev.B is None or ev.A.shape[:2] != shape:
             problems.append("no textures to qualify the reference states")
         else:
-            far = far_mask(ev.A, ev.B) & far_mask(shots["A0"], shots["B"])
             p = {k: premul(v) for k, v in shots.items()}
+            far = far_mask(premul(ev.A), premul(ev.B)) & far_mask(p["A0"], p["B"])
             if int(far.sum()) < MIN_CLASS_PX:
                 problems.append(f"{int(far.sum())} px where both the textures and the A0/B captures differ < {MIN_CLASS_PX}")
             elif any(float(np.abs(p[a] - p[b])[far].max()) <= cal.tau for a, b in (("A0", "F50"), ("F50", "B"), ("A0", "B"))):
@@ -2851,7 +2858,8 @@ def score_hide(cast: list[dict[str, Any]], actions: Mapping[str, float], raf: li
     if all(blank):
         out["after_show"] = result(False, frames=len(after))
     else:
-        fits = [fit_frame(c["img"], A, B, keep, screen=screen) for c in after]
+        prepared = _prepare_fit(A, B, keep, screen)
+        fits = [_fit_frame(c["img"], prepared) for c in after]
         if not all(number(e) and number(r) for e, r in fits):
             out["after_show"] = result(None, ["an after-show frame has no finite fit"])
         else:
