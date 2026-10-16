@@ -31,7 +31,7 @@ def test_continuity_version_is_pinned_int():
 
 # `js_sha256()` of the shipped core. Re-pin only when the core's bytes change on
 # purpose; a surprise here means the injected runtime moved without a decision.
-PINNED_CORE_SHA256 = "302c218d1b16bf2e3e8821695aff76db6a93a0d708bf5b24f71bc33926523177"
+PINNED_CORE_SHA256 = "838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64"
 
 
 def test_js_sha256_hashes_the_core_bytes_and_matches_the_pinned_literal():
@@ -4296,14 +4296,18 @@ console.log(JSON.stringify({
 
 
 @pytest.mark.parametrize(("second_action", "tied"), [
-    ("pin", None), ("bridge", None), ("pin", "stub-layer"), ("pin", "unrelated-layer"), ("pin", "stale-facade"),
-], ids=["pin", "bridge", "pin-tied-canvases", "pin-tied-stub-elsewhere", "pin-tied-stale-facade"])
+    ("pin", None), ("bridge", None), ("pin", "stub-layer"), ("pin", "stub-layer-rounded"),
+    ("pin", "unrelated-layer"), ("pin", "stale-facade"),
+], ids=["pin", "bridge", "pin-tied-canvases", "pin-rounded-canvases", "pin-tied-stub-elsewhere",
+        "pin-tied-stale-facade"])
 def test_overlay_bridge_hands_an_under_artwork_carry_to_the_hidden_ride(second_action, tied):
     """`tied`, measured headless on D7 (Q7 follow-up): the destination movie exports two same-rect canvases in sibling
     layers and the player appends its stub into the second; the re-homed decoder still carries its source layer, so
     only the stub's layer (stamped when the stub arrives) picks the slot. Without it every remount fell back to the
-    root, above all later-authored labels. The stamp is refused (review r5) when the stub lands in a layer holding no
-    canvas for the destination rect, or when a newer facade has replaced the one whose stub arrived."""
+    root, above all later-authored labels. `stub-layer-rounded` (Alpha slides 8–9): the poster sits on the exact rect
+    and the stub's frame canvas is sub-pixel off, so the stub's layer must beat distance. The stamp is refused (review
+    r5) when the stub lands in a layer holding no canvas for the destination rect, or when a newer facade has replaced
+    the one whose stub arrived."""
     first = {
         "atScene": 2, "action": "bridge", "movieKey": "movie1", "durationSeconds": 1.5, "loop": False,
         "src": _inst("A1", _FOOTPRINT), "dst": _inst("A2", _RECT_S3),
@@ -4345,7 +4349,8 @@ const stubLayer = TIED === 'unrelated-layer' ? Object.assign(Object.create(layer
 if (TIED) {
   layer.id = 'layer96';
   canvases.push(poster, {id: 'overlay', parentNode: overlayLayer, parentElement: overlayLayer, nextSibling: null,
-    getBoundingClientRect: rectOf});
+    getBoundingClientRect: TIED === 'stub-layer-rounded'
+      ? () => ({left: R.x + 0.41, top: R.y + 0.19, width: R.w + 0.25, height: R.h - 0.24}) : rectOf});
 } else {
   canvases.push(poster);
 }
@@ -4362,9 +4367,11 @@ console.log(JSON.stringify({during, bridged: !!a.__obedBridged34, landed: a.pare
 """.replace("__TIED__", json.dumps(tied)))
     assert result["during"] == {"bridged": True, "hidden": "0", "paused": True}
     assert not result["bridged"]
-    assert result["landed"] is (tied in (None, "stub-layer")) and not result["paused"]
+    assert result["landed"] is (tied in (None, "stub-layer", "stub-layer-rounded")) and not result["paused"]
     if tied:
-        assert result["stamped"] == ("layer97" if tied == "stub-layer" else None)
+        assert result["stamped"] == ("layer97" if tied in ("stub-layer", "stub-layer-rounded") else None)
+    if tied == "stub-layer-rounded":
+        assert result["ambiguous"] == 0
     assert result["stubSrc"] is None
     assert result["onceReason"] == "module-absent"
     if second_action == "pin":

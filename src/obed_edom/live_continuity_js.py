@@ -1665,12 +1665,12 @@ PRESERVE_CORE_JS = r"""
     requestAnimationFrame(frame);
   }
   /**
-   * Find the movie's own authored poster <canvas> (its layer's stacking
-   * context) by matching footprint geometry — MM destroys the video's
-   * authored parent, so we can't walk up from the video itself. Requires a
-   * UNIQUE best match: collect every canvas within tolerance, rank by
-   * geometric distance, and break ties by the video's own authored layer
-   * (outgoing vs incoming MM), then DOM order (incoming layer is later).
+   * Find the movie's own authored <canvas> (poster or frame) (its layer's
+   * stacking context) by matching footprint geometry — MM destroys the video's
+   * authored parent, so we can't walk up from the video itself. Collects
+   * every canvas within tolerance: the only one inside the video's own
+   * authored layer wins; otherwise requires a UNIQUE best match by geometric
+   * distance, exact ties broken by that layer.
    */
   function findMovieCanvas(box, v) {
     if (!(box && box.w > 1 && box.h > 1)) return null;
@@ -1694,13 +1694,14 @@ PRESERVE_CORE_JS = r"""
       }
     }
     if (!candidates.length) return null;
+    const own = v && v.__obedLayer
+      ? candidates.filter((c) => nearestLayer(c.c.parentElement) === v.__obedLayer) : [];
+    if (own.length === 1) return own[0].c;
     const minDist = candidates.reduce((m, c) => Math.min(m, c.dist), Infinity);
     const tied = candidates.filter((c) => Math.abs(c.dist - minDist) <= 0.01);
     if (tied.length === 1) return tied[0].c;
     // Distance tie: try to resolve by the video's own authored layer.
-    const layerMatches = tied.filter(
-      (c) => v && v.__obedLayer && nearestLayer(c.c.parentElement) === v.__obedLayer
-    );
+    const layerMatches = tied.filter((c) => own.indexOf(c) >= 0);
     if (layerMatches.length === 1) return layerMatches[0].c;
     // Still ambiguous (0 or >=2 equally-good candidates) — do not guess.
     note('remount-canvas-ambiguous', {
