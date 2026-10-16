@@ -1714,8 +1714,8 @@ class LiveOutputHost:
             self._validate_export()
             self._expected_scene_count = self._authored_scene_count()
             self._codec_report, self._codec_warnings = self._resolve_codecs()
-            movie_warmup_script = self._resolve_movie_warmup()
             self._logger.log("codecs", report=self._codec_report, warnings=self._codec_warnings)
+            movie_warmup_script = self._resolve_movie_warmup()
             self._continuity_mode, self._continuity_reason, self._continuity_runtime_plan = self._resolve_continuity_static()
             player = self.resolver(self.export_root, "assets/player/main.js").read_bytes()
             mm_opacity_on = self._mm_opacity_preference == "auto"
@@ -2854,13 +2854,9 @@ class LiveOutputHost:
         if not isinstance(value, dict): raise LiveHostError("Recognised player observation is unavailable.")
         self._refresh_poster_holds(value.get("__obedMmFeedEntries"))
         warmup = value.get("__obedMovieWarmup")
-        if not self._movie_warmup_logged and isinstance(warmup, dict):
+        if self._logger is not None and not self._movie_warmup_logged and isinstance(warmup, dict):
             state, ready_ms = warmup.get("state"), warmup.get("readyMs")
-            numeric_ready = (
-                isinstance(ready_ms, (int, float)) and not isinstance(ready_ms, bool)
-                and math.isfinite(ready_ms) and ready_ms >= 0
-            )
-            if (state == "ready" and numeric_ready) or (state in {"error", "timeout"} and ready_ms is None):
+            if state in ("error", "timeout") or (state == "ready" and isinstance(ready_ms, (int, float)) and not isinstance(ready_ms, bool)):
                 self._logger.log("movieWarmup", state=state, readyMs=ready_ms)
                 self._movie_warmup_logged = True
         revision = value.get("revision")

@@ -1769,8 +1769,7 @@ def test_continuity_scripts_injection_order_and_safe_json_embedding(tmp_path):
         < body.index('id="stage"')
         < body.index('src="assets/player/main.js"')
     )
-    assert "assets/movie name %.mov" not in warmup
-    assert "assets/movie%20name%20%25.mov" in warmup
+    assert 'video.src="assets/movie%20name%20%25.mov"' in warmup
     # A naive close of the script tag inside the embedded plan would truncate the
     # document before the core/fit scripts; both must still be present intact.
     assert document.count('id="obed-continuity-core"') == 1
