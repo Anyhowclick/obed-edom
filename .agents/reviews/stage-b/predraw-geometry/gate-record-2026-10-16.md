@@ -1,5 +1,7 @@
 # Pre-draw geometry gate record (2026-10-16)
 
+Evidence (results only): `output/evidence/stage-b-2026-10-13/predraw-geometry/` (README.txt). The `val/...` names below are its capture sets.
+
 Branch `claude/predraw-geometry` (local), from `claude/stage-b-arch` 7746df27. Plan: `.agents/plans/keynote_live_predraw_geometry.plan.md`. Step 0 and the owner tolerance decision: `step0-2026-10-16.md`.
 
 ## Rule
