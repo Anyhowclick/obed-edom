@@ -353,11 +353,14 @@ def _mm_feed_report() -> dict[str, Any]:
         "departures": [{"t": 1.5, "serial": None, "atScene": 2, "entryId": "carry-a"}],
         "callbackCostP95Ms": None,
         "tamper": None, "killedOnce": [{"objectId": "movie-a", "t": 3.0}],
-        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "closedAt": 3.0, "atScene": 2,
+        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": 1.0, "firstDrawAt": 2.1,
+                      "closedAt": 3.0, "atScene": 2,
                       "lost": False, "entryIds": ["carry-a"]}],
         "frames": [{
             "serial": 1, "atScene": 2, "n": 1, "t": 2.0, "frameTime": 2.0, "draws": 1, "uploads": 2,
-            "labels": [], "riders": [], "labelExpected": [],
+            "labels": [], "riders": [{"entryId": "carry-a", "serial": 1, "atScene": 2,
+                                         "instance": "movie-a", "visible": False, "opacityProduct": 0.0,
+                                         "intersectsCanvas": False, "sourceRectError": 0.0}], "labelExpected": [],
             "glErrors": [], "module": None,
             "rows": [{"serial": 1, "atScene": 2, "entryId": "carry-a", "objectId": "movie-a",
                       "dstObjectId": "movie-b", "draw": 1, "t": 2.0, "quad": None,
@@ -421,17 +424,47 @@ def test_v2_mm_feed_report_accepts_only_empty_unbound_gl_contexts() -> None:
 @pytest.mark.parametrize(("mutate", "clause"), [
     (lambda r: r["contexts"][0].pop("lost"), "mmFeed.context.lost:missing"),
     (lambda r: r["contexts"][0].pop("closedAt"), "mmFeed.context.closedAt:missing"),
+    (lambda r: r["contexts"][0].pop("firstDrawAt"), "mmFeed.context.firstDrawAt:missing"),
+    (lambda r: r["contexts"][0].update(firstDrawAt="late"), "mmFeed.context.firstDrawAt"),
+    (lambda r: r["contexts"][0].update(firstDrawAt=.5), "mmFeed.context.firstDrawAt"),
     (lambda r: r["frames"][0].update(t="late"), "mmFeed.frame.t"),
     (lambda r: r["frames"][0].pop("frameTime"), "mmFeed.frame.frameTime:missing"),
     (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(size=[640]), "mmFeed.texture.size"),
     (lambda r: r["frames"][0]["rows"][0]["textures"][0].update(uploadedSize=[1280]),
      "mmFeed.texture.uploadedSize"),
     (lambda r: r.update(mediaDropped=[{"atScene": 2, "count": 0}]), "mmFeed.mediaDropped.count"),
+    (lambda r: r["frames"][0]["riders"][0].pop("sourceRectError"), "mmFeed.rider.sourceRectError:missing"),
+    (lambda r: r["frames"][0]["riders"][0].update(sourceRectError=True), "mmFeed.rider.sourceRectError"),
+    (lambda r: r["frames"][0]["riders"][0].update(sourceRectError="near"), "mmFeed.rider.sourceRectError"),
+    (lambda r: r["frames"][0]["riders"][0].update(sourceRectError=float("nan")), "mmFeed.rider.sourceRectError"),
+    (lambda r: r["frames"][0]["riders"][0].update(sourceRectError=float("inf")), "mmFeed.rider.sourceRectError"),
+    (lambda r: r["frames"][0]["riders"][0].update(sourceRectError=-.1), "mmFeed.rider.sourceRectError"),
 ])
 def test_mm_feed_contract_rejects_required_field_and_generation_breaks(mutate: Any, clause: str) -> None:
     report = _mm_feed_report()
     mutate(report)
     assert clause in [problem.split(" at ")[0] for problem in contract.mm_feed_report(report)]
+
+
+def test_mm_feed_contract_accepts_null_draw_and_source_geometry_values() -> None:
+    report = _mm_feed_report()
+    report["contexts"][0]["firstDrawAt"] = None
+    report["frames"][0]["riders"][0]["sourceRectError"] = None
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+
+
+@pytest.mark.parametrize("field", ["firstDrawAt", "sourceRectError"])
+def test_mm_feed_contract_requires_geometry_producer_fields_in_v2(field: str) -> None:
+    report = _mm_feed_report()
+    report.update(version=2, browserFrames=[{"index": 0, "timestamp": 2.0}], handbacks=[])
+    report["contexts"][0].update(closedAt=None, closedFrameIndex=None)
+    report["frames"][0].update(frameIndex=0, frameTimestamp=2.0)
+    report["departures"][0].update(generation=1, visit=1)
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    target = report["contexts"][0] if field == "firstDrawAt" else report["frames"][0]["riders"][0]
+    target.pop(field)
+    errors = [problem.split(" at ")[0] for problem in contract.mm_feed_report(report)]
+    assert f"mmFeed.{'context' if field == 'firstDrawAt' else 'rider'}.{field}:missing" in errors
 
 
 def _feed_verdict_record() -> dict[str, Any]:

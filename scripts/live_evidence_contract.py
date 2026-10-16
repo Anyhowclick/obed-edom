@@ -627,6 +627,7 @@ def evidence(value: Any, path: str = "evidence") -> Iterator[str]:
 
 MM_FEED_CONTEXT_FIELDS = {
     "serial": _id, "id": _non_empty_str, "createdAt": _finite,
+    "firstDrawAt": lambda v: v is None or _finite(v),
     "closedAt": lambda v: v is None or _finite(v), "atScene": lambda v: v is None or _count(v),
     "lost": lambda v: isinstance(v, bool),
     "entryIds": lambda v: isinstance(v, list) and all(_non_empty_str(item) for item in v),
@@ -706,6 +707,9 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
         else:
             contexts_by_serial[context.get("serial")] = context
             yield from _fields(context, "mmFeed.context", where, MM_FEED_CONTEXT_FIELDS)
+            if _finite(context.get("firstDrawAt")) and _finite(context.get("createdAt")) \
+                    and context["firstDrawAt"] < context["createdAt"]:
+                yield f"mmFeed.context.firstDrawAt at {where}"
             if context.get("atScene") is None and (version != 2 or context.get("entryIds") != []):
                 yield f"mmFeed.context.atScene at {where}"
             if version == 2 and not (context.get("closedFrameIndex") is None or _count(context.get("closedFrameIndex"))):
@@ -792,6 +796,7 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                     "entryId": _non_empty_str, "serial": _id, "atScene": _count, "instance": _non_empty_str,
                     "visible": lambda v: isinstance(v, bool), "opacityProduct": lambda v: _finite(v) and v >= 0,
                     "intersectsCanvas": lambda v: isinstance(v, bool),
+                    "sourceRectError": lambda v: v is None or _finite(v) and v >= 0,
                 })
     for index, entry in enumerate(value.get("killedOnce") or []):
         where = f"{path}.killedOnce[{index}]"

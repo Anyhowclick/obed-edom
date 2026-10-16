@@ -36,6 +36,7 @@ def test_the_variant_names_are_the_shared_contract() -> None:
         "no-pause",
         "interim-delay",
         "departure-early-hide",
+        "startup-moved-decoder",
     )
 
 
