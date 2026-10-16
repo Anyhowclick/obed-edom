@@ -1,6 +1,6 @@
 # C6 code review r3 (Opus 5.5 high; fold-verification + whole-diff lenses, adversarially verified)
 
-Confirmed 2, refuted 0. **NOT YET FOLDED.** The owner paused the round on 2026-10-15; fold these first on resume.
+Confirmed 2, refuted 0. Implementer: Codex GPT-5.6 Sol high. Both findings were folded on 2026-10-16 (see the C6 gate record).
 
 ## low · folds · The chrome_process_counts fixture never reaches the owned/descendant path, and the missing-probe-PID fail-closed branch has no test
 `tests/test_live_continuity_probe.py:8088` · class: edge case

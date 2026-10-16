@@ -4543,11 +4543,11 @@ def arm_paint_census(samples: list[dict[str, Any]], scored: dict[str, Any], spec
     return paint_instrument.paint_census(samples, carried, asset_by_id, scene_count=max(counts))
 
 
-def _capture_samples(capture: Mapping[str, Any]) -> tuple[list[dict[str, Any]], bool]:
-    key = "samples" if isinstance(capture.get("samples"), list) else "sampleRows"
+def _capture_samples(capture: Mapping[str, Any]) -> tuple[Any, bool]:
+    key = "sampleRows" if not isinstance(capture.get("samples"), list) and "sampleRows" in capture else "samples"
     rows = capture.get(key)
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        return [], key == "sampleRows"
+        return rows, key == "sampleRows"
     authored = capture.get("sampleSpace") == "authored" or (
         capture.get("sampleSpace") != "screen" and any(
             "stageMapValid" in row or any(isinstance(video, dict) and "rectScreen" in video for video in row.get("videos") or [])
@@ -4604,7 +4604,15 @@ def score_arm(
         if spec.get("alias"):
             result.pop(spec["alias"], None)
 
+    sampler = capture.get("sampler")
+    schema = sampler.get("schema") if isinstance(sampler, Mapping) else None
     samples, sample_rows_alias = _capture_samples(capture)
+    if not isinstance(samples, list) or not all(isinstance(row, dict) for row in samples):
+        errors = contract.first_errors(contract.sample_rows(samples, schema=schema))
+        scored = {spec["id"]: _contract_inconclusive(errors) for spec in specs}
+        result.update(with_aliases(scored, specs))
+        result["verdicts"] = verdict_table(result, specs)
+        return result
     result["samples"] = samples
     result["sampleSpace"] = "authored"
     if sample_rows_alias:
@@ -4625,9 +4633,6 @@ def score_arm(
     runtime_installed = isinstance(continuity, Mapping) and continuity.get("mode") == "qualified"
     evidence = capture.get("evidence")
     result["evidence"] = copy.deepcopy(evidence) if isinstance(evidence, Mapping) else None
-    sampler = capture.get("sampler")
-    schema = sampler.get("schema") if isinstance(sampler, Mapping) else None
-
     producer = _feed_producer(capture)
     continuous_expected = _continuous_expected(capture)
     normalized_feed = None

@@ -8049,12 +8049,16 @@ class TestRescoreGenerated:
         report = probe.rescore_generated(artifact, _p2_facts(), None)
         assert report["ok"] is False and report["arms"]["arm A"]["verdicts"][key]["match"] is False
 
-    def test_known_bad_evidence_outside_the_contract_is_never_reproduced(self) -> None:
+    @pytest.mark.parametrize("malformation", ["stage-map", "non-dict-row"])
+    def test_known_bad_evidence_outside_the_contract_is_never_reproduced(self, malformation: str) -> None:
         """Astra r12 #6b: a contract-rejected None must not "reproduce" a stored None, nor reach the legacy scorer.
         r13 #5: nor hide as "not re-derivable" (`refused1to2` retains no refusal evidence here)."""
         artifact = _stored_artifact()
         arm = artifact["arms"]["A"] = json.loads(json.dumps(artifact["arms"]["A"]))
-        arm["samples"][0]["stageMap"]["offsetWidth"] = 1920.5
+        if malformation == "stage-map":
+            arm["samples"][0]["stageMap"]["offsetWidth"] = 1920.5
+        else:
+            arm["samples"].append(5)
         for key in (*probe.LEGACY_SAMPLE_VERDICTS, "refused1to2"):
             arm[key] = {"verdict": None}
         report = probe.rescore_generated(artifact, _p2_facts(), None)
@@ -8094,6 +8098,8 @@ def test_environment_observation_counts_only_chrome_roots_from_one_snapshot(monk
         "200 1 python3 scripts/chrome_requal.py --chrome /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --out x",
         "201 1 /bin/zsh -c /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --version",
         "202 1 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (Alerts).app/Contents/MacOS/Google Chrome Helper (Alerts)",
+        "300 50 /bin/zsh",
+        "301 300 /Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
     )).encode() + b"\n203 1 /tmp/undecodable-\xff"
     calls: list[tuple[str, ...]] = []
 
@@ -8108,7 +8114,10 @@ def test_environment_observation_counts_only_chrome_roots_from_one_snapshot(monk
     observation = probe.environment_observation()
 
     assert calls == [("uptime",), ("ps", "-axo", "pid=,ppid=,comm=")]
-    assert observation["chromeCounts"] == {"owned": 0, "foreign": 1}
+    assert observation["chromeCounts"] == {"owned": 1, "foreign": 1}
+
+    monkeypatch.setattr(probe.os, "getpid", lambda: 999)
+    assert probe.chrome_process_counts() == {"owned": None, "foreign": None}
 
 
 class TestArmInterface:

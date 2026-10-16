@@ -16,10 +16,10 @@ The owner paused the round on 2026-10-15 after the C6 r3 review. This file super
 - Review: `.agents/reviews/stage-b/architecture-review-2026-10-15.md`.
 
 **Done**
-- **C6** = `ad2bd89f`. Gate record: `.agents/reviews/stage-b/instrument-restructure/c6-gate-record.md`.
+- **C6** = `ad2bd89f` + the r3 fold commit (2026-10-16). Gate record: `.agents/reviews/stage-b/instrument-restructure/c6-gate-record.md`.
 
 **Next, in order**
-1. **Fold C6 r3** (`c6-review-r3.md`): 1 medium (malformed/missing stored sample rows coerced to `[]` → contract bypass on replay) and 1 low (owned-descendant and missing-pid test coverage). Round 3 folds mediums and lows. Then one closing r4 for majors/blockers only; stop when none.
+1. ~~Fold C6 r3~~ **done 2026-10-16**: r3 folded and closing r4 found no major/blocker, so the loop stopped (gate record updated).
 2. **C1** (plan §3). The FIRST step is the scratch timing split (drawImage vs getImageData vs DOM; `willReadFrequently` on/off; source size).
    - It is a heavy job, so ask the linked sessions for the window.
    - Then stream F implements, with Opus review.
