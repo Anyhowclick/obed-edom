@@ -22,6 +22,7 @@ import math
 import sys
 import time
 import types
+from functools import cache
 from itertools import cycle
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,7 @@ def strip_frame(index: int, size: tuple[int, int] = (binary.WIDTH, binary.HEIGHT
     return img
 
 
+@cache
 def textures() -> tuple[np.ndarray, np.ndarray]:
     yy, xx = np.mgrid[0:H, 0:W]
     A = np.zeros((H, W, 4), np.uint8)
@@ -81,16 +83,58 @@ def textures() -> tuple[np.ndarray, np.ndarray]:
     B[..., 0], B[..., 1], B[..., 2] = (20 + yy % 40), 90, (150 + xx % 80)
     B[:, 500:, 3] = 255
     B[:, :500] = 0
+    A.flags.writeable = False
+    B.flags.writeable = False
     return A, B
 
 
-def mix(A: np.ndarray, B: np.ndarray, e: float, kind: str = "patch") -> np.ndarray:
+@cache
+def canonical_premul() -> tuple[np.ndarray, np.ndarray]:
+    A, B = textures()
     Ap, Bp = probe.premul(A), probe.premul(B)
+    Ap.flags.writeable = False
+    Bp.flags.writeable = False
+    return Ap, Bp
+
+
+def _mixed(Ap: np.ndarray, Bp: np.ndarray, e: float, kind: str) -> np.ndarray:
     if kind == "patch":
         return unpremul((1 - e) * Ap + e * Bp)
     if kind == "stock":
         return unpremul((1 - e) * Ap + (1 - (1 - e) * Ap[..., 3:4] / 255.0) * Bp)
     return unpremul((1 - e) * Ap + (1 - (1 - e) * Ap[..., 3:4] / 255.0) * e * Bp)
+
+
+@cache
+def _canonical_mix(e: float, kind: str) -> np.ndarray:
+    out = _mixed(*canonical_premul(), e, kind)
+    out.flags.writeable = False
+    return out
+
+
+def mix(A: np.ndarray, B: np.ndarray, e: float, kind: str = "patch") -> np.ndarray:
+    canonical = textures()
+    if A is canonical[0] and B is canonical[1]:
+        return _canonical_mix(e, kind)
+    return _mixed(probe.premul(A), probe.premul(B), e, kind)
+
+
+def prepared_mix(A: np.ndarray, B: np.ndarray) -> Any:
+    prepared: tuple[np.ndarray, np.ndarray] | None = None
+    mixed: dict[tuple[float, str], np.ndarray] = {}
+
+    def blend(e: float, kind: str = "patch") -> np.ndarray:
+        nonlocal prepared
+        key = (e, kind)
+        if key not in mixed:
+            if prepared is None:
+                prepared = (probe.premul(A), probe.premul(B))
+            out = _mixed(*prepared, e, kind)
+            out.flags.writeable = False
+            mixed[key] = out
+        return mixed[key]
+
+    return blend
 
 
 ES = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -100,6 +144,8 @@ def fade(kind: str = "patch", *, noise: bool = False, garbage: bool = False, mas
          classes: tuple[str, ...] = ("out", "in", "overlap"), dent: str | None = None) -> dict[str, str]:
     A, B = textures()
     frames = [mix(A, B, e, kind) for e in es]
+    if dent or garbage:
+        frames = [f.copy() for f in frames]
     for f in frames:
         if dent == "overlap":
             f[100, 510, 3] = 251
@@ -368,10 +414,10 @@ def paint_fg(img: np.ndarray, rect: list[float] = FG_RECT) -> np.ndarray:
     return out
 
 
-def reference_block(spec: Any, A: np.ndarray, B: np.ndarray, with_holder: np.ndarray, live: np.ndarray, mutate: str | None,
-                    images: dict[str, np.ndarray], box: tuple[int, int, int, int]) -> dict[str, Any]:
+def reference_block(spec: Any, A: np.ndarray, with_holder: np.ndarray, live: np.ndarray, mutate: str | None,
+                    images: dict[str, np.ndarray], box: tuple[int, int, int, int], blend: Any) -> dict[str, Any]:
     """The paused, seeked reference capture (F50, B, A0 and `perfect`, two shots each) in the driver's shape."""
-    pictures = {"F50": mix(with_holder, B, 0.5), "B": mix(with_holder, B, 0.9995), "A0": with_holder.copy()}
+    pictures = {"F50": blend(0.5), "B": blend(0.9995), "A0": with_holder.copy()}
     if mutate == "ref-stale":
         pictures["F50"] = pictures["A0"].copy()
     x0, y0, x1, y1 = box
@@ -486,6 +532,8 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
     with_holder = probe.over(holder_full, A_d) if holder else A_d
     live = probe.over(np.where(in_box, dev(live_placed), 0).astype(np.uint8), A_d) if holder else A_d
     movie_d = np.where(in_box, dev(placed), 0).astype(np.uint8)
+    blend_base = prepared_mix(with_holder, B_d)
+    blend_plain = prepared_mix(A_d, B_d)
     if mutate == "tone-step":
         toned = in_box[..., 0].copy()
         fx0, fy0 = x0 + probe.jround(50 * k), y0 + probe.jround(10 * k)
@@ -534,7 +582,7 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
             img = B_d
         else:
             e = probe.ease_in_out((t0 + 5 - INSERT_MS) / DURATION_MS)
-            img = probe.over(movie_d, mix(A_d, B_d, e)) if arm == "m-hold" or fullstrength else mix(with_holder, B_d, e)
+            img = probe.over(movie_d, blend_plain(e)) if arm == "m-hold" or fullstrength else blend_base(e)
             if mutate in ("delay-42", "delay-99") and t0 + 10 < INSERT_MS + 500:
                 img = probe.over(dev(probe.place(strip_frame(99), CONTENT, CONTENT, (H, W))), A_d) if mutate == "delay-99" and n == 4 else with_holder
             if dark_at(t0, t0 + 10):
@@ -627,7 +675,7 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         images["fg-0-0"] = fg
         record["foreground"] = {"0": [] if mutate == "mask-empty" else [{"id": "FG", "rect": rect, "alpha": 1.0, "order": 7, "image": "fg-0-0"}]}
     if reference:
-        record["reference"] = reference_block(spec, A_d, B_d, with_holder, live, mutate, images, box)
+        record["reference"] = reference_block(spec, A_d, with_holder, live, mutate, images, box, blend_base)
     if spec.inject:
         record["inject"] = None if mutate == "no-inject" else {**INJECTED[spec.inject], **({"open": False} if mutate == "inject-false" else {}),
                                                                **({"box": [0.0, 10000.0, 130.0, 360.0]} if mutate == "nav-offscreen" else {})}
@@ -642,7 +690,7 @@ def media_run(arm: str, *, holder: bool = True, presented: int = 30, mutate: str
         cast = []
         for n, t in enumerate(np.arange(INSERT_MS, INSERT_MS + DURATION_MS, 32.0)):
             e = probe.ease_in_out((t - INSERT_MS) / DURATION_MS)
-            images[f"cast-{n:03d}"] = np.zeros((vh, vw, 4), np.uint8) if dark_at(t, t) else mix(with_holder, B_d, e)
+            images[f"cast-{n:03d}"] = np.zeros((vh, vw, 4), np.uint8) if dark_at(t, t) else blend_base(e)
             cast.append({"name": f"cast-{n:03d}", "t": float(t)})
         after = [c for c in cast if c["t"] > when["show"] + 20]
         if mutate == "cast-dup":
@@ -948,6 +996,7 @@ def profile_headless(profile: Any) -> bool:
 def same_colour(kind: str) -> str:
     """No dip on the both-opaque class where A and B have identical colours (rev 9's colour filter left it empty)."""
     A, B = textures()
+    B = B.copy()
     B[:, 500:520, :3] = A[:, 500:520, :3]
     out = probe.score_fade([mix(A, B, e, kind) for e in ES], A, B, classes=("overlap",), cal=CAL)
     return "INCONCLUSIVE" if out["problems"] else ("PASS" if out["checks"]["no_dip"] else "FAIL")

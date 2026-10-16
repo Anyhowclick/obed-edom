@@ -3959,6 +3959,7 @@ def test_managed_probe_state_machine_renews_suppresses_and_stops(tmp_path, monke
     assert advanced.scene_id == "0" and replacement is not current
     assert replacement.keys == [" "]
     assert adapter.cancelled and output.output["placement"]["reason"] == "cancelled"
+    output._probe_thread.join(2)
 
     output.observe()
     after_advance = adapter.starts[-1]
