@@ -726,7 +726,7 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                 "blockRects": lambda v: isinstance(v, list) and bool(v) and all(
                     isinstance(rect, list) and len(rect) == 4 and all(_finite(n) for n in rect) for rect in v
                 ),
-                "dataBits": _id,
+                "dataBits": lambda v: _finite(v) and v > 0 and int(v) == v,
                 "start": lambda v: isinstance(v, list) and bool(v) and all(n in (0, 1) for n in v),
                 "end": lambda v: isinstance(v, list) and bool(v) and all(n in (0, 1) for n in v),
                 "parity": lambda v: v == "even",
@@ -734,8 +734,10 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                 "ambiguousRatio": lambda v: _finite(v) and 0 <= v < .5,
             })
             if isinstance(counter_blocks, list) and isinstance(counter_layout.get("start"), list) \
-                    and isinstance(counter_layout.get("end"), list) and _id(counter_layout.get("dataBits")) \
-                    and len(counter_blocks) != len(counter_layout["start"]) + counter_layout["dataBits"] + 1 \
+                    and isinstance(counter_layout.get("end"), list) \
+                    and _finite(counter_layout.get("dataBits")) and counter_layout["dataBits"] > 0 \
+                    and int(counter_layout["dataBits"]) == counter_layout["dataBits"] \
+                    and len(counter_blocks) != len(counter_layout["start"]) + int(counter_layout["dataBits"]) + 1 \
                     + len(counter_layout["end"]):
                 yield f"mmFeed.counterLayout.blockRects at {path}.config.counterLayout"
         sampling = value.get("sampling")

@@ -178,13 +178,12 @@ INSTRUMENT_JS = r"""
   }
   function pixelPatch(gl,b){if(!b||b.w<1||b.h<1)return null;var px=new Uint8Array(b.w*b.h*4);
     try{gl.readPixels(b.x,b.y,b.w,b.h,gl.RGBA,gl.UNSIGNED_BYTE,px)}catch(e){return null}return {rect:b,pixels:px}}
-  function meanAt(px,w,h,x,y,r){
-    var out=[0,0,0],n=0;for(var yy=Math.max(0,Math.floor(y-r));yy<=Math.min(h-1,Math.ceil(y+r));yy++)for(var xx=Math.max(0,Math.floor(x-r));xx<=Math.min(w-1,Math.ceil(x+r));xx++){
-      var i=(yy*w+xx)*4;out[0]+=px[i];out[1]+=px[i+1];out[2]+=px[i+2];n++}return n?[out[0]/n,out[1]/n,out[2]/n]:null;
+  function pixelAt(px,w,h,x,y){
+    x=Math.floor(x);y=Math.floor(y);if(x<0||y<0||x>=w||y>=h)return null;var i=(y*w+x)*4;return [px[i],px[i+1],px[i+2]];
   }
   function cellMean(read,poly){
-    var out=[0,0,0],n=0,b=read.rect;for(var y=0;y<b.h;y++)for(var x=0;x<b.w;x++){if(!insideGrow([b.x+x+.5,b.y+y+.5],poly,0))continue;var i=(y*b.w+x)*4;out[0]+=read.pixels[i];out[1]+=read.pixels[i+1];out[2]+=read.pixels[i+2];n++}
-    if(n)return [out[0]/n,out[1]/n,out[2]/n];var cx=poly.reduce(function(a,p){return a+p[0]},0)/poly.length,cy=poly.reduce(function(a,p){return a+p[1]},0)/poly.length;return meanAt(read.pixels,b.w,b.h,cx-b.x,cy-b.y,0);
+    var out=[0,0,0],n=0,b=read.rect,c=bounds(poly,b.x+b.w,b.y+b.h,0),x0=Math.max(c.x,b.x)-b.x,y0=Math.max(c.y,b.y)-b.y,x1=c.x+c.w-b.x,y1=c.y+c.h-b.y;for(var y=y0;y<y1;y++)for(var x=x0;x<x1;x++){if(!insideGrow([b.x+x+.5,b.y+y+.5],poly,0))continue;var i=(y*b.w+x)*4;out[0]+=read.pixels[i];out[1]+=read.pixels[i+1];out[2]+=read.pixels[i+2];n++}
+    if(n)return [out[0]/n,out[1]/n,out[2]/n];var cx=poly.reduce(function(a,p){return a+p[0]},0)/poly.length,cy=poly.reduce(function(a,p){return a+p[1]},0)/poly.length;return pixelAt(read.pixels,b.w,b.h,Math.floor(cx-b.x),Math.floor(cy-b.y));
   }
   function keyFor(uv){return uv[0]+','+uv[1]}
   function sampleDimensions(size){var w=SAMPLE_WIDTH,h=size&&size[0]>0&&size[1]>0?Math.max(1,Math.round(w*size[1]/size[0])):0;return {w:w,h:h}}
@@ -208,30 +207,34 @@ INSTRUMENT_JS = r"""
     if(!c){c=state.captureCanvas=document.createElement('canvas');state.captureContext=c.getContext('2d',{willReadFrequently:false})}
     if(c.width!==w)c.width=w;if(c.height!==h)c.height=h;var ctx=state.captureContext,px;if(!ctx)return {vectors:{},counter:null,levels:[],reason:'read'};
     try{ctx.drawImage(source,0,0,iw,ih,0,0,w,h);px=ctx.getImageData(0,0,w,h).data}catch(e){return {vectors:{},counter:null,levels:[],reason:'read'}}
-    var vectors={};PATCH_UV.forEach(function(uv){var out=[];for(var y=-1;y<=1;y++)for(var x=-1;x<=1;x++){var q=meanAt(px,w,h,Math.round(uv[0]*(w-1))+x,Math.round(uv[1]*(h-1))+y,0);out=out.concat(q||[])}vectors[keyFor(uv)]=out.length===27?out:null});
+    var vectors={};PATCH_UV.forEach(function(uv){var out=[];for(var y=-1;y<=1;y++)for(var x=-1;x<=1;x++){var q=pixelAt(px,w,h,Math.round(uv[0]*(w-1))+x,Math.round(uv[1]*(h-1))+y);out=out.concat(q||[])}vectors[keyFor(uv)]=out.length===27?out:null});
     if(!layout||!Array.isArray(layout.sourceSize)||!Array.isArray(layout.blockRects))return {vectors:vectors,counter:null,levels:[],reason:'layout'};
     var sw=layout.sourceSize[0],sh=layout.sourceSize[1];if(!(sw>0&&sh>0))return {vectors:vectors,counter:null,levels:[],reason:'layout'};
     var outside=layout.blockRects.some(function(rect){return !Array.isArray(rect)||rect.length!==4||rect[0]<0||rect[1]<0||rect[2]<=0||rect[3]<=0||rect[0]+rect[2]>sw||rect[1]+rect[3]>sh});
     if(outside)return {vectors:vectors,counter:null,levels:[],reason:'bounds'};
-    var levels=layout.blockRects.map(function(rect){var cx=Math.round((rect[0]+rect[2]/2)/sw*w),cy=Math.round((rect[1]+rect[3]/2)/sh*h),q=meanAt(px,w,h,cx,cy,0);return q?(q[0]+q[1]+q[2])/3:null});
+    var levels=layout.blockRects.map(function(rect){var cx=Math.round((rect[0]+rect[2]/2)/sw*w),cy=Math.round((rect[1]+rect[3]/2)/sh*h),q=pixelAt(px,w,h,cx,cy);return q?(q[0]+q[1]+q[2])/3:null});
     var decoded=decodeCounter(levels,layout);decoded.vectors=vectors;return decoded;
   }
+  function cellQuad(m,W,H,size,dims,flip,x0,y0,x1,y1){
+    var points=[[x0/dims.w,y0/dims.h],[x1/dims.w,y0/dims.h],[x1/dims.w,y1/dims.h],[x0/dims.w,y1/dims.h]];
+    return points.map(function(p){return project(m,W,H,p[0]*size[0],(flip?1-p[1]:p[1])*size[1])});
+  }
   function vectorFromGl(gl,m,layerSize,textureSize,uv,flip){
-    var dims=sampleDimensions(textureSize),cells=[];for(var y=-1;y<=1;y++)for(var x=-1;x<=1;x++){var ix=Math.round(uv[0]*(dims.w-1))+x,iy=Math.round(uv[1]*(dims.h-1))+y,u0=ix/dims.w,u1=(ix+1)/dims.w,v0=iy/dims.h,v1=(iy+1)/dims.h;
-      cells.push([[u0,v0],[u1,v0],[u1,v1],[u0,v1]].map(function(p){return project(m,gl.drawingBufferWidth,gl.drawingBufferHeight,p[0]*layerSize[0],(flip?1-p[1]:p[1])*layerSize[1])}))}
+    var dims=sampleDimensions(textureSize),cells=[];for(var y=-1;y<=1;y++)for(var x=-1;x<=1;x++){var ix=Math.round(uv[0]*(dims.w-1))+x,iy=Math.round(uv[1]*(dims.h-1))+y;
+      cells.push(cellQuad(m,gl.drawingBufferWidth,gl.drawingBufferHeight,layerSize,dims,flip,ix,iy,ix+1,iy+1))}
     var b=bounds([].concat.apply([],cells),gl.drawingBufferWidth,gl.drawingBufferHeight,0),read=pixelPatch(gl,b),out=[];if(!read)return null;
     cells.forEach(function(cell){var q=cellMean(read,cell);out=out.concat(q||[])});return out.length===27?out:null;
   }
   function counterFromGl(gl,m,size,textureSize,flip,layout){
     if(!layout||!Array.isArray(layout.sourceSize)||!Array.isArray(layout.blockRects))return {counter:null,levels:[],reason:'layout'};var sw=layout.sourceSize[0],sh=layout.sourceSize[1],dims=sampleDimensions(textureSize);if(!(sw>0&&sh>0&&dims.h>0))return {counter:null,levels:[],reason:'layout'};
-    var cells=layout.blockRects.map(function(rect){var ix=Math.round((rect[0]+rect[2]/2)/sw*dims.w),iy=Math.round((rect[1]+rect[3]/2)/sh*dims.h),u0=ix/dims.w,u1=(ix+1)/dims.w,v0=iy/dims.h,v1=(iy+1)/dims.h;return [[u0,v0],[u1,v0],[u1,v1],[u0,v1]].map(function(p){return project(m,gl.drawingBufferWidth,gl.drawingBufferHeight,p[0]*size[0],(flip?1-p[1]:p[1])*size[1])})});
+    var cells=layout.blockRects.map(function(rect){var ix=Math.round((rect[0]+rect[2]/2)/sw*dims.w),iy=Math.round((rect[1]+rect[3]/2)/sh*dims.h);return cellQuad(m,gl.drawingBufferWidth,gl.drawingBufferHeight,size,dims,flip,ix,iy,ix+1,iy+1)});
     var points=[].concat.apply([],cells);if(points.some(function(point){return point[0]<0||point[1]<0||point[0]>gl.drawingBufferWidth||point[1]>gl.drawingBufferHeight}))return {counter:null,levels:[],reason:'bounds'};
     var b=bounds(points,gl.drawingBufferWidth,gl.drawingBufferHeight,0),read=pixelPatch(gl,b);if(!read)return {counter:null,levels:[],reason:'read'};
     var levels=cells.map(function(cell){var q=cellMean(read,cell);return q?(q[0]+q[1]+q[2])/3:null});return decodeCounter(levels,layout);
   }
   function distance(a,b){if(!a||!b||a.length!==b.length)return null;var d=0;for(var i=0;i<a.length;i++)d+=Math.abs(a[i]-b[i]);return d/a.length}
   function safeUv(uv,m,layerSize,textureSize,flip,later,W,H,leafQuad){
-    var dims=sampleDimensions(textureSize),ix=Math.round(uv[0]*(dims.w-1)),iy=Math.round(uv[1]*(dims.h-1)),u0=(ix-1)/dims.w,u1=(ix+2)/dims.w,v0=(iy-1)/dims.h,v1=(iy+2)/dims.h,points=[[u0,v0],[u1,v0],[u1,v1],[u0,v1]].map(function(p){return project(m,W,H,p[0]*layerSize[0],(flip?1-p[1]:p[1])*layerSize[1])});
+    var dims=sampleDimensions(textureSize),ix=Math.round(uv[0]*(dims.w-1)),iy=Math.round(uv[1]*(dims.h-1)),points=cellQuad(m,W,H,layerSize,dims,flip,ix-1,iy-1,ix+2,iy+2);
     var inside=points.every(function(p){return insideGrow(p,leafQuad,0)}),covered=later.some(function(q){return overlapsGrow(points,q,2)});
     return {inside:inside,covered:covered};
   }
@@ -331,10 +334,10 @@ INSTRUMENT_JS = r"""
     candidates.sort(function(a,b){return b.dSep-a.dSep});for(var i=0;i<candidates.length;i++){candidates[i].final=vectorFromGl(gl,m,layerSize,sampleSize,candidates[i].uv,tex.flip);if(candidates[i].final)return {patchInside:true,coveredByLaterDraw:false,choice:candidates[i]}}
     return {patchInside:anyInside,coveredByLaterDraw:anyInside&&!anyClear};
   }
-  function counterSafe(gl,F,row,m,size,flip){
-    var later=laterQuads(F,row.draw),inside=true,covered=false,layout=S.config&&S.config.counterLayout,source=layout&&layout.sourceSize,rects=layout&&layout.blockRects;if(!source||!Array.isArray(rects))return {inside:false,covered:false};
-    for(var i=0;i<rects.length;i++){var rect=rects[i],ux=(rect[0]+rect[2]/2)/source[0],uy=(rect[1]+rect[3]/2)/source[1],p=project(m,gl.drawingBufferWidth,gl.drawingBufferHeight,ux*size[0],(flip?1-uy:uy)*size[1]);
-      inside=inside&&insideGrow(p,row.quad,0);covered=covered||later.some(function(q){return insideGrow(p,q,2)})}
+  function counterSafe(gl,F,row,m,size,flip,textureSize){
+    var later=laterQuads(F,row.draw),inside=true,covered=false,layout=S.config&&S.config.counterLayout,source=layout&&layout.sourceSize,rects=layout&&layout.blockRects,dims=sampleDimensions(textureSize||size);if(!source||!Array.isArray(rects)||!dims.h)return {inside:false,covered:false};
+    for(var i=0;i<rects.length;i++){var rect=rects[i],ix=Math.round((rect[0]+rect[2]/2)/source[0]*dims.w),iy=Math.round((rect[1]+rect[3]/2)/source[1]*dims.h),cell=cellQuad(m,gl.drawingBufferWidth,gl.drawingBufferHeight,size,dims,flip,ix,iy,ix+1,iy+1);
+      inside=inside&&cell.every(function(p){return insideGrow(p,row.quad,0)});covered=covered||later.some(function(q){return overlapsGrow(cell,q,2)})}
     return {inside:inside,covered:covered};
   }
   function holdMatch(entry,row,choice){
@@ -352,7 +355,7 @@ INSTRUMENT_JS = r"""
     if(F.pixelsDone)return;F.pixelsDone=true;
     F.rows.forEach(function(row){var entry=G.entries.filter(function(e){return e.id===row.entryId})[0],tex=row.textures[0],m=row._matrix;
       if(!entry||!tex||!m){row.feedRead={patchInside:false,coveredByLaterDraw:false,kind:null,late:true};delete row._reference;return}
-      var counterSafeRead=counterSafe(gl,F,row,m,row._layerSize,tex.flip),counter=row._reference&&row._reference.counter;
+      var counterSafeRead=counterSafe(gl,F,row,m,row._layerSize,tex.flip,tex.uploadedSize||tex.size),counter=row._reference&&row._reference.counter;
       if(counter!==null&&counter!==undefined){var finalCounter=counterFromGl(gl,m,row._layerSize,tex.uploadedSize||tex.size,tex.flip,S.config&&S.config.counterLayout);row.feedRead={patchInside:counterSafeRead.inside,coveredByLaterDraw:counterSafeRead.covered,kind:'counter',
         counter:finalCounter.counter,counterLevels:finalCounter.levels,counterReason:finalCounter.reason,referenceCounter:counter,referenceLevels:row._reference.levels,referenceReason:row._reference.reason};row.holdMatch=holdCounterMatch(entry,row,finalCounter.counter)}
       else{var selected=bestGeneric(gl,F,row),choice=selected.choice;row.feedRead={patchInside:selected.patchInside,coveredByLaterDraw:selected.coveredByLaterDraw,kind:'alpha',

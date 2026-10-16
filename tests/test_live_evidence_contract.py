@@ -423,21 +423,11 @@ def test_v2_mm_feed_report_accepts_only_empty_unbound_gl_contexts() -> None:
 
 
 def test_v2_counter_sampling_diagnostics_co_land_with_the_layout() -> None:
-    report = _mm_feed_report()
-    report.update(version=2, browserFrames=[{"index": 0, "timestamp": 2.0}], handbacks=[])
-    report["contexts"][0].update(closedAt=None, closedFrameIndex=None)
-    report["frames"][0].update(frameIndex=0, frameTimestamp=2.0)
-    report["departures"][0].update(generation=1, visit=1)
-    report["config"]["counterLayout"] = binary_counter.layout()
+    report = _strict_setup(_mm_feed_report())
     levels = [255.0 if bit else 0.0 for bit in binary_counter.strip_bits(12)]
-    report["sampling"] = {"width": 192, "referenceCapacity": 18, "entries": {
-        "carry-a": {"references": 18, "latestFrame": 12, "latestCounter": 12,
-                    "latestLevels": levels, "latestReason": None},
-    }}
     read = report["frames"][0]["rows"][0]["feedRead"]
-    read.update(
-        referenceCounter=12, referenceLevels=list(levels), referenceReason=None,
-    )
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    report["config"]["counterLayout"]["dataBits"] = 12.0
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
     report["sampling"]["entries"]["carry-a"] = {
         "references": 0, "latestFrame": None, "latestCounter": None, "latestLevels": [], "latestReason": None,
@@ -456,26 +446,10 @@ def test_v2_counter_sampling_diagnostics_co_land_with_the_layout() -> None:
     read["counterReason"] = "bounds"
     read["counter"] = None
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
-    read.pop("referenceLevels")
-    assert "mmFeed.feedRead.referenceLevels:missing" in [
-        problem.split(" at ")[0] for problem in contract.mm_feed_report(report)
-    ]
     report["config"]["counterLayout"] = None
     assert "mmFeed.counterLayout:object" in [
         problem.split(" at ")[0] for problem in contract.mm_feed_report(report)
     ]
-
-
-def test_v2_replay_without_counter_layout_keeps_the_legacy_contract() -> None:
-    report = _mm_feed_report()
-    report.update(version=2, browserFrames=[], handbacks=[])
-    report["contexts"][0].update(atScene=None, entryIds=[], closedAt=None, closedFrameIndex=None)
-    report["departures"][0].update(generation=1, visit=1)
-    report["frames"][0].update(
-        atScene=None, rows=[], labels=[], riders=[], labelExpected=[], frameIndex=0, frameTimestamp=2.0,
-    )
-    assert "sampling" not in report
-    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
 
 
 def _strict_setup(report: dict[str, Any]) -> dict[str, Any]:

@@ -78,7 +78,7 @@ def layout() -> dict[str, Any]:
     }
 
 
-def decode_counter(levels: Any, counter_layout: dict[str, Any] | None = None) -> dict[str, Any]:
+def decode_counter(levels: Any, counter_layout: dict[str, Any] | None) -> dict[str, Any]:
     raw = list(levels) if isinstance(levels, (list, tuple)) else []
     if not isinstance(counter_layout, dict):
         return {"counter": None, "levels": raw, "reason": "layout"}
@@ -87,10 +87,11 @@ def decode_counter(levels: Any, counter_layout: dict[str, Any] | None = None) ->
     data_bits = counter_layout.get("dataBits")
     minimum = counter_layout.get("minContrast")
     ambiguous_ratio = counter_layout.get("ambiguousRatio")
+    integral_data_bits = isinstance(data_bits, (int, float)) and not isinstance(data_bits, bool) \
+        and math.isfinite(data_bits) and data_bits > 0 and int(data_bits) == data_bits
     if counter_layout.get("format") != COUNTER_FORMAT or not isinstance(rects, list) \
             or not rects or not isinstance(start, list) or not start or not isinstance(end, list) or not end \
-            or not isinstance(data_bits, int) or isinstance(data_bits, bool) or data_bits <= 0 \
-            or len(rects) != len(start) + data_bits + 1 + len(end) \
+            or not integral_data_bits or len(rects) != len(start) + int(data_bits) + 1 + len(end) \
             or not isinstance(minimum, (int, float)) or isinstance(minimum, bool) or not math.isfinite(minimum) \
             or minimum <= 0 \
             or not isinstance(ambiguous_ratio, (int, float)) or isinstance(ambiguous_ratio, bool) \
@@ -169,6 +170,8 @@ def decoder_conformance_vectors() -> list[dict[str, Any]]:
                   "counter": None, "reason": "layout"})
     cases.append({"name": "fractional-data-bits", "levels": list(levels),
                   "layout": {**canonical, "dataBits": DATA_BITS + .5}, "counter": None, "reason": "layout"})
+    cases.append({"name": "integral-float-data-bits", "levels": list(levels),
+                  "layout": {**canonical, "dataBits": float(DATA_BITS)}, "counter": 1380, "reason": None})
     cases.append({"name": "none-layout", "levels": list(levels), "layout": None,
                   "counter": None, "reason": "layout"})
     return cases
