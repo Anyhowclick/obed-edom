@@ -1,68 +1,95 @@
-# Handover: Stage B instrument restructure (resume 2026-10-16)
+# Handover: Stage B instrument restructure (updated 2026-10-16 evening)
 
-The owner paused the round on 2026-10-15 after the C6 r3 review. This file supersedes the "Resume here" sections of
-`stage-b-implementation-2026-10-15.md` and `alpha-b3to4-stall-2026-10-15.md` for this branch.
+**Coordinator (owner 2026-10-16):** session `local_4b825e27-26e0-4d7b-a4af-de1cc7d9d4c2`, worktree
+`funny-pasteur-751a72`; merges happen in worktree `stage-b-coord` (on `claude/stage-b-arch`). The old "Stage B
+Restructure" session is retired. This file supersedes the "Resume here" sections of `stage-b-implementation-2026-10-15.md`
+and `alpha-b3to4-stall-2026-10-15.md`.
 
 ## Resume here
 
-**Where things are**
-- Worktree: `.claude/worktrees/inspiring-feynman-06914e`, branch **`claude/stage-b-arch`**. Local only, not pushed.
-- `claude/stage-b-arch` = Stage B (`origin/claude/stage-b-implementation` @ `16f6c9fa`) + main #288–#293 (merge `fc0a0726`, Astra merge review READY).
-- Main has since gained **#294** (`163ec812`: pre-load qualification truth, `web/live.py`). Merge it before the PR.
-- Env synced (`uv sync`, `npm ci`, output symlinks). Run tests with this worktree's `.venv`.
+**Where things are** (`claude/stage-b-arch` @ `33cb7729`, pushed)
+- Merged today: C2 offline validity (`61b8082d`), gate 4 historical inventory (`733cd70f`), the Chrome rule (any 155.x,
+  one build per round, plan §4 amended; `749b63a0`), the Chrome 155.0.8059.80 requal record (`69c84865`), and **C1**
+  (`33cb7729`: review r1/r2/r3 READY, records `c1-review-r1..r3.md`).
+- Full suites on the C1 tree: 3.13 and 3.10 both 11366 passed / 38 skipped / 1 xfailed.
+- A fresh worktree needs the main checkout's git-ignored fixtures symlinked (`output/{bank,evidence,fixtures}`,
+  `Sermon Outlines/*.docx`) or ~50 extra tests skip (88 vs 38).
 
-**Read first**
-- Plan: `.agents/plans/keynote_live_continuity_stage_b_instrument_restructure.plan.md` (r3, owner-approved), especially §9 streams and §10 gates.
-- Review: `.agents/reviews/stage-b/architecture-review-2026-10-15.md`.
+**C1 gate 2** (`.agents/reviews/stage-b/instrument-restructure/c1-gate2-record.md`)
+- Timing PASS: `callbackCostP95Ms` 106–109 → 3.0–3.7 ms; scene 8/10/12 medians 100/100/200 → 33/17/33 ms.
+- **OPEN, due before gate 5a (owner 2026-10-16):** the feed-control colours and the holdMatch/poster positive/red
+  separation are not re-proved, and the D1 counter-policy obligations (D7 crossfade/from-only, at least one positive GL
+  counter decode) are open. All 25 MM-FEED arms fail in a full run_gates round, identically on the pre-C1 tree:
+  D7/D7s `feedLive` None (GL counter `coveredByLaterDraw`, flat 66.7 levels; F4 item 2, not a cost effect), and every
+  Alpha_DSK carry INCONCLUSIVE on the gate's repaired fixture ("movie never decoded" / "core feed seam did not identify a
+  feed or departure mode"; the q7 Alpha fixture scores normally). Diagnosis session: "Diagnose Stage B MM-FEED baseline
+  failures" (`local_6bc69277-054d-426a-b337-94574bac08fe`), on the C1 tree; it hands back before fixing.
+- Every host, P2, Pass G and carry-cover gate MATCHed in that round (wall 1251 s at GATE_JOBS=3).
 
-**Done**
-- **C6** = `ad2bd89f` + the r3 fold commit (2026-10-16). Gate record: `.agents/reviews/stage-b/instrument-restructure/c6-gate-record.md`.
+**C3** (session `local_a393024c-7f20-4969-9cdf-f4fe6eec32ab`, branch `claude/stage-b-c3-adadcc`): fold rounds r4/r5 in
+progress; it merges `claude/stage-b-arch` (now with C1: expect a small probe/probe-test merge), runs full suites in a
+window, then hands back. The Alpha arm A b6to7/b7to8 `wa0125` carry=False (`missingSamples` inside the glInterval)
+reproduces on both trees; C3's GL excuse fixes it.
 
-**Next, in order**
-1. ~~Fold C6 r3~~ **done 2026-10-16**: r3 folded and closing r4 found no major/blocker, so the loop stopped (gate record updated).
-2. **C1** (plan §3). The FIRST step is the scratch timing split (drawImage vs getImageData vs DOM; `willReadFrequently` on/off; source size).
-   - It is a heavy job, so ask the linked sessions for the window.
-   - Then stream F implements, with Opus review.
-   - Raw material: branch **`claude/stage-b-c1-unbriefed`** (`0abf8772`). It is an UNREVIEWED attempt produced from an empty brief: 192 px single downscaled draw/read, `willReadFrequently:false`, shared counter layout/decoder, `report()` shutdown. **Do not merge it.** Reuse it only after the timing split justifies its choices.
-3. Then follow the plan: C2 (cost/environment validity + cadence *measurement*) → C3 + bounded C4 → C5 → C10 audit → **gate 5a (owner: Q1 host rows, Q2 cadence statistic, historical INVALID list)** → 6a full suites → gates 7–15.
+**Next, in order (plan)**
+C3 merge → MM-FEED baseline fix + C1 separation re-proof → bounded C4 (stream F, same file as C1) → C5 → C10 audit →
+**gate 5a (owner: Q1 host rows, Q2 cadence statistic, gate 4's historical list and its decisions 2–5)** → 6a full
+suites → gates 7–15 → Q7 attempt 4 (the owner's live check).
 
-**Roster** (until 2026-10-27; see memory `feedback-delegate-implementation`)
+**Open items carried**
+- F4 (2): D7/D7s feedLive None: coverage, not cost (see C1 gate 2). In the diagnosis session.
+- F4 (3): the Alpha b5to6 / b7to8:wa0121 flips. Re-check after C3.
+- `PRE_DRAW_GRACE_MS` = 320 ms: thin margin (D7 controls 306.5 ms); widening it is the owner's call.
+- C2 integration items (`c2-offline-gate-record.md` §Open): hook names, `gl_intervals`, attach profile field, probe
+  imports host kinds from `live_run_validity`.
+- Kernel measured only at the integer 10× downscale; non-integer ratios rely on the separation re-proof.
+
+**Roster** (until 2026-10-27; memory `feedback-delegate-implementation`)
 - Codex GPT-5.6 Sol high implements: `codex exec -m gpt-5.6-sol -c model_reasoning_effort=high -s workspace-write -c 'sandbox_workspace_write.writable_roots=["<scratch>"]' -C <worktree> -o <report> "<brief>" < /dev/null`.
-- Opus 5.5 high reviews, as a Workflow: lenses, then each finding adversarially verified.
+- Opus 5.5 high reviews. The Workflow tool needs the owner's explicit opt-in; otherwise use an Agent with `model: opus`, `effort: high`, and lenses with self-refutation.
 - Planner: Astra. Critic: Opus.
-- Sol's sandbox cannot read the uv cache; it falls back to `.venv/bin/python`. Re-run its tests outside the sandbox.
-- **Write briefs with a QUOTED heredoc and check `wc -c` before launching.** 2026-10-15: an unquoted heredoc sent an empty brief, and Sol implemented C1 unbriefed.
-
-## Side work (linked sessions)
-
-| Item | Where | State | Next |
-|---|---|---|---|
-| Alpha b6to7/b7to8 hand-back placement fix (plan Q3: fix before Q7) | Session "Diagnose Alpha b6to7/b7to8 decoder placement", branch `claude/friendly-stonebraker-16d950` @ `3a9a85b4`; fix `48d8182e`, core **`838eeedf`**; its gate record + resume-here on that branch | Headless A/B green: old core reproduces (frozen pixels slides 8–9, `#body`, hand-back/artwork False); fixed core all green with moving pixels. D7/D7s signatures identical. Red controls red. P2 GL-replay and D2/D5 pass. Opus r1 READY (3 lows folded). | Full suites (3.12 + 3.10). Then merge into `claude/stage-b-arch`; it re-pins `detach_experiment.py:76`, a different hunk from C6. |
-| `noRiderAboveCanvas` A/B (plan gate 10b, owner go) | Same session, `cde7e19a` (merged `ef9fbd6c`) | **Done**: instrument artefact (draws=0 departure frames). | **Owner 2026-10-16: skip pre-first-draw frames.** Implemented in `mm_feed_instrument._visit_record` (see the alpha-placement gate record). |
-| F4 cold start | #295 **merged** into `claude/stage-b-arch` (merge `19cb4eae`, owner) | Deck-load H.264 warm-up: headless Alpha slide-4 entry 212→17 ms; managed OBS first session 282→60 ms. Record: `.agents/reviews/movie-warmup-2026-10-16/acceptance-record.md`. Docs cleanup PR #296 awaits the owner. | Stage B owns three items. (1) A3 is unscorable: `47bc3698` moved `paint_start` to the first decoded row, so the slide-entry poster exposure is unscored in both arms. That falls to F3 `entryColdStart`, or to revisiting that line. (2) 25 MM-FEED/host gates fail at base level in both warm-up arms (at `39b32de9`): D7/D7s feedLive None (`coveredByLaterDraw`; stock pre-move capture `callbackCostP95Ms` ~128 ms), D7 b0to1 noRider False (before `5422f4ec`), and Alpha b5to6..b7to8. (3) On `7746df27`, the Alpha b5to6 and b7to8:wa0121 verdicts flip run to run. Diagnose this before Q7. Also re-check `PRE_DRAW_GRACE_MS` (320 ms) now that the warm-up has landed. |
-| Pre-load qualification truth | PR #294 | **Merged** | Merge main into `claude/stage-b-arch`. |
+- Sol's sandbox can't use the uv cache; it uses `.venv/bin/python`. Re-run its tests outside the sandbox.
+- **Write briefs with a QUOTED heredoc and check `wc -c`.** zsh: `status` is read-only, so don't use it as a variable name.
 
 ## After Stage B merges (owner 2026-10-16)
-- **Suite speed-up:** #297 is merged to main (`76452a91`). Its net diff is ported onto Stage B at `6adaa752` and `fcd2b2ef`. When Stage B merges main, expect these files to already match: `run_gates.sh`, `test_run_gates.py`, `conftest.py`. Notes: `.agents/handovers/suite-speedup-stage-b-rebase.md`.
-- **Pass G option A** (suite-speedup plan, `.agents/plans/suite_speedup.plan.md`) lands only after Stage B merges.
+- **Suite speed-up:** #297 is on main (`76452a91`) and already ported. When Stage B merges main, `run_gates.sh`, `test_run_gates.py` and `conftest.py` should already match. Notes: `.agents/handovers/suite-speedup-stage-b-rebase.md`.
+- **Pass G option A** (`.agents/plans/suite_speedup.plan.md`) lands only after Stage B merges.
 - **Feed-dwell shortening is a Stage B item, low priority, after the merge.**
   - Apply `FEED_DWELL_S` only before the presses out of the scored carries.
-  - Then either limit the dwell arms' gate expectations to those carries, or prove headless that the non-scored carries pass at `CLICK_DELAY_S`.
+  - Then either limit the dwell arms' gate expectations to those carries (run_gates' `check_mm_feed` applies the feed-off expectations to EVERY under-artwork record), or prove headless that the non-scored carries pass at `CLICK_DELAY_S`.
   - D7 attach-once gets the same treatment.
   - Add an arm-level check that the dwell was applied.
-  - Saves about 35 s of wall time per gate round.
+  - Saves about 35 s of wall time per round.
 
-## Owner decisions this round (2026-10-15)
+## Owner decisions (2026-10-15/16)
+- 2026-10-16: requalify Chrome 155.0.8059.80; minor/patch builds auto-qualify (any build in a qualified major, one
+  build per round, recorded per run).
+- 2026-10-16: the coordinator role moves to this session; the old coordinator is retired.
+- 2026-10-16: MM-FEED arms need to pass on the post-C1 tree only; merge C1 after full suites, with the feed-colour and
+  holdMatch/poster separation proof open before gate 5a.
 - Scope C6, C1, C2, C3, C4-slice, C5, C10-audit approved; plan r3 approved.
+- C3 runs in parallel with C1, in its own session.
 - C4 keeps the report-wide producer-error rule.
-- `entryColdStart` is report-only.
-- 2026-10-16: the rider census skips move frames before the first GL draw. Bounds: `PRE_DRAW_GRACE_MS` = 320 ms (provisional), and an accepted stand-down before the first draw cancels the exemption. Geometry check deferred. See `.agents/reviews/stage-b/alpha-placement/gate-record-2026-10-16-predraw.md`.
-- "1 video to 3" = slides 7→8→9 (the F1 observer effect).
-- Q3: fix the Alpha placement before Q7.
-- Run the `noRiderAboveCanvas` A/B before Q7 attempt 4.
+- `entryColdStart` is report-only. "1 video to 3" = slides 7→8→9.
+- Q3: fix the Alpha placement before Q7 (done). The noRider A/B ran before Q7 attempt 4 (done).
+- The rider census skips the zero-draw prefix, with these bounds:
+  - `PRE_DRAW_GRACE_MS` = 320 ms (provisional);
+  - an accepted stand-down ends the exemption;
+  - a 1 authored px source-rect tolerance;
+  - JS `firstDrawAt`.
+  Records: `.agents/reviews/stage-b/alpha-placement/gate-record-2026-10-16-predraw.md` and `.agents/reviews/stage-b/predraw-geometry/gate-record-2026-10-16.md`.
 - F4: warm-up yes, faststart no.
+- The suite speed-up merged into Stage B optimistically.
+
+## Housekeeping (owner 2026-10-16: done)
+- Finished sessions are archived: the geometry check, F4, the Alpha placement diagnosis and the suite speed-up.
+- The `stage-b-impl` worktree went to the Trash, and its merged branch `claude/stage-b-implementation` was deleted locally (the remote copy remains).
+- `stage-b-q7` (detached `03a35b28`, the pre-departure-fix core) is **kept until Q7** as an A/B reference.
+- Deleted local branches:
+  - `claude/cool-shannon-0179e4`: its handover lines are already in `alpha-b3to4-stall-2026-10-15.md`;
+  - `claude/f4-warmup-cleanup`, `claude/friendly-stonebraker-16d950`, `claude/funny-pasteur-751a72`, `claude/gallant-matsumoto-1444a2` and `claude/predraw-cleanup` (all fully merged).
 
 ## Machine
-- One heavy job machine-wide. Send "need window" / "done" to the linked sessions.
+- One heavy job machine-wide (full suites, gate rounds, captures). Send "need window" / "done" to the linked sessions.
 - At most 3 headless Chromes. Record uptime.
-- Chrome 155.0.8059.79.
+- Chrome 155.0.8059.80 (auto-updated 2026-10-16 08:53; requalified).

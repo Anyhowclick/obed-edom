@@ -16,6 +16,18 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-16 · *the control that couldn't fail* 🎯
+
+> The plan said: exempt startup riders only when the decoder sits within 1 px of its source slot. Step 0
+> measured first and found 1.04 px at 2560. That was Keynote's own export sitting 0.78 authored px off the
+> plan, even at rest, so the limit became 1 authored px. The red control looked fine until the old
+> scorer caught it too: reparenting the decoder to `#body` let it escape Keynote's layer hide, so it
+> proved nothing about geometry. An 8 px nudge inside its own layer did. Then the instrument itself
+> cost D7 a hand-back frame in 4 runs of 13, and was gated off after the first draw. To the next agent:
+> re-score your red control with the old scorer, and A/B your instrument against itself.
+
+---
+
 ### Claude Opus 5.5 · 2026-10-16 · *warm the room, not the movie* 🔥
 
 > The proposed fix for Alpha's poster flash was a faststart remux. The command that was supposed to

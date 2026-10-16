@@ -1,5 +1,7 @@
 # Pre-draw geometry gate record (2026-10-16)
 
+Evidence (results only): `output/evidence/stage-b-2026-10-13/predraw-geometry/` (README.txt). The `val/...` names below are its capture sets.
+
 Branch `claude/predraw-geometry` (local), from `claude/stage-b-arch` 7746df27. Plan: `.agents/plans/keynote_live_predraw_geometry.plan.md`. Step 0 and the owner tolerance decision: `step0-2026-10-16.md`.
 
 ## Rule
@@ -25,7 +27,7 @@ One failed or unreadable prefix frame scores the whole visit. A missing `sourceR
 - Drawn frames now carry `sourceRectError` 0, meaning "not measured".
 
 ## Process
-- Plan: Codex GPT-6 Astra high. Critique: Opus 5.5 high (r1 NOT READY with 1 blocker and 3 majors; r2 NOT READY with 3 mediums; r3 READY). Critiques: `plan-critique-r{1,2,3}.md`.
+- Plan: Codex GPT-6 Astra high. Critique: Opus 5.5 high (r1 NOT READY with 1 blocker and 3 majors; r2 NOT READY with 3 mediums; r3 READY). The review log is in the plan.
 - Owner: "step 0 check 1st, then the usual workflow". After Step 0, the owner chose 1 authored px.
 - Implementation: Codex GPT-5.6 Sol high. Commits: 533f88d5 (Step 0), e9a3dd4b, 27aaaf9d (r1 fold), f9cdc159, 794dfe4c (control rework), 2966a19d (r3 fold), b3ddc071 (merge of stage-b-arch 15fa7c41 with F4), 9d5cf850 (fold gate), 1b49f801 (r5 fold).
 - Review: Opus 5.5 high.
