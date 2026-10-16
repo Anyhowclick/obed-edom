@@ -12263,7 +12263,7 @@ def test_paint_start_begins_at_the_first_decoded_settled_source_frame() -> None:
     assert probe.paint_start(samples, 7, 5, {"start": 2.0, "end": 4.0}, None) == 3.0
 
 
-def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None:
+def _report_shaped_feed_fixture(mode: str = "continuous") -> tuple[dict[str, Any], dict[str, Any]]:
     entry = {
         "id": "b1to2:movie-a:carry", "objectId": "movie-a", "dstObjectId": "movie-b", "atScene": 2,
         "feed": {"draw": 1, "from": {"upload": 1, "size": [640, 360]}, "to": None},
@@ -12301,59 +12301,90 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
                      "textureOrdinal": 1, "presentedFrames": index + 10, "mediaTime": index / 30}
                     for index in range(4)],
         "claims": [{"objectId": "movie-a", "entryId": entry["id"], "serial": 1,
-                    "atScene": 2, "t": .75, "claimed": True}],
-        "standDowns": [], "departures": [],
+                    "atScene": 2, "t": .75, "claimed": mode == "continuous"}],
+        "standDowns": [], "departures": [] if mode == "continuous" else [
+            {"objectId": "movie-a", "entryId": entry["id"], "serial": 1, "atScene": 2, "t": .8},
+        ],
         "artwork": [{"entryId": entry["id"], "serial": 1, "atScene": 2, "artworkAbove": True}],
         "module": {"entries": {"movie-a": {"mode": "continuous", "state": "fed", "framesFed": 4,
                                                    "maxInterFeedGapMs": 32.0, "maxInterFeedGapLimitMs": 50.0}}},
         "tamper": None,
     }
-    pre_draw = copy.deepcopy(report)
-    pre_draw["frames"][0]["draws"] = 0
-    pre_draw["frames"][0]["riders"][0].update(visible=True, opacityProduct=1.0)
+    return entry, report
+
+
+@pytest.mark.parametrize(("case", "mode", "expected", "exempt", "exempted"), [
+    ("stationary", "continuous", True, True, 1),
+    ("duration", "departure", False, False, 0),
+    ("other-entry", "continuous", False, False, 0),
+    ("first-draw", "departure", False, True, 1),
+    ("never-draw", "continuous", None, False, 0),
+    ("stand-down", "departure", False, False, 0),
+    ("stand-down-before", "departure", False, False, 0),
+    ("unreadable", "continuous", None, True, 1),
+    ("overlay-ride", "departure", False, True, 1),
+    ("two-visits", "continuous", True, True, 1),
+])
+def test_rider_pre_draw_exemption(
+    case: str, mode: str, expected: bool | None, exempt: bool, exempted: int,
+) -> None:
+    entry, report = _report_shaped_feed_fixture(mode)
+    for index, frame in enumerate(report["frames"]):
+        frame["t"] = [100.0, 130.0, 146.0, 162.0][index]
+        frame["draws"] = 0 if index == 0 else 1
+        frame["riders"][0].update(visible=index == 0, opacityProduct=1.0 if index == 0 else 0.0)
+    if case == "duration":
+        for frame, timestamp in zip(report["frames"][1:], (421.0, 437.0, 453.0), strict=True):
+            frame["t"] = timestamp
+    elif case == "other-entry":
+        report["frames"][0]["draws"] = 1
+        report["frames"][0]["rows"] = []
+    elif case == "first-draw":
+        report["frames"][1]["riders"][0].update(visible=True, opacityProduct=1.0)
+    elif case == "never-draw":
+        for frame in report["frames"]:
+            frame["draws"] = 0
+    elif case in {"stand-down", "stand-down-before"}:
+        report["standDowns"].append({
+            "objectId": "movie-a", "entryId": entry["id"], "serial": 1, "atScene": 2,
+            "t": 95.0 if case == "stand-down-before" else 115.0, "reason": "test", "accepted": True,
+        })
+    elif case == "unreadable":
+        report["frames"][2]["draws"] = None
+    elif case == "overlay-ride":
+        for frame in report["frames"]:
+            frame["riders"][0].update(visible=True, opacityProduct=1.0)
+    elif case == "two-visits":
+        for frame in report["frames"]:
+            frame["rows"] = []
+        report["contexts"].append({
+            **report["contexts"][0], "serial": 2, "id": "1-canvas", "createdAt": 1099.0, "closedAt": 1200.0,
+        })
+        for frame in copy.deepcopy(report["frames"]):
+            frame.update(serial=2, n=frame["n"] + 10, t=frame["t"] + 1000, draws=0)
+            frame["riders"][0]["serial"] = 2
+            report["frames"].append(frame)
+        visits = probe.mm_feed_instrument.verdict_records(
+            report, [entry], continuous_expected=mode == "continuous",
+        )[entry["id"]]["visits"]
+        assert visits[0]["rider"]["exempt"] is True
+        assert probe.score_no_rider_above_canvas(visits[0]["rider"])["verdict"] is True
+        assert visits[1]["rider"]["exempt"] is False
+        assert visits[1]["rider"]["preDrawMs"] is None
+        assert probe.score_no_rider_above_canvas(visits[1]["rider"])["verdict"] is None
+        return
     rider = probe.mm_feed_instrument.verdict_records(
-        pre_draw, [entry], continuous_expected=True,
+        report, [entry], continuous_expected=mode == "continuous",
     )[entry["id"]]["rider"]
-    assert rider["coverage"] is True
-    assert rider["preDrawFrames"] == 1
-    assert len(rider["riders"]) == 3
-    assert probe.score_no_rider_above_canvas(rider)["verdict"] is True
-    pre_draw["frames"][0]["draws"] = None
-    rider = probe.mm_feed_instrument.verdict_records(
-        pre_draw, [entry], continuous_expected=True,
-    )[entry["id"]]["rider"]
-    assert rider["coverage"] is False
-    assert probe.score_no_rider_above_canvas(rider)["verdict"] is None
-    overlay_ride = copy.deepcopy(report)
-    for index, frame in enumerate(overlay_ride["frames"]):
-        frame["draws"] = 0 if index == 0 else 5
-        frame["riders"][0].update(visible=True, opacityProduct=1.0)
-    rider = probe.mm_feed_instrument.verdict_records(
-        overlay_ride, [entry], continuous_expected=True,
-    )[entry["id"]]["rider"]
-    assert rider["preDrawFrames"] == 1
-    assert probe.score_no_rider_above_canvas(rider)["verdict"] is False
-    never_drawn = copy.deepcopy(overlay_ride)
-    for frame in never_drawn["frames"]:
-        frame["draws"] = 0
-    rider = probe.mm_feed_instrument.verdict_records(
-        never_drawn, [entry], continuous_expected=True,
-    )[entry["id"]]["rider"]
-    assert rider["coverage"] is True
-    assert rider["preDrawFrames"] == len(never_drawn["frames"])
-    assert rider["riders"] == []
-    assert probe.score_no_rider_above_canvas(rider) == {
-        "verdict": None, "reason": "inconclusive: no rider census was recorded",
-    }
-    unreadable_after_draw = copy.deepcopy(report)
-    unreadable_after_draw["frames"][0]["draws"] = 0
-    unreadable_after_draw["frames"][2]["draws"] = None
-    unreadable_after_draw["frames"][2]["riders"][0].update(visible=True, opacityProduct=1.0)
-    rider = probe.mm_feed_instrument.verdict_records(
-        unreadable_after_draw, [entry], continuous_expected=True,
-    )[entry["id"]]["rider"]
-    assert rider["preDrawFrames"] == 1
-    assert probe.score_no_rider_above_canvas(rider)["verdict"] is None
+    assert rider["preDrawFrames"] == (4 if case == "never-draw" else 0 if case == "other-entry" else 1)
+    assert rider["preDrawMs"] == (None if case == "never-draw" else 0.0 if case == "other-entry" else 321.0 if case == "duration" else 30.0)
+    assert rider["exempt"] is exempt
+    assert rider["exemptedVisibleSamples"] == exempted
+    assert probe.score_no_rider_above_canvas(rider)["verdict"] is expected
+
+
+def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None:
+    entry, report = _report_shaped_feed_fixture()
     assert probe.contract.first_errors(probe.contract.mm_feed_report(report), limit=20) == []
     spec = {
         **entry, "kind": "carry", "asset": "movie-a", "srcRect": dict(SRC_RECT), "dstRect": dict(DST_RECT),

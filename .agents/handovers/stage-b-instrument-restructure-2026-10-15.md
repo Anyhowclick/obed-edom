@@ -46,7 +46,7 @@ The owner paused the round on 2026-10-15 after the C6 r3 review. This file super
 - Scope C6, C1, C2, C3, C4-slice, C5, C10-audit approved; plan r3 approved.
 - C4 keeps the report-wide producer-error rule.
 - `entryColdStart` is report-only.
-- 2026-10-16: the rider census skips move frames before the entry's first GL draw.
+- 2026-10-16: the rider census skips move frames before the first GL draw. Bounds: `PRE_DRAW_GRACE_MS` = 320 ms (provisional), and an accepted stand-down before the first draw cancels the exemption. Geometry check deferred. See `.agents/reviews/stage-b/alpha-placement/gate-record-2026-10-16-predraw.md`.
 - "1 video to 3" = slides 7→8→9 (the F1 observer effect).
 - Q3: fix the Alpha placement before Q7.
 - Run the `noRiderAboveCanvas` A/B before Q7 attempt 4.

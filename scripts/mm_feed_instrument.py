@@ -13,6 +13,8 @@ LABEL_SLOPE_TOLERANCE = 0.02
 RIDER_OPACITY_FLOOR = 0.02
 # Provisional paint-coverage limit: re-bank from Phase 0 callback/upload gaps with this instrument.
 MAX_INTER_FEED_GAP_MS = 50.0
+# Provisional: covers the measured cold-start prefixes (max 315 ms); tighten after the deck-load warm-up.
+PRE_DRAW_GRACE_MS = 320.0
 # Provisional: re-bank from Phase 0 headless captures alongside ALPHA_POSTER_FLOOR.
 ALPHA_HOLD_MARGIN = 6.0
 # Provisional: re-bank from Phase 0 headless captures alongside ALPHA_POSTER_FLOOR.
@@ -610,8 +612,21 @@ def _visit_record(
     rider_rows = [[r for r in f.get("riders") or [] if isinstance(r, dict) and r.get("entryId") == entry_id]
                   for f in move_frames]
     pre_draw_frames = next((index for index, frame in enumerate(move_frames)
-                            if _finite(frame.get("draws")) and frame["draws"] > 0), len(move_frames))
-    riders = [r for group in rider_rows[pre_draw_frames:] for r in group]
+                            if not isinstance(frame.get("draws"), int) or isinstance(frame["draws"], bool)
+                            or frame["draws"] != 0), len(move_frames))
+    first_draw = next((frame for frame in move_frames
+                       if isinstance(frame.get("draws"), int) and not isinstance(frame["draws"], bool)
+                       and frame["draws"] > 0), None)
+    pre_draw_ms = first_draw["t"] - move_frames[0]["t"] if first_draw is not None else None
+    exempt = (
+        pre_draw_frames > 0 and first_draw is not None
+        and pre_draw_ms <= PRE_DRAW_GRACE_MS
+        and not any(_finite(stand.get("t")) and stand["t"] <= first_draw["t"] for stand in entry_stands)
+    )
+    exempted = [r for group in rider_rows[:pre_draw_frames] for r in group] if exempt else []
+    riders = [] if first_draw is None else [
+        r for group in rider_rows[pre_draw_frames if exempt else 0:] for r in group
+    ]
     rider_coverage = bool(move_frames) \
         and all(isinstance(f.get("draws"), int) and not isinstance(f["draws"], bool) and f["draws"] >= 0 for f in move_frames) \
         and all(len(group) == 1 and _rider_readable(group[0]) for group in rider_rows)
@@ -732,7 +747,8 @@ def _visit_record(
         "mode": mode, "reason": reason, "evidenceVersion": report.get("version", 1), **common,
         "continuousExpected": continuous_expected,
         "feed": feed, "rider": {"riders": riders, "coverage": rider_coverage, "complete": frames_complete,
-                                 "preDrawFrames": pre_draw_frames},
+                                 "preDrawFrames": pre_draw_frames, "preDrawMs": pre_draw_ms, "exempt": exempt,
+                                 "exemptedVisibleSamples": sum(_rider_offender(row) for row in exempted)},
         "labels": {
             "labels": labels, "expected": expected_labels,
             "coverage": label_coverage, "complete": frames_complete,
@@ -746,6 +762,11 @@ def _visit_record(
 def _rider_readable(row: Any) -> bool:
     return isinstance(row, dict) and isinstance(row.get("visible"), bool) and _finite(row.get("opacityProduct")) \
         and isinstance(row.get("intersectsCanvas"), bool)
+
+
+def _rider_offender(row: Any) -> bool:
+    return _rider_readable(row) and row["visible"] and row["intersectsCanvas"] \
+        and row["opacityProduct"] > RIDER_OPACITY_FLOOR
 
 
 def _source_frame_duration(
@@ -905,7 +926,7 @@ def score_no_rider_above_canvas(record: Any) -> dict[str, Any]:
     if not all(isinstance(row, dict) and isinstance(row.get("visible"), bool) and _finite(row.get("opacityProduct"))
                and isinstance(row.get("intersectsCanvas"), bool) for row in frames):
         return _verdict(None, "a rider census row is unreadable")
-    offenders = [row for row in frames if row["visible"] and row["intersectsCanvas"] and row["opacityProduct"] > RIDER_OPACITY_FLOOR]
+    offenders = [row for row in frames if _rider_offender(row)]
     return _verdict(not offenders, "a carried decoder composited above the GL canvas" if offenders else None,
                     offenders=offenders[:10], sampleCount=len(frames))
 
