@@ -617,14 +617,15 @@ def test_missing_qual_b_source_is_refused_only_when_feed_arms_are_requested(gate
 
 @pytest.mark.parametrize("failure", ["missing", "unreadable", "dir"])
 def test_alpha_movie_staging_refuses_before_timed_runs(gates, failure: str) -> None:
+    donor = next(p for p in sorted(gates["alpha_donor"].iterdir()) if p.is_file() and p.name != gates["alpha_relative"].name)
     if failure == "dir":
         shutil.rmtree(gates["alpha_donor"])
         expected = "Alpha complete export donor is missing at"
     elif failure == "missing":
-        next(gates["alpha_donor"].iterdir()).unlink()
+        donor.unlink()
         expected = "is missing needed movie file name(s)"
     else:
-        next(gates["alpha_donor"].iterdir()).write_bytes(b"not a movie")
+        donor.write_bytes(b"not a movie")
         expected = "has unreadable or mixed movie assets:"
     done = gates["run"](outdir=gates["tmp"] / f"alpha-{failure}")
     assert done.returncode == 2 and expected in done.stderr
