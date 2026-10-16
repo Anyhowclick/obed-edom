@@ -59,15 +59,14 @@ _STARTUP_MOVED_DECODER = """    if (waitForGl && (document.contains(v) || depart
       return true;
     }
 """
-_DEPARTURE_FINISH_HIDE = """      beginMove(v);
-      (document.getElementById('body') || document.body).appendChild(v);
-      v.style.opacity = '0';
-"""
-_DEPARTURE_FINISH_HIDE_MOVED_DECODER = """      beginMove(v);
-      (document.getElementById('body') || document.body).appendChild(v);
-      v.style.translate = '';
-      v.style.opacity = '0';
-"""
+_DEPARTURE_HIDES = "  const departureHides = new Map();\n"
+_DEPARTURE_HIDES_MOVED_DECODER = (
+    "  const departureHides = new Map();\n"
+    "  const departureHidesDelete = departureHides.delete.bind(departureHides);\n"
+    "  const departureHidesClear = departureHides.clear.bind(departureHides);\n"
+    "  departureHides.delete = function(v) { if (v && v.style) v.style.translate = ''; return departureHidesDelete(v); };\n"
+    "  departureHides.clear = function() { departureHides.forEach(function(p, v) { if (v && v.style) v.style.translate = ''; }); departureHidesClear(); };\n"
+)
 _DEPARTURE_HIDE = """  function rideTransition(v, owner, boundary, rectAt, caller, hidden) {
     // The ride owns the decoder now: end any footprint hold, or it drags the
     // landed decoder back to the source slot once the hash settles (live D2).
@@ -202,7 +201,7 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
     "departure-early-hide": ((_DEPARTURE_HIDE, _DEPARTURE_EARLY_HIDE),),
     "startup-moved-decoder": (
         (_STARTUP_HOLD, _STARTUP_MOVED_DECODER),
-        (_DEPARTURE_FINISH_HIDE, _DEPARTURE_FINISH_HIDE_MOVED_DECODER),
+        (_DEPARTURE_HIDES, _DEPARTURE_HIDES_MOVED_DECODER),
     ),
 }
 

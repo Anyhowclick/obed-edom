@@ -4112,8 +4112,7 @@ def test_stand_down_at_the_first_callback_hides_the_decoder_at_callback_end():
 
 def test_startup_moved_decoder_restores_source_placement_after_the_first_draw(monkeypatch):
     repo = Path(__file__).resolve().parent.parent
-    if str(repo / "scripts") not in sys.path:
-        sys.path.insert(0, str(repo / "scripts"))
+    monkeypatch.syspath_prepend(str(repo / "scripts"))
     from continuity_core_variants import variant_core
 
     monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variant_core("startup-moved-decoder"))
