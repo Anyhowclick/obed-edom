@@ -140,3 +140,20 @@ Evidence: `output/evidence/stage-b-2026-10-13/norider-ab/` (`riders-summary.txt`
 
 **Owner decision:** whether the census should exclude move frames before the entry's first GL draw, or score stacking
 order. That is an instrument change; the product is unchanged.
+
+**Owner decision (2026-10-16): skip the move frames before the first GL draw.**
+- Fix: `scripts/mm_feed_instrument.py` `_visit_record`.
+  - Coverage still requires one readable rider row and an integer `draws` ≥ 0 on every move frame.
+  - Only rows from the first move frame with `draws` > 0 onward are scored.
+  - A move that never draws scores None.
+  - `preDrawFrames` is recorded.
+  - No JS or contract change.
+- Implementer: Codex GPT-5.6 Sol high.
+- Review: Opus 5.5 high.
+  - r1: one low, folded (an unreadable `draws` was treated as "not drawn").
+  - r2: two lows, folded (fractional `draws` passed the check; a one-item test loop).
+- Replay with the new code.
+  - Full replay was possible for 18 stored runs; the rest used the stored rider rows plus the per-frame draws.
+  - D7 b0to1 and Alpha b5to6 / b7to8-wa0121 now read True on 302c218d and 838eeedf.
+  - The overlay-ride control stays False; the departure-early-hide control stays True.
+  - Null control: the old code reproduces every stored rider record.

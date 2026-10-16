@@ -609,8 +609,12 @@ def _visit_record(
             feed_reads.append({"progress": progress, **read})
     rider_rows = [[r for r in f.get("riders") or [] if isinstance(r, dict) and r.get("entryId") == entry_id]
                   for f in move_frames]
-    riders = [r for group in rider_rows for r in group]
-    rider_coverage = bool(move_frames) and all(len(group) == 1 and _rider_readable(group[0]) for group in rider_rows)
+    pre_draw_frames = next((index for index, frame in enumerate(move_frames)
+                            if _finite(frame.get("draws")) and frame["draws"] > 0), len(move_frames))
+    riders = [r for group in rider_rows[pre_draw_frames:] for r in group]
+    rider_coverage = bool(move_frames) \
+        and all(isinstance(f.get("draws"), int) and not isinstance(f["draws"], bool) and f["draws"] >= 0 for f in move_frames) \
+        and all(len(group) == 1 and _rider_readable(group[0]) for group in rider_rows)
     labels = [r for f in move_frames for r in f.get("labels") or [] if isinstance(r, dict) and r.get("entryId") == entry_id]
     expected_labels = sum(
         1 for f in move_frames for r in f.get("labelExpected") or []
@@ -727,7 +731,8 @@ def _visit_record(
     return {
         "mode": mode, "reason": reason, "evidenceVersion": report.get("version", 1), **common,
         "continuousExpected": continuous_expected,
-        "feed": feed, "rider": {"riders": riders, "coverage": rider_coverage, "complete": frames_complete},
+        "feed": feed, "rider": {"riders": riders, "coverage": rider_coverage, "complete": frames_complete,
+                                 "preDrawFrames": pre_draw_frames},
         "labels": {
             "labels": labels, "expected": expected_labels,
             "coverage": label_coverage, "complete": frames_complete,

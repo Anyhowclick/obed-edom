@@ -12308,6 +12308,52 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
                                                    "maxInterFeedGapMs": 32.0, "maxInterFeedGapLimitMs": 50.0}}},
         "tamper": None,
     }
+    pre_draw = copy.deepcopy(report)
+    pre_draw["frames"][0]["draws"] = 0
+    pre_draw["frames"][0]["riders"][0].update(visible=True, opacityProduct=1.0)
+    rider = probe.mm_feed_instrument.verdict_records(
+        pre_draw, [entry], continuous_expected=True,
+    )[entry["id"]]["rider"]
+    assert rider["coverage"] is True
+    assert rider["preDrawFrames"] == 1
+    assert len(rider["riders"]) == 3
+    assert probe.score_no_rider_above_canvas(rider)["verdict"] is True
+    pre_draw["frames"][0]["draws"] = None
+    rider = probe.mm_feed_instrument.verdict_records(
+        pre_draw, [entry], continuous_expected=True,
+    )[entry["id"]]["rider"]
+    assert rider["coverage"] is False
+    assert probe.score_no_rider_above_canvas(rider)["verdict"] is None
+    overlay_ride = copy.deepcopy(report)
+    for index, frame in enumerate(overlay_ride["frames"]):
+        frame["draws"] = 0 if index == 0 else 5
+        frame["riders"][0].update(visible=True, opacityProduct=1.0)
+    rider = probe.mm_feed_instrument.verdict_records(
+        overlay_ride, [entry], continuous_expected=True,
+    )[entry["id"]]["rider"]
+    assert rider["preDrawFrames"] == 1
+    assert probe.score_no_rider_above_canvas(rider)["verdict"] is False
+    never_drawn = copy.deepcopy(overlay_ride)
+    for frame in never_drawn["frames"]:
+        frame["draws"] = 0
+    rider = probe.mm_feed_instrument.verdict_records(
+        never_drawn, [entry], continuous_expected=True,
+    )[entry["id"]]["rider"]
+    assert rider["coverage"] is True
+    assert rider["preDrawFrames"] == len(never_drawn["frames"])
+    assert rider["riders"] == []
+    assert probe.score_no_rider_above_canvas(rider) == {
+        "verdict": None, "reason": "inconclusive: no rider census was recorded",
+    }
+    unreadable_after_draw = copy.deepcopy(report)
+    unreadable_after_draw["frames"][0]["draws"] = 0
+    unreadable_after_draw["frames"][2]["draws"] = None
+    unreadable_after_draw["frames"][2]["riders"][0].update(visible=True, opacityProduct=1.0)
+    rider = probe.mm_feed_instrument.verdict_records(
+        unreadable_after_draw, [entry], continuous_expected=True,
+    )[entry["id"]]["rider"]
+    assert rider["preDrawFrames"] == 1
+    assert probe.score_no_rider_above_canvas(rider)["verdict"] is None
     assert probe.contract.first_errors(probe.contract.mm_feed_report(report), limit=20) == []
     spec = {
         **entry, "kind": "carry", "asset": "movie-a", "srcRect": dict(SRC_RECT), "dstRect": dict(DST_RECT),
