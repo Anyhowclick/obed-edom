@@ -40,12 +40,10 @@ What is pinned here:
   1920x1080 skips C; every host arm runs at least once a round or the round is refused; a host gate
   passes only when its artifact records exactly that skip and holds exactly the other arms;
 - the S0 deck red arms (S2, plan §3.4 Q3): every `DECK_ARMS` entry goes through the same queue as a host
-  red run on its deck's own `html-unmodified` export, after the P2 host red arms and before the P2 arms,
-  is checked after the wait in the same order, and runs in the full tier only;
+  red run on its deck's own `html-unmodified` export and runs in the full tier only;
 - Pass G (owner decision 2026-10-10, plan §3.4 Q3): one `--pass G` probe run per fixture (P2 and D1-D6) goes through
-  the same queue after the deck red arms and before the P2 arms, full tier only, each with its own artifact under
-  `<outdir>`; a run passes only with this round's exit 0 and a Pass G artifact whose status is pass, and every other
-  outcome is counted FAILED (never pending);
+  the same queue, full tier only, each with its own artifact under `<outdir>`; a run passes only with this round's exit
+  0 and a Pass G artifact whose status is pass, and every other outcome is counted FAILED (never pending);
 - the P2 arm list: no `--strip bridge@8` arm, `--skip-freeze-bracket` on every arm but the two
   positive freeze-bracket arms (and refused on those), and the `Freeze bracket:` header checked;
 - `--tier dev` runs the 1920x1080 + 1600x1000 host gates and three P2 arms, says DEV loudly and
@@ -58,17 +56,22 @@ What is pinned here:
 - the load guard: a round refuses to start (exit 2) when the 1-minute load average (`sysctl -n vm.loadavg`, stubbed
   on PATH here so the real host's load never decides a test) exceeds `GATE_MAX_START_LOAD` (default 4), and the
   summary prints the load at start and end and the round's wall time;
+- launch order (owner 2026-10-16): positive freeze-bracket P2 arms, Pass G, host, Pass G red, remaining P2, host red
+  (P2 then decks), carry-cover, paint control — refilled into any free slot; checks run after the wait in their own fixed
+  order (host, host red, deck red, Pass G, Pass G red, paint control, carry-cover, P2);
 - the carry-cover gate (gl-clock plan §5): green, red and null arms on P2 and on D1 (each on its deck's own export),
-  full tier only, after the paint controls and before the P2 arms; a check fails closed on every unexpected status, a
-  foreign core sha, fixture or control, and (but on the null arm) any bridge clock other than the arm's;
+  full tier only; a check fails closed on every unexpected status, a foreign core sha, fixture or control, and (but on
+  the null arm) any bridge clock other than the arm's;
 - the painted instrument (S2 instrument plan §5): the D2/D3/D5 `no-pin-hold` deck red arms, one Pass G red arm and three
-  paint controls run in the full tier only, queued and checked Pass G -> Pass G red -> paint control -> carry-cover;
-  each check fails closed on every known-bad shape, a host red artifact without `sampler.selfCheck.ok` fails, and
-  paint census entries are printed and counted as `findings=` on the DONE line without changing the exit code.
+  paint controls run in the full tier only; each check fails closed on every known-bad shape, a host red artifact
+  without `sampler.selfCheck.ok` fails, and paint census entries are printed and counted as `findings=` on the DONE line
+  without changing the exit code.
 """
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -76,6 +79,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -323,10 +327,10 @@ exec /bin/sleep "$1"
 """
 
 
-@pytest.fixture
-def gates(tmp_path: Path):
-    """A fake gate worktree plus a runner; every stub process is killed at teardown whatever happens."""
-    g = tmp_path / "gate"
+
+def _make_gates(root: Path) -> dict[str, object]:
+    root.mkdir(parents=True, exist_ok=True)
+    g = root / "gate"
     (g / "scripts").mkdir(parents=True)
     (g / "src").symlink_to(REPO / "src")
     (g / "scripts" / "continuity_core_variants.py").symlink_to(REPO / "scripts" / "continuity_core_variants.py")
@@ -334,11 +338,11 @@ def gates(tmp_path: Path):
     (g / "scripts" / "live_continuity_probe.py").write_text(PROBE_STUB)
     (g / "scripts" / "p2_recovery_html_adversarial.py").write_text(P2_STUB)
     (g / "scripts" / "p2_recovery_html_dissolve_live.py").write_text(PREWARM_STUB)
-    out = tmp_path / "out"
-    marker = tmp_path / "marker"
+    out = root / "out"
+    marker = root / "marker"
     marker.mkdir()
-    events = tmp_path / "events.txt"
-    qual_b_source = tmp_path / "qual-b-source"
+    events = root / "events.txt"
+    qual_b_source = root / "qual-b-source"
     for deck in ("D7", "D7s"):
         export = qual_b_source / f"{deck}-html"
         shutil.copytree(REPO / "tests" / "fixtures" / "live_continuity" / "qual_decks" / deck, export)
@@ -352,13 +356,13 @@ def gates(tmp_path: Path):
         "3C2EF32B4C92363A28DBD2EF9AD3EA3B"
     )
     slide_path.write_text(json.dumps(payload, separators=(",", ":")))
-    stub_bin = tmp_path / "bin"
+    stub_bin = root / "bin"
     stub_bin.mkdir()
     (stub_bin / "sysctl").write_text(SYSCTL_STUB)
     (stub_bin / "sysctl").chmod(0o755)
     (stub_bin / "sleep").write_text(SLEEP_STUB)
     (stub_bin / "sleep").chmod(0o755)
-    sleeps = tmp_path / "sleeps.txt"
+    sleeps = root / "sleeps.txt"
 
     def env(**extra: str) -> dict[str, str]:
         drop = (
@@ -383,7 +387,7 @@ def gates(tmp_path: Path):
 
     def start(**extra: str) -> subprocess.Popen[str]:
         """Output goes to a file: a leaked run would hold a pipe open and hang the reader."""
-        with open(tmp_path / "gates.out", "w") as sink:
+        with open(root / "gates.out", "w") as sink:
             return subprocess.Popen(
                 ["/bin/zsh", str(SCRIPT), str(g), str(out)], env=env(**extra), stdout=sink, stderr=subprocess.STDOUT, text=True,
             )
@@ -395,24 +399,89 @@ def gates(tmp_path: Path):
         return [float(line) for line in sleeps.read_text().splitlines()] if sleeps.exists() else []
 
     def survivors() -> list[str]:
-        # Deliberately global: catch every leaked descendant under tmp_path, not only stub PIDs.
-        found = subprocess.run(["pgrep", "-fl", str(tmp_path)], capture_output=True, text=True).stdout
+        # Deliberately global: catch every leaked descendant under root, not only stub PIDs.
+        found = subprocess.run(["pgrep", "-fl", str(root)], capture_output=True, text=True).stdout
         return [line for line in found.splitlines() if line.strip()]
 
     def patched(old: str, new: str) -> Path:
         """A copy of run_gates.sh with one exact line changed (the copy runs from the fake worktree)."""
         text = SCRIPT.read_text()
         assert text.count(old) == 1, old
-        copy = tmp_path / "run_gates_patched.sh"
+        copy = root / "run_gates_patched.sh"
         copy.write_text(text.replace(old, new))
         return copy
 
-    yield {
-        "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list, "sleeps": sleeps_list,
-        "survivors": survivors,
-        "patched": patched, "tmp": tmp_path, "qual_b_source": qual_b_source,
+    return {
+        "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list,
+        "sleeps": sleeps_list, "survivors": survivors, "patched": patched, "tmp": root, "qual_b_source": qual_b_source,
     }
-    subprocess.run(["pkill", "-KILL", "-f", str(tmp_path)], capture_output=True)
+
+
+def _cleanup_gates(root: Path) -> None:
+    subprocess.run(["pkill", "-KILL", "-f", str(root)], capture_output=True)
+
+
+@pytest.fixture(scope="session")
+def _gate_rounds(tmp_path_factory: pytest.TempPathFactory):
+    base = tmp_path_factory.getbasetemp()
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        base = base.parent
+
+    def get(args: tuple[str, ...], overrides: dict[str, str]) -> dict[str, object]:
+        identity = (str(SCRIPT.resolve()), args, tuple(sorted(overrides.items())))
+        key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        lock_path = base / f"gates-{key}.lock"
+        record_path = base / f"gates-{key}.json"
+        round_dir = base / f"gates-{key}"
+        with open(lock_path, "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if record_path.exists():
+                record = json.loads(record_path.read_text())
+            else:
+                if round_dir.exists():
+                    shutil.rmtree(round_dir)
+                try:
+                    gates = _make_gates(round_dir)
+                    done = gates["run"](*args, **overrides)
+                    record = {
+                        "returncode": done.returncode,
+                        "stdout": done.stdout,
+                        "stderr": done.stderr,
+                        "events": gates["events"](),
+                        "paths": {name: str(gates[name]) for name in ("g", "out", "marker", "tmp")},
+                    }
+                except Exception as exc:
+                    record = {"error": f"{type(exc).__name__}: {exc}"}
+                finally:
+                    _cleanup_gates(round_dir)
+                temporary = record_path.with_name(f".{record_path.name}.{os.getpid()}.tmp")
+                temporary.write_text(json.dumps(record))
+                os.replace(temporary, record_path)
+        if "error" in record:
+            raise RuntimeError(record["error"])
+        return record
+
+    return get
+
+
+@pytest.fixture
+def gates(tmp_path: Path, _gate_rounds):
+    """A fake gate worktree plus a runner; every stub process is killed at teardown whatever happens."""
+    local = _make_gates(tmp_path)
+
+    def shared(*args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+        record = _gate_rounds(args, overrides)
+        paths = {name: Path(value) for name, value in record["paths"].items()}
+        local["out"] = paths["out"]
+        local["events"] = lambda: record["events"]
+        return subprocess.CompletedProcess(
+            ["/bin/zsh", str(SCRIPT), str(paths["g"]), str(paths["out"]), *args],
+            record["returncode"], record["stdout"], record["stderr"],
+        )
+
+    local["shared"] = shared
+    yield local
+    _cleanup_gates(tmp_path)
 
 
 def _nonce(stdout: str) -> str:
@@ -423,7 +492,7 @@ def _nonce(stdout: str) -> str:
 
 @pytest.mark.parametrize("jobs", ["1", "5"])
 def test_a_fresh_round_publishes_this_round_nonce_and_the_host_checks_read_it(gates, jobs: str) -> None:
-    done = gates["run"](GATE_JOBS=jobs)
+    done = gates["shared" if jobs == "1" else "run"](GATE_JOBS=jobs)
     nonce = _nonce(done.stdout)
     for v in VIEWPORTS:
         assert f"HOST {v}: pass" in done.stdout, done.stdout
@@ -460,7 +529,7 @@ def test_an_outdir_that_is_a_file_is_refused(gates) -> None:
 
 def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
     gates["out"].mkdir()
-    done = gates["run"]()
+    done = gates["run"]("--tier", "dev")
     assert "round nonce " in done.stdout and "HOST 1920x1080: pass" in done.stdout, done.stdout + done.stderr
     args = _probe_args(gates["events"]())
     for deck in ("D7", "D7s"):
@@ -525,24 +594,47 @@ def test_a_status_from_another_round_fails_closed(gates) -> None:
     assert "GATE FAILED: HOST red --strip bridge@8" in done.stdout
 
 
-@pytest.mark.parametrize(("sig", "code"), [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)])
-def test_killing_the_queue_owner_leaves_no_run_or_child_behind(gates, sig: signal.Signals, code: int) -> None:
-    proc = gates["start"](GATE_JOBS="3", STUB_DEFAULT="hang")
-    try:
-        deadline = time.monotonic() + 30
-        while len(list(gates["marker"].glob("child-*"))) < 3:
-            assert proc.poll() is None, "the round ended before its runs started"
-            assert time.monotonic() < deadline, f"runs never started: {gates['events']()}"
-            time.sleep(0.05)
-        time.sleep(0.3)
-        started = [e for e in gates["events"]() if e.endswith(" start")]
-        assert len(started) == 3, f"GATE_JOBS=3 caps the queue: {started}"
-        assert len(gates["survivors"]()) > 3, "the stubs and their children are running"
-        proc.send_signal(sig)
-        proc.wait(timeout=30)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
+@pytest.mark.parametrize(("sig", "code"), [
+    pytest.param(signal.SIGTERM, 143, id="15-143"),
+    pytest.param(signal.SIGINT, 130, id="2-130"),
+    pytest.param(signal.SIGHUP, 129, id="1-129"),
+    pytest.param(None, 143, id="refills-any-slot"),
+])
+def test_killing_the_queue_owner_leaves_no_run_or_child_behind(
+    gates, sig: signal.Signals | None, code: int,
+) -> None:
+    if sig is None:
+        modes = json.dumps({_p2_name(FULL_P2_ARMS[0]): "hang"})
+        proc = gates["start"](GATE_JOBS="2", STUB_MODES=modes)
+        try:
+            deadline = time.monotonic() + 30
+            while not (any(e.startswith("probe passG-P2 ") for e in gates["events"]())
+                       and list(gates["marker"].glob("child-*"))):
+                assert proc.poll() is None, "the round ended before a later run started"
+                assert time.monotonic() < deadline, f"the queue did not refill around its oldest run: {gates['events']()}"
+                time.sleep(0.05)
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+    else:
+        proc = gates["start"](GATE_JOBS="3", STUB_DEFAULT="hang")
+        try:
+            deadline = time.monotonic() + 30
+            while len(list(gates["marker"].glob("child-*"))) < 3:
+                assert proc.poll() is None, "the round ended before its runs started"
+                assert time.monotonic() < deadline, f"runs never started: {gates['events']()}"
+                time.sleep(0.05)
+            time.sleep(0.3)
+            started = [e for e in gates["events"]() if e.endswith(" start")]
+            assert len(started) == 3, f"GATE_JOBS=3 caps the queue: {started}"
+            assert len(gates["survivors"]()) > 3, "the stubs and their children are running"
+            proc.send_signal(sig)
+            proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
     deadline = time.monotonic() + 10
     while gates["survivors"]() and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -567,7 +659,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 27 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
-    assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
+    assert "cache hit" in gates["run"]("--tier", "dev", outdir=gates["tmp"] / "out2").stdout
 
 
 @pytest.mark.parametrize("mode", ["fail", "empty"])
@@ -628,7 +720,7 @@ def test_known_bad_a_loaded_host_is_refused_before_anything_runs(gates, load: st
 @pytest.mark.parametrize(("load", "limit"), [("4.00", None), ("3.99", None), ("0.00", None), ("7.5", "8")])
 def test_positive_control_a_host_at_or_under_the_limit_starts(gates, load: str, limit: str | None) -> None:
     extra = {"STUB_LOAD": load} | ({"GATE_MAX_START_LOAD": limit} if limit else {})
-    done = gates["run"](**extra)
+    done = gates["run"]("--tier", "dev", **extra)
     assert f"load average (1 min) at start {load} (GATE_MAX_START_LOAD {limit or 4})" in done.stdout, done.stderr
     assert gates["events"]()[0] == "prewarm html-unmodified"
     assert re.search(rf"^load average \(1 min\) at start {re.escape(load)}, at launch {re.escape(load)}, at end {re.escape(load)}; wall \d+s$",
@@ -659,7 +751,7 @@ def test_the_settle_wait_never_sleeps_past_its_deadline(gates) -> None:
 
 
 def test_positive_control_load_that_stays_low_after_the_prewarm_launches(gates) -> None:
-    done = gates["run"](STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="2.00", GATE_SETTLE_S="0")
+    done = gates["run"]("--tier", "dev", STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="2.00", GATE_SETTLE_S="0")
     assert "load average (1 min) at launch 2.00" in done.stdout, done.stderr
     assert any(not e.startswith("prewarm") for e in gates["events"]())
 
@@ -687,7 +779,8 @@ GATE_JOBS_WARNING = (
 
 @pytest.mark.parametrize(("jobs", "warned"), [("4", True), ("5", True), ("3", False), ("1", False), (None, False)])
 def test_gate_jobs_above_three_warns_loudly_but_still_runs(gates, jobs: str | None, warned: bool) -> None:
-    done = gates["run"](**({"GATE_JOBS": jobs} if jobs else {}))
+    tier = ("--tier", "dev") if jobs in ("3", "4", "5") else ("--tier", "full") if jobs is None else ()
+    done = gates["shared" if jobs in ("1", None) else "run"](*tier, **({"GATE_JOBS": jobs} if jobs else {}))
     assert (GATE_JOBS_WARNING in done.stdout) is warned
     if warned:
         assert f"## WARNING: GATE_JOBS={jobs}. {GATE_JOBS_WARNING}" in done.stdout
@@ -699,10 +792,10 @@ def test_gate_jobs_above_three_warns_loudly_but_still_runs(gates, jobs: str | No
 # --------------------------------------------------------------------------
 
 FULL_HOST_SKIPS = {"2560x1440": "attach,B,Voff", "1600x1000": "attach,B,Voff", "1920x1080": "C"}
-HOST_RED_STEMS = {
+HOST_RED_STEMS = [
     "host-red--core-variantstash-any", "host-red--stripbridge@8", "host-red--stripretire@2", "host-red--striprestart@6",
     "host-red--stripglReplay@2--gl-replayauto",
-}
+]
 FULL_P2_ARMS = [
     ["--wait-profile", "fast"],
     ["--wait-profile", "fast", "--disable-bridge34", "--skip-freeze-bracket"],
@@ -714,6 +807,8 @@ FULL_P2_ARMS = [
     ["--wait-profile", "fast", "--gl-replay", "auto", "--strip", "glReplay@2", "--skip-freeze-bracket"],
 ]
 DEV_P2_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[1], FULL_P2_ARMS[6]]
+FULL_P2_LAUNCH_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[6], *FULL_P2_ARMS[1:6], FULL_P2_ARMS[7]]
+DEV_P2_LAUNCH_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[6], FULL_P2_ARMS[1]]
 DECK_ARMS = [
     ("D1", "--strip bridge@2"), ("D1", "--strip bridge@4"), ("D1", "--strip pin@6"),
     ("D2", "--strip bridge@2"), ("D2", "--strip restart@4"), ("D2", "--strip pin@6"), ("D2", "--strip bridge@8"),
@@ -759,13 +854,13 @@ def _p2_name(argv: list[str]) -> str:
 
 
 def test_the_full_round_host_arm_matrix(gates) -> None:
-    done = gates["run"](GATE_JOBS="1")
+    done = gates["shared"](GATE_JOBS="1")
     runs = _probe_runs(gates["events"]())
     assert {k: v for k, v in runs.items() if k.startswith("host-") and not k.startswith("host-red")} == {
         f"host-{v}": (v, skip) for v, skip in FULL_HOST_SKIPS.items()
     }
     assert {k: v for k, v in runs.items() if k.startswith("host-red")} == {
-        s: ("1920x1080", "None") for s in HOST_RED_STEMS | set(DECK_RED_STEMS)
+        s: ("1920x1080", "None") for s in {*HOST_RED_STEMS, *DECK_RED_STEMS}
     }
     ran = {name: [v for v, skip in FULL_HOST_SKIPS.items() if name not in skip.split(",")] for name in ARMS}
     assert ran == {
@@ -832,16 +927,12 @@ def _probe_args(events: list[str]) -> dict[str, tuple[str, str, list[str]]]:
 
 def test_the_deck_red_arms_run_on_their_own_export_through_the_queue_in_order(gates) -> None:
     """S2 (plan §3.4 Q3): the 22 S0 deck red arms are host red runs on the deck's `html-unmodified`
-    export (both fixture and original index), launched after the P2 host red arms and before the P2
-    arms, and checked after the wait in the same order."""
-    done = gates["run"](GATE_JOBS="1")
+    export (both fixture and original index), launched in the fixed group order and checked after the wait in the check
+    order."""
+    done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    p2_host_red = [s for s in starts if s.startswith("host-red--")]
-    assert [s for s in starts if s.startswith("host-redD")] == DECK_RED_STEMS
-    assert starts.index(DECK_RED_STEMS[0]) == starts.index(p2_host_red[-1]) + 1
-    assert starts.index(DECK_RED_STEMS[-1]) + 1 == starts.index(PASSG_STEMS[0]), "Pass G runs between them"
-    assert starts.index(DECK_RED_STEMS[-1]) < next(i for i, s in enumerate(starts) if s.startswith("p2"))
+    assert starts == _full_launch_stems()
     args = _probe_args(events)
     for (deck, arm), stem in zip(DECK_ARMS, DECK_RED_STEMS, strict=True):
         fixture, index, argv = args[stem]
@@ -866,14 +957,13 @@ def test_known_bad_a_deck_red_run_that_writes_no_status_fails_closed(gates) -> N
 def test_pass_g_runs_on_p2_and_every_deck_through_the_queue_in_order(gates) -> None:
     """Owner decision 2026-10-10 (plan §3.4 Q3): Pass G moved into the round. One `--pass G` probe run per
     fixture -- P2 on its player export with the unmodified index, each S0 deck on its own `html-unmodified`
-    export as both fixture and original index -- queued after the deck red arms and before the carry-cover and P2 arms, and
-    checked after the wait in the same order. Each run has its own artifact under <outdir> (the probe's
+    export as both fixture and original index -- launched in the fixed group order and checked after the wait in the
+    check order. Each run has its own artifact under <outdir> (the probe's
     `run_scope` keys its private run folder by the artifact path), so no two runs share a folder."""
-    done = gates["run"](GATE_JOBS="1")
+    done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    assert [s for s in starts if s.startswith("passG-") and not s.startswith("passG-red")] == PASSG_STEMS
-    assert starts.index(PASSG_STEMS[-1]) + 1 == starts.index(PASSG_RED_STEM)
+    assert starts == _full_launch_stems()
     args = _probe_args(events)
     artifacts = []
     for name, stem in zip(PASSG_FIXTURES, PASSG_STEMS, strict=True):
@@ -922,24 +1012,17 @@ def test_known_bad_every_non_pass_pass_g_outcome_fails_the_round_and_is_counted(
 
 
 def test_known_bad_one_errored_pass_g_adds_exactly_one_failure_to_the_summary(gates) -> None:
-    """The positive control is the same round with every Pass G run passing."""
-    def failed(stdout: str) -> int:
-        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", stdout, re.M)
-        assert summary, stdout
-        return int(summary.group(1))
-
-    good = gates["run"](outdir=gates["tmp"] / "good")
-    bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({"passG-D3": "g-error"}))
+    """R2 (every Pass G run passing) is the positive control; D3's error adds exactly `GATE FAILED: PASSG D3`
+    to its multi-fault round's failure multiset."""
+    good, block = _multi_fault_round(gates, "passG-D3", "g-error")
     assert "GATE FAILED: PASSG" not in good.stdout
-    assert "[PASSG D3] status=error exit=0" in bad.stdout and "    stub g-error" in bad.stdout
-    assert [line for line in bad.stdout.splitlines() if "GATE FAILED: PASSG" in line] == ["    GATE FAILED: PASSG D3"]
-    assert failed(bad.stdout) == failed(good.stdout) + 1
+    assert "[PASSG D3] status=error exit=0" in block and "    stub g-error" in block
 
 
 def test_the_full_round_p2_arm_list(gates) -> None:
-    gates["run"](GATE_JOBS="1")
+    gates["shared"](GATE_JOBS="1")
     argvs = _p2_argvs(gates["events"]())
-    assert argvs == FULL_P2_ARMS
+    assert argvs == FULL_P2_LAUNCH_ARMS
     assert not any("bridge@8" in a for argv in argvs for a in argv), "P2 --strip bridge@8 == --disable-bridge34, dropped"
     bracket = [argv for argv in argvs if "--skip-freeze-bracket" not in argv]
     assert bracket == [["--wait-profile", "fast"], ["--wait-profile", "fast", "--gl-replay", "auto"]]
@@ -1011,7 +1094,7 @@ def test_the_dev_tier_runs_its_subset_and_a_pass_exits_10(gates) -> None:
                         STUB_P2_RED=_dev_red())
     events = gates["events"]()
     assert _probe_runs(events) == {"host-1920x1080": ("1920x1080", "C"), "host-1600x1000": ("1600x1000", "attach,B,Voff")}
-    assert _p2_argvs(events) == DEV_P2_ARMS
+    assert _p2_argvs(events) == DEV_P2_LAUNCH_ARMS
     assert not [e for e in events if e.startswith("probe passG-")] and "[PASSG" not in done.stdout, "Pass G is full tier only"
     assert done.stdout.count("DEV TIER -- NOT A QUALIFICATION PASS") == 2, done.stdout
     assert done.stdout.rstrip().splitlines()[-1] == "## DEV TIER -- NOT A QUALIFICATION PASS (exit 10) ##"
@@ -1038,7 +1121,7 @@ def test_known_bad_a_freeze_bracket_header_that_disagrees_with_the_flags_fails(g
 
 
 def test_a_full_round_never_says_dev_and_never_exits_10(gates) -> None:
-    done = gates["run"]("--tier", "full")
+    done = gates["shared"]("--tier", "full")
     assert "DEV TIER" not in done.stdout and "DONE tier=full " in done.stdout
     assert done.returncode == 1, "the stub red arms cannot match"
 
@@ -1064,6 +1147,135 @@ CC_LABELS = ["green", "--core-variant linear-bridge", "--carry-cover-null",
              "D1 green", "D1 --core-variant no-gl-clock", "D1 --carry-cover-null"]
 CC_EXTRA = [[], ["--core-variant", "linear-bridge"], ["--carry-cover-null"],
             [], ["--core-variant", "no-gl-clock"], ["--carry-cover-null"]]
+CARRY_COVER_BAD_CASES = [
+    ("carry-cover", "cc-fail", "status 'fail' != 'pass'"),
+    ("carry-cover", "cc-inconclusive", "status 'inconclusive' != 'pass'"),
+    ("carry-cover", "cc-error", "status 'error' != 'pass'"),
+    ("carry-cover", "cc-sha", "installed core sha is not the arm's"),
+    ("carry-cover", "cc-none", None),
+    ("carry-cover", "die", None),
+    ("carry-cover", "foreign", None),
+    ("carry-cover--core-variantlinear-bridge", "cc-pass", "status 'pass' != 'fail'"),
+    ("carry-cover--core-variantlinear-bridge", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
+    ("carry-cover--core-variantlinear-bridge", "cc-control", "control 'green' != 'red'"),
+    ("carry-cover--carry-cover-null", "cc-pass", "status 'pass' != 'fail'"),
+    ("carry-cover--carry-cover-null", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
+    ("carry-coverD1", "cc-clock", "bridge clocks ['fallback'] are not all 'gl'"),
+    ("carry-coverD1--core-variantno-gl-clock", "cc-clock", "bridge clocks ['gl'] are not all 'fallback'"),
+    ("carry-coverD1", "cc-fixture", "fixture 'elsewhere' != "),
+]
+_RED = "PASSG-RED D1 --core-variant no-pin-hold"
+INSTRUMENT_BAD_CASES = [
+    (PASSG_RED_STEM, "gr-sha", _RED, "nullControl installed core sha"),
+    (PASSG_RED_STEM, "gr-extra", _RED, "red set ['G1-3-4:b2to3:carry', 'G2-1-2:b0to1:carry'] != registered"),
+    (PASSG_RED_STEM, "gr-unknown", _RED, "unknown ['G1-2-3:b1to2:carry']"),
+    (PASSG_RED_STEM, "gr-floor", _RED, "G1-3-4:b2to3:carry longest unpainted run 108 below the 109-frame floor"),
+    (PASSG_RED_STEM, "gr-nofloor", _RED, "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
+    (PASSG_RED_STEM, "die", _RED, None),
+    (PC_STEMS[0], "pc-plus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "hiddenTicks 7 != 6"),
+    (PC_STEMS[1], "pc-minus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "hiddenTicks 5 != 6"),
+    (PC_STEMS[1], "pc-shift", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}",
+     "target seq set [301, 302, 303, 304, 305, 306] != injected"),
+    (PC_STEMS[2], "pc-unfired", f"PAINT-CONTROL D5 {PAINT_CONTROLS[2]}", "injector never fired"),
+    (PC_STEMS[0], "pc-control", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "control '1:ancestor-half:pin@2' != "),
+    *((PC_STEMS[0], f"pc-no-{key}", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}",
+       f"controlRecord unreadable: {key} missing") for key in ("aborted", "events", "errors")),
+    ("host-redD5--core-variantno-pin-hold", "red-noself", "HOST red D5 --core-variant no-pin-hold",
+     "arm.sampler is not schema 2 with selfCheck.ok"),
+    ("host-redD5--core-variantno-pin-hold", "red-floor", "HOST red D5 --core-variant no-pin-hold",
+     "b0to1:A:carry longest unpainted run 108 below the 109-frame floor"),
+    ("host-redD5--core-variantno-pin-hold", "red-nofloor", "HOST red D5 --core-variant no-pin-hold",
+     "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
+]
+
+MULTI_FAULT_FAILURES = {
+    **{(stem, mode): f"CARRY-COVER {CC_LABELS[CC_STEMS.index(stem)]}" for stem, mode, _ in CARRY_COVER_BAD_CASES},
+    **{(stem, mode): failed for stem, mode, failed, _ in INSTRUMENT_BAD_CASES},
+    ("passG-D3", "g-error"): "PASSG D3",
+}
+
+
+def _multi_fault_rounds() -> tuple[dict[str, str], ...]:
+    rounds: list[dict[str, str]] = []
+    counts: Counter[str] = Counter()
+    for stem, mode in MULTI_FAULT_FAILURES:
+        slot = counts[stem]
+        counts[stem] += 1
+        if slot == len(rounds):
+            rounds.append({})
+        rounds[slot][stem] = mode
+    assert len(rounds) == 7 and sum(map(len, rounds)) == 33
+    return tuple(rounds)
+
+
+MULTI_FAULT_ROUNDS = _multi_fault_rounds()
+MULTI_FAULT_SLOTS = {
+    (stem, mode): slot
+    for slot, modes in enumerate(MULTI_FAULT_ROUNDS)
+    for stem, mode in modes.items()
+}
+
+
+def _gate_failed(stdout: str) -> Counter[str]:
+    return Counter(line for line in stdout.splitlines() if line.startswith("    GATE FAILED: "))
+
+
+def _fault_block(stdout: str, failure: str) -> str:
+    lines = stdout.splitlines()
+    failed = f"    GATE FAILED: {failure}"
+    positions = [i for i, line in enumerate(lines) if line == failed]
+    assert len(positions) == 1, stdout
+    end = positions[0]
+    start = max(i for i, line in enumerate(lines[:end + 1]) if line.startswith("["))
+    block = lines[start:end + 1]
+    assert [line for line in block if line.startswith("    GATE FAILED: ")] == [failed], block
+    return "\n".join(block)
+
+
+def _multi_fault_round(gates, stem: str, mode: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    slot = MULTI_FAULT_SLOTS[(stem, mode)]
+    modes = MULTI_FAULT_ROUNDS[slot]
+    good = gates["shared"]("--tier", "full")
+    good_summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", good.stdout, re.M)
+    assert good_summary and int(good_summary.group(1)) == sum(_gate_failed(good.stdout).values()), good.stdout
+    bad = gates["shared"](STUB_MODES=json.dumps(modes, sort_keys=True))
+    expected = _gate_failed(good.stdout)
+    if "host-redD5--core-variantno-pin-hold" in modes:
+        baseline = "    GATE FAILED: HOST red D5 --core-variant no-pin-hold"
+        expected[baseline] -= 1
+    expected.update(f"    GATE FAILED: {MULTI_FAULT_FAILURES[case]}" for case in modes.items())
+    actual = _gate_failed(bad.stdout)
+    assert actual == expected, bad.stdout
+    findings = sum(case_stem.startswith("host-redD5") and case_mode.startswith("red-")
+                   for case_stem, case_mode in modes.items())
+    summary = re.search(r"^DONE tier=full failed=(\d+) pending=(\d+) findings=(\d+)$", bad.stdout, re.M)
+    assert summary, bad.stdout
+    assert tuple(map(int, summary.groups())) == (sum(actual.values()), 0, findings), bad.stdout
+    assert "PENDING REGISTRATION:" not in bad.stdout
+    assert bad.returncode == 1
+    failure = MULTI_FAULT_FAILURES[(stem, mode)]
+    return good, _fault_block(bad.stdout, failure)
+
+
+MM_FEED_STEMS = [
+    "mm-feed-{}-{}".format(*arm.split()[:2])
+    for arm in re.findall(r'^  "([^"]+)"$', SCRIPT.read_text().split("MM_FEED_ARMS=(", 1)[1].split("\n)", 1)[0], re.M)
+]
+
+
+def _full_launch_stems() -> list[str]:
+    return [
+        *(_p2_name(argv) for argv in FULL_P2_LAUNCH_ARMS[:2]),
+        *PASSG_STEMS,
+        *(f"host-{viewport}" for viewport in FULL_HOST_SKIPS),
+        PASSG_RED_STEM,
+        *MM_FEED_STEMS,
+        *(_p2_name(argv) for argv in FULL_P2_LAUNCH_ARMS[2:]),
+        *HOST_RED_STEMS,
+        *DECK_RED_STEMS,
+        *CC_STEMS,
+        *PC_STEMS,
+    ]
 
 
 def _cc_argvs(events: list[str]) -> list[list[str]]:
@@ -1073,18 +1285,14 @@ def _cc_argvs(events: list[str]) -> list[list[str]]:
 def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_order(gates) -> None:
     """Each deck's arms run on that deck's Pass G fixture and original index; every check line names the deck (but
     P2's, whose stems and labels are unchanged) and prints one line per bridge with its clock."""
-    done = gates["run"](GATE_JOBS="1")
+    done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    assert [s for s in starts if s.startswith("carry-cover")] == CC_STEMS
     feed_starts = [s for s in starts if s.startswith("mm-feed-")]
-    first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
     assert len(feed_starts) == 27
     assert "mm-feed-D7-no-linger" in feed_starts
     assert "mm-feed-D7-interim-delay" in feed_starts
-    assert starts.index(CC_STEMS[0]) == starts.index(PC_STEMS[-1]) + 1
-    assert starts.index(CC_STEMS[-1]) + 1 == starts.index(feed_starts[0])
-    assert starts.index(feed_starts[-1]) + 1 == first_p2
+    assert starts == _full_launch_stems()
     out = str(gates["out"].resolve())
     args = _probe_args(events)
     assert "--feed-tamper" in args["mm-feed-D7-no-linger"][2]
@@ -1118,60 +1326,33 @@ def test_the_dev_tier_runs_no_carry_cover_pass_g_red_paint_control_or_pin_hold_r
     assert "[PASSG-RED" not in done.stdout and "[PAINT-CONTROL" not in done.stdout
 
 
-@pytest.mark.parametrize(("stem", "mode", "why"), [
-    ("carry-cover", "cc-fail", "status 'fail' != 'pass'"),
-    ("carry-cover", "cc-inconclusive", "status 'inconclusive' != 'pass'"),
-    ("carry-cover", "cc-error", "status 'error' != 'pass'"),
-    ("carry-cover", "cc-sha", "installed core sha is not the arm's"),
-    ("carry-cover", "cc-none", None),
-    ("carry-cover", "die", None),
-    ("carry-cover", "foreign", None),
-    ("carry-cover--core-variantlinear-bridge", "cc-pass", "status 'pass' != 'fail'"),
-    ("carry-cover--core-variantlinear-bridge", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
-    ("carry-cover--core-variantlinear-bridge", "cc-control", "control 'green' != 'red'"),
-    ("carry-cover--carry-cover-null", "cc-pass", "status 'pass' != 'fail'"),
-    ("carry-cover--carry-cover-null", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
-    ("carry-coverD1", "cc-clock", "bridge clocks ['fallback'] are not all 'gl'"),
-    ("carry-coverD1--core-variantno-gl-clock", "cc-clock", "bridge clocks ['gl'] are not all 'fallback'"),
-    ("carry-coverD1", "cc-fixture", "fixture 'elsewhere' != "),
-])
+@pytest.mark.parametrize(("stem", "mode", "why"), CARRY_COVER_BAD_CASES)
 def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, stem: str, mode: str, why: str | None) -> None:
     """Fail closed: a green that does not pass, a red or null control that passes (the instrument is blind) or is
     inconclusive, a foreign core sha, fixture or control, a bridge on the wrong clock (a green on the fallback, the D1
     red on the GL clock), no artifact, and a missing or stale status each count as exactly one GATE FAILED -- never
     pending."""
-    good = gates["run"](outdir=gates["tmp"] / "good")
-    bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({stem: mode}))
+    _, block = _multi_fault_round(gates, stem, mode)
     label = CC_LABELS[CC_STEMS.index(stem)]
-    failed = [line for line in bad.stdout.splitlines() if "GATE FAILED: CARRY-COVER" in line]
-    assert failed == [f"    GATE FAILED: CARRY-COVER {label}"], bad.stdout
     if why is not None:
-        assert f"    MISMATCH: {why}" in bad.stdout, bad.stdout
+        assert f"    MISMATCH: {why}" in block, block
     else:
-        assert re.search(rf"^\[CARRY-COVER {re.escape(label)}\] no artifact \(.+\) exit=", bad.stdout, re.M), bad.stdout
-
-    def count(stdout: str) -> int:
-        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", stdout, re.M)
-        assert summary, stdout
-        return int(summary.group(1))
-
-    assert count(bad.stdout) == count(good.stdout) + 1
-    assert "PENDING REGISTRATION: CARRY-COVER" not in bad.stdout and bad.returncode == 1
+        assert re.search(rf"^\[CARRY-COVER {re.escape(label)}\] no artifact \(.+\) exit=", block, re.M), block
 
 
 # --------------------------------------------------------------------------
 # Painted instrument (S2 instrument plan §5): the Pass G red arm and the paint positive controls, full tier only,
-# queued and checked Pass G -> Pass G red -> paint control -> carry-cover; census findings are report only.
+# checked Pass G -> Pass G red -> paint control -> carry-cover; census findings are report only.
 # --------------------------------------------------------------------------
 
 
 def test_pass_g_red_and_the_paint_controls_run_in_order_and_match_a_well_formed_artifact(gates) -> None:
     """The stub writes a matching artifact for both new kinds by default: this is the positive control for every
     known-bad case below, and it pins the queue order, the argv and the check order."""
-    done = gates["run"](GATE_JOBS="1")
+    done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    assert starts[starts.index(PASSG_STEMS[-1]) + 1:starts.index(CC_STEMS[0])] == [PASSG_RED_STEM, *PC_STEMS]
+    assert starts == _full_launch_stems()
     args = _probe_args(events)
     out = str(gates["out"].resolve())
     fixture, index, argv = args[PASSG_RED_STEM]
@@ -1192,52 +1373,22 @@ def test_pass_g_red_and_the_paint_controls_run_in_order_and_match_a_well_formed_
     assert [stdout.index(o) for o in order] == sorted(stdout.index(o) for o in order)
 
 
-_RED = "PASSG-RED D1 --core-variant no-pin-hold"
-
-
-@pytest.mark.parametrize(("stem", "mode", "failed", "why"), [
-    (PASSG_RED_STEM, "gr-sha", _RED, "nullControl installed core sha"),
-    (PASSG_RED_STEM, "gr-extra", _RED, "red set ['G1-3-4:b2to3:carry', 'G2-1-2:b0to1:carry'] != registered"),
-    (PASSG_RED_STEM, "gr-unknown", _RED, "unknown ['G1-2-3:b1to2:carry']"),
-    (PASSG_RED_STEM, "gr-floor", _RED, "G1-3-4:b2to3:carry longest unpainted run 108 below the 109-frame floor"),
-    # Astra r1 #5: a no-pin-hold red arm that emits no floor is never matched on the red ids alone.
-    (PASSG_RED_STEM, "gr-nofloor", _RED, "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
-    (PASSG_RED_STEM, "die", _RED, None),
-    (PC_STEMS[0], "pc-plus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "hiddenTicks 7 != 6"),
-    (PC_STEMS[1], "pc-minus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "hiddenTicks 5 != 6"),
-    (PC_STEMS[1], "pc-shift", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "target seq set [301, 302, 303, 304, 305, 306] != injected"),
-    (PC_STEMS[2], "pc-unfired", f"PAINT-CONTROL D5 {PAINT_CONTROLS[2]}", "injector never fired"),
-    (PC_STEMS[0], "pc-control", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "control '1:ancestor-half:pin@2' != "),
-    # Astra r6 #2: a record missing an integrity field is never "no problems".
-    *((PC_STEMS[0], f"pc-no-{key}", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", f"controlRecord unreadable: {key} missing")
-      for key in ("aborted", "events", "errors")),
-    ("host-redD5--core-variantno-pin-hold", "red-noself", "HOST red D5 --core-variant no-pin-hold",
-     "arm.sampler is not schema 2 with selfCheck.ok"),
-    ("host-redD5--core-variantno-pin-hold", "red-floor", "HOST red D5 --core-variant no-pin-hold",
-     "b0to1:A:carry longest unpainted run 108 below the 109-frame floor"),
-    ("host-redD5--core-variantno-pin-hold", "red-nofloor", "HOST red D5 --core-variant no-pin-hold",
-     "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
-])
+@pytest.mark.parametrize(("stem", "mode", "failed", "why"), INSTRUMENT_BAD_CASES)
 def test_known_bad_every_broken_instrument_artifact_fails_exactly_its_own_check(
     gates, stem: str, mode: str, failed: str, why: str | None,
 ) -> None:
     """Fail closed: a foreign core sha, an extra red, an unreadable leg, a red run below the registered floor, no
     status; N+1 / N-1 hidden ticks, a set shifted one tick (what a rAF-phase reader sees under `late`), a control that
     never fired, another control's artifact; a host red artifact with no selfCheck. Each is exactly one GATE FAILED
-    among the instrument checks (the default host red stub artifact for D5 no-pin-hold already fails, so it is
-    counted only in its own case)."""
-    done = gates["run"](STUB_MODES=json.dumps({stem: mode}))
-    prefixes = ("    GATE FAILED: PASSG-RED", "    GATE FAILED: PAINT-CONTROL")
-    lines = [line for line in done.stdout.splitlines() if line.startswith(prefixes)]
-    if failed.startswith("HOST"):
-        assert lines == [] and f"    GATE FAILED: {failed}" in done.stdout, done.stdout
-    else:
-        assert lines == [f"    GATE FAILED: {failed}"], done.stdout
+    among the instrument checks (the default host red stub artifact for D5 no-pin-hold already fails, so a round that
+    injects a D5 fault replaces that failure rather than adding one)."""
+    _, block = _multi_fault_round(gates, stem, mode)
+    if failed.startswith("HOST") and mode in ("red-noself", "red-nofloor"):
+        assert "    observed red: ['b0to1:A:carry'] -> MISMATCH" in block, block
     if why is not None:
-        assert why in done.stdout, done.stdout
+        assert why in block, block
     else:
-        assert f"[{_RED}] no artifact (" in done.stdout
-    assert "PENDING REGISTRATION: PASSG-RED" not in done.stdout and done.returncode == 1
+        assert f"[{_RED}] no artifact (" in block
 
 
 def test_paint_census_entries_are_findings_that_never_change_the_verdict_or_the_exit(gates) -> None:
