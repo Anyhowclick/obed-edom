@@ -119,6 +119,7 @@ INSTRUMENT_JS = r"""
     var s=getComputedStyle(el),r=el.getBoundingClientRect();
     return s.display!=='none'&&s.visibility==='visible'&&r.width>0&&r.height>0&&(!el.checkVisibility||el.checkVisibility({opacityProperty:true,visibilityProperty:true}));
   }
+  function sourceRectError(entry,v){try{var q=entry&&entry.srcRect;if(!q||!finite(q.x)||!finite(q.y)||!finite(q.w)||!finite(q.h)||!(q.w>0&&q.h>0))return null;var stage=document.getElementById('stage'),ow=stage&&stage.offsetWidth,oh=stage&&stage.offsetHeight;if(!stage||!finite(ow)||!finite(oh)||!(ow>1&&oh>1))return null;var sr=stage.getBoundingClientRect();if(!sr||!finite(sr.left)||!finite(sr.top)||!finite(sr.width)||!finite(sr.height)||!(sr.width>1&&sr.height>1))return null;var sx=sr.width/ow,sy=sr.height/oh,avg=(sx+sy)/2;if(!finite(sx)||!finite(sy)||!(sx>0&&sy>0&&avg>0)||Math.abs(sx-sy)/avg>0.001)return null;var r=v&&v.getBoundingClientRect?v.getBoundingClientRect():null;if(!r||!finite(r.left)||!finite(r.top)||!finite(r.right)||!finite(r.bottom)||!finite(r.width)||!finite(r.height)||!(r.width>0&&r.height>0))return null;var L=sr.left+q.x*sx,T=sr.top+q.y*sx,R=sr.left+(q.x+q.w)*sx,B=sr.top+(q.y+q.h)*sx;if(!finite(L)||!finite(T)||!finite(R)||!finite(B))return null;var error=Math.max(Math.abs(r.left-L),Math.abs(r.top-T),Math.abs(r.right-R),Math.abs(r.bottom-B));return finite(error)?error:null}catch(e){return null}}
   function stageMap(){var stage=document.getElementById('stage');if(!stage||!(stage.offsetWidth>1))return null;var r=stage.getBoundingClientRect();return {stage:stage,s:r.width/stage.offsetWidth,ox:r.left,oy:r.top}}
   function expectedBox(entry,v){var m=stageMap(),r=entry&&entry.dstRect;if(m&&r)return {stage:m.stage,x:m.ox+r.x*m.s,y:m.oy+r.y*m.s,w:r.w*m.s,h:r.h*m.s,s:m.s};
     var vr=v&&v.getBoundingClientRect?v.getBoundingClientRect():null;return vr&&m?{stage:m.stage,x:vr.left,y:vr.top,w:vr.width,h:vr.height,s:m.s}:null}
@@ -256,7 +257,7 @@ INSTRUMENT_JS = r"""
       if(G.frame){collectRiders(gl,G);finishFrame(gl,G)}
       var stamp=frameTime();G.frame={serial:G.serial,atScene:G.atScene,n:S.frames.length+1,t:performance.now(),frameTime:stamp,
         frameIndex:browserFrame(stamp),frameTimestamp:stamp,draws:0,uploads:0,rows:[],labels:[],riders:[],
-        quads:{},under:[],labelExpected:[],module:moduleRead(),pixelsDone:false};
+        srcErr:{},quads:{},under:[],labelExpected:[],module:moduleRead(),pixelsDone:false};
       var result=O.clear.apply(gl,arguments);collectRiders(gl,G);return result;
     };
     function draw(name,args){
@@ -331,6 +332,7 @@ INSTRUMENT_JS = r"""
   function finishFrame(gl,G){
     var F=G.frame;if(!F)return;
     if(!F.pixelsDone){F.rows.forEach(function(row){row.feedRead={patchInside:false,coveredByLaterDraw:false,kind:null,late:true};row.holdMatch=null;delete row._reference;delete row._matrix;delete row._layerSize});F.under=[]}
+    F.riders.forEach(function(row){row.sourceRectError=Object.prototype.hasOwnProperty.call(F.srcErr,row.entryId)?F.srcErr[row.entryId]:0});delete F.srcErr;
     F.glErrors=[];S.frames.push(F);G.frame=null;
   }
   function finishContext(G,stamp,index){
@@ -395,7 +397,7 @@ INSTRUMENT_JS = r"""
     if(typeof stand==='function')feed.onStandDown=function(objectId,reason){var v=decoderFor(objectId),move=v&&moveFor(v),result=stand.apply(feed,arguments),entry=entryForObject(objectId);S.standDowns.push({objectId:objectId,entryId:entry&&entry.id,serial:move&&entry&&move.atScene===entry.atScene?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),reason:reason==null?null:String(reason),accepted:result===true});return result};
   }
   function collectRiders(gl,G){var F=G.frame,canvas=gl.canvas;if(!F||G.closed||!canvas||!canvas.isConnected)return;var cr=canvas.getBoundingClientRect();
-    G.entries.forEach(function(e){if(F.riders.some(function(r){return r.entryId===e.id}))return;var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
+    G.entries.forEach(function(e){var v=decoderForEntry(e);if(v&&visible(v)){var x=sourceRectError(e,v),has=Object.prototype.hasOwnProperty.call(F.srcErr,e.id);if(!has)F.srcErr[e.id]=x;else if(F.srcErr[e.id]!==null)F.srcErr[e.id]=x===null?null:Math.max(F.srcErr[e.id],x)}if(F.riders.some(function(r){return r.entryId===e.id}))return;var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
       opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})}
   function riderTick(stamp){
     var frameStamp=frameTime(),index=browserFrame(frameStamp);armSeam();installKillSwitch();entries().forEach(function(e){decoderForEntry(e)});

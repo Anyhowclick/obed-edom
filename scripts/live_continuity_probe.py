@@ -1570,7 +1570,7 @@ def verdict_specs(plan: ContinuityPlan) -> list[dict[str, Any]]:
                 armed = movie.refusal is not None and movie.gl_replay is not None
                 add(
                     "carry", "continue", None if armed else movie.refusal is None,
-                    srcRect=src_rect, dstRect=dst_rect, transitionScene=transition,
+                    srcRect=src_rect, authoredSrcRect=movie.src_rect.as_dict(), dstRect=dst_rect, transitionScene=transition,
                     sourceScene=plan.scene_index_by_player.get(source), untilScene=later[0] if later else None,
                 )
                 if armed:
@@ -1932,7 +1932,7 @@ def feed_specs_for(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
         {
             "id": spec["id"], "objectId": spec.get("srcObjectId"), "dstObjectId": spec.get("dstObjectId"),
             "atScene": spec.get("atScene"), "feed": spec.get("feed"), "draws": spec.get("feedDraws"),
-            "artwork": spec.get("artworkAbove"), "dstRect": spec.get("dstRect"),
+            "artwork": spec.get("artworkAbove"), "dstRect": spec.get("dstRect"), "srcRect": spec.get("authoredSrcRect"),
             "sourceFps": spec.get("sourceFps"),
         }
         for spec in (facts or {}).get("verdicts") or []
