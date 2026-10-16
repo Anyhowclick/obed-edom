@@ -9369,6 +9369,7 @@ class TestChainCarryWindow:
     "prior-zero-rect-first-destination-decode", "pin-busy-first-decode",
     "alpha-zero-rect-cold-start", "hidden-prior-decode-loss", "gl-absent-decoder",
     "multi-scene-build", "source-zero-rect-decode-loss", "cut-short-cold-start",
+    "hidden-busy-entry-decode-loss",
 ])
 def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
     boundary = 9 if case == "differing-clocks" else 4 if case == "multi-scene-build" else 3 if case == "multi-scene-source" else 2
@@ -9495,6 +9496,31 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
                 ))
             row = sample(t, scene, *videos)
             row["busy"] = scene == 1 and index - 20 < 19
+            row["playerState"] = "Playing" if row["busy"] else "IdleAtFinalState"
+            rows.append(row)
+    elif case == "hidden-busy-entry-decode-loss":
+        rows = []
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for index, scene in enumerate([0] * 20 + [1] * 160 + [2] * 100):
+            t = index * 16.0
+            videos = []
+            if scene == 1 and index < 30:
+                videos.append(video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=0.0, ready_state=4,
+                    rect=dict(zero),
+                ))
+            elif scene == 1:
+                videos.append(video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=0.0, ready_state=1,
+                    rect=dict(SRC_RECT),
+                ))
+            elif scene == 2:
+                videos.append(video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=(index - 180) * 0.016,
+                    ready_state=4, rect=dict(DST_RECT),
+                ))
+            row = sample(t, scene, *videos)
+            row["busy"] = scene == 1 and index < 30
             row["playerState"] = "Playing" if row["busy"] else "IdleAtFinalState"
             rows.append(row)
     elif case == "hidden-premounted-successor":
@@ -9634,6 +9660,8 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
     elif case == "cut-short-cold-start":
         assert scored["verdict"] is True
         assert scored["window"]["coldStart"]["rows"] > 0
+    elif case == "hidden-busy-entry-decode-loss":
+        assert scored["verdict"] is False and scored["decodeLoss"]
     elif case == "gl-excused-missing":
         first, second = rows[55], rows[56]
         assert scored["verdict"] is False and scored["missingSamples"] and scored["decodeLoss"]

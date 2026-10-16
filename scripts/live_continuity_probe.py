@@ -2740,7 +2740,7 @@ def score_continuity(
             and connected is True
             and (
                 rect_ok
-                or row.get("busy") is False and _finite_number(row.get("scene")) == source_scene
+                or _finite_number(row.get("scene")) == source_scene
             )
         )
 
