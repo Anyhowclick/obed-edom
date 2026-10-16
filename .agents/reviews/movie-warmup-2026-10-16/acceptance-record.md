@@ -83,3 +83,14 @@ profiles in that session's `suite-profile-f4/` notes):
 - This branch changes nothing under `scripts/` or in that test (refactor-owned). It is a wall-clock flake under
   `-n auto` contention, handed to the suite-speedup session.
 - The 38 skips are the usual Keynote and live-cache skips.
+
+## Revalidation after rebase onto `origin/claude/stage-b-arch` `7746df27` (core `838eeedf`)
+The base moved after acceptance: the Alpha placement merge, noRider fixes, the pre-draw rider exemption and the
+settle-wait test fix. The rebase was clean.
+
+- **A1:** 1012 passed.
+- **A2:** 3 + 3 headless pairs on `0375493e`:
+  - slide-4 entry **off 200 / 201 / 217 ms (12 frames)**, **auto 17 / 30 / 42 ms (≤ 3 frames)**;
+  - b6to7 and b7to8:wa0125 fail in every run;
+  - **b5to6 and b7to8:wa0121 flip in both arms** (b5to6 fails in auto-3; b7to8:wa0121 passes in off-2). That is
+    flakiness of the new base, not the warm-up.
