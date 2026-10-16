@@ -23,6 +23,7 @@ P2 slide JSON with the real builder, so the representation check reads Keynote-s
 from __future__ import annotations
 
 import contextlib
+import copy
 import functools
 import io
 import json
@@ -2677,10 +2678,28 @@ def test_placement_rescore_launch_matrix_and_dev_relocation(
     monkeypatch.setattr(q, "score_placement_control", score_control)
     monkeypatch.setattr(q, "score_placement_calibration", score_calibration)
 
-    def write_record(folder: Path, body: dict[str, Any], images: dict[str, np.ndarray] | None = None) -> None:
+    renderer_runs: dict[str, tuple[dict[str, Any], dict[str, bytes]]] = {}
+
+    def renderer_run(name: str) -> tuple[dict[str, Any], dict[str, bytes]]:
+        if name not in renderer_runs:
+            body, images = media_run(name)
+            encoded = {}
+            for image_name, image in images.items():
+                output = io.BytesIO()
+                Image.fromarray(image).save(output, format="PNG")
+                encoded[image_name] = output.getvalue()
+            renderer_runs[name] = body, encoded
+        body, encoded = renderer_runs[name]
+        return copy.deepcopy(body), encoded
+
+    def write_record(folder: Path, body: dict[str, Any], images: dict[str, np.ndarray | bytes] | None = None) -> None:
         folder.mkdir(parents=True, exist_ok=True)
         for name, image in (images or {}).items():
-            Image.fromarray(image).save(folder / f"{name}.png")
+            path = folder / f"{name}.png"
+            if isinstance(image, bytes):
+                path.write_bytes(image)
+            else:
+                Image.fromarray(image).save(path)
         (folder / "record.json").write_text(json.dumps(body))
 
     def build(root: Path, rate: int, token: int, *, tier: str = "full", dev_profile: str | None = None,
@@ -2718,7 +2737,7 @@ def test_placement_rescore_launch_matrix_and_dev_relocation(
                 }
             else:
                 if renderer_images:
-                    body, images = media_run(name)
+                    body, images = renderer_run(name)
                     body.update(scope)
                     body.update(acquisition)
                 value = q.dissolve_probe.ARMS[name].placement_value or profile.placement
