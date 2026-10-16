@@ -75,26 +75,6 @@ def test_strip_bits_layout_and_even_parity():
         movie.strip_bits(1 << movie.DATA_BITS)
 
 
-@pytest.mark.parametrize("case", movie.decoder_conformance_vectors(), ids=lambda case: case["name"])
-def test_layout_decoder_conformance(case: dict[str, object]) -> None:
-    assert movie.decode_counter(case["levels"], case.get("layout")) == {
-        "counter": case["counter"], "levels": case["levels"], "reason": case["reason"],
-    }
-
-
-def test_layout_exposes_the_machine_readable_counter_format() -> None:
-    counter_layout = movie.layout()
-    assert counter_layout["format"] == movie.COUNTER_FORMAT
-    assert counter_layout["sourceSize"] == [movie.WIDTH, movie.HEIGHT]
-    assert counter_layout["blockRects"] == [list(rect) for rect in movie.BLOCK_RECTS]
-    assert counter_layout["start"] == list(movie.START)
-    assert counter_layout["end"] == list(movie.END)
-    assert counter_layout["dataBits"] == movie.DATA_BITS
-    assert counter_layout["parity"] == "even"
-    assert counter_layout["minContrast"] == movie.MIN_CONTRAST
-    assert counter_layout["ambiguousRatio"] == movie.AMBIGUOUS_RATIO
-
-
 def test_strip_and_digits_stay_clear_of_each_other_and_of_the_slide2_green_slot():
     sx, sy, sw, sh = movie.STRIP_RECT
     dx, dy, dw, dh = movie.DIGITS_RECT

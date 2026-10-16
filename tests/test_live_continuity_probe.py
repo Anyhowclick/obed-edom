@@ -12613,6 +12613,7 @@ def test_feed_instrument_is_registered_before_navigation() -> None:
     assert facts["verdicts"][0]["srcRect"] == pin_dst != feed_specs[0]["srcRect"]
     kwargs = probe.feed_host_kwargs(facts)
     assert kwargs["pre_navigation_scripts"][0].startswith(probe.mm_feed_instrument.INSTRUMENT_JS)
+    assert json.dumps(probe.binary_counter_movie.layout()) in kwargs["pre_navigation_scripts"][0]
     assert "window.__obedMmFeedProbe.bootstrap(" in kwargs["pre_navigation_scripts"][0]
     assert probe.feed_host_kwargs()["pre_navigation_scripts"] == ()
     absent = type("Absent", (), {

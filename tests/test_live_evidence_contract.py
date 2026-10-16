@@ -436,7 +436,7 @@ def test_v2_counter_sampling_diagnostics_co_land_with_the_layout() -> None:
     }}
     read = report["frames"][0]["rows"][0]["feedRead"]
     read.update(
-        referenceCounter=None, referenceLevels=list(levels), referenceReason="marker",
+        referenceCounter=12, referenceLevels=list(levels), referenceReason=None,
     )
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
     report["sampling"]["entries"]["carry-a"] = {
@@ -478,6 +478,35 @@ def test_v2_replay_without_counter_layout_keeps_the_legacy_contract() -> None:
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
 
 
+def _strict_setup(report: dict[str, Any]) -> dict[str, Any]:
+    report.update(version=2, browserFrames=[{"index": 0, "timestamp": 2.0}], handbacks=[])
+    report["contexts"][0].update(closedAt=None, closedFrameIndex=None)
+    report["frames"][0].update(frameIndex=0, frameTimestamp=2.0)
+    report["departures"][0].update(generation=1, visit=1)
+    report["config"]["counterLayout"] = binary_counter.layout()
+    levels = [255.0 if bit else 0.0 for bit in binary_counter.strip_bits(12)]
+    report["sampling"] = {"width": 192, "referenceCapacity": 18, "entries": {
+        "carry-a": {"references": 18, "latestFrame": 12, "latestCounter": 12,
+                    "latestLevels": list(levels), "latestReason": None},
+    }}
+    report["frames"][0]["rows"][0]["feedRead"].update(
+        referenceCounter=12, referenceLevels=list(levels), referenceReason=None,
+    )
+    return report
+
+
+def _strict(mutate: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], Any]:
+    return lambda report: mutate(_strict_setup(report))
+
+
+def _counter_feed_read(report: dict[str, Any]) -> dict[str, Any]:
+    report = _strict_setup(report)
+    read = report["frames"][0]["rows"][0]["feedRead"]
+    levels = list(read["referenceLevels"])
+    read.update(kind="counter", counter=12, counterLevels=levels, counterReason=None)
+    return read
+
+
 @pytest.mark.parametrize(("mutate", "clause"), [
     (lambda r: r["contexts"][0].pop("lost"), "mmFeed.context.lost:missing"),
     (lambda r: r["contexts"][0].pop("closedAt"), "mmFeed.context.closedAt:missing"),
@@ -496,6 +525,37 @@ def test_v2_replay_without_counter_layout_keeps_the_legacy_contract() -> None:
     (lambda r: r["frames"][0]["riders"][0].update(sourceRectError=float("nan")), "mmFeed.rider.sourceRectError"),
     (lambda r: r["frames"][0]["riders"][0].update(sourceRectError=float("inf")), "mmFeed.rider.sourceRectError"),
     (lambda r: r["frames"][0]["riders"][0].update(sourceRectError=-.1), "mmFeed.rider.sourceRectError"),
+    (_strict(lambda r: r["config"].pop("counterLayout")), "mmFeed.counterLayout:object"),
+    (_strict(lambda r: r.pop("sampling")), "mmFeed.sampling:object"),
+    (_strict(lambda r: r["sampling"].update(width=191)), "mmFeed.sampling.width"),
+    (_strict(lambda r: r["sampling"].update(referenceCapacity=17)), "mmFeed.sampling.referenceCapacity"),
+    (_strict(lambda r: r["sampling"]["entries"]["carry-a"].update(references=19)),
+     "mmFeed.sampling.entry.references"),
+    (_strict(lambda r: r["sampling"]["entries"]["carry-a"]["latestLevels"].pop()),
+     "mmFeed.sampling.entry.latestLevels"),
+    (_strict(lambda r: r["config"]["counterLayout"]["blockRects"].pop()),
+     "mmFeed.counterLayout.blockRects"),
+    (_strict(lambda r: r["frames"][0]["rows"][0]["feedRead"]["referenceLevels"].pop()),
+     "mmFeed.feedRead.referenceLevels"),
+    (_strict(lambda r: r["config"]["counterLayout"].update(format="counter")), "mmFeed.counterLayout.format"),
+    (_strict(lambda r: r["sampling"]["entries"]["carry-a"].update(latestReason="unknown")),
+     "mmFeed.sampling.entry.latestReason"),
+    (lambda r: _counter_feed_read(r).update(counterReason="unknown"), "mmFeed.feedRead.counterReason"),
+    (_strict(lambda r: r["sampling"]["entries"]["carry-a"].update(latestCounter=13)),
+     "mmFeed.counterBinding"),
+    (_strict(lambda r: r["sampling"]["entries"]["carry-a"].update(latestReason="parity")),
+     "mmFeed.counterBinding"),
+    (lambda r: _counter_feed_read(r).update(counter=13), "mmFeed.counterBinding"),
+    (lambda r: _counter_feed_read(r).update(counterReason="parity"), "mmFeed.counterBinding"),
+    (_strict(lambda r: r["frames"][0]["rows"][0]["feedRead"].update(referenceCounter=13)),
+     "mmFeed.counterBinding"),
+    (_strict(lambda r: r["frames"][0]["rows"][0]["feedRead"].update(referenceReason="parity")),
+     "mmFeed.counterBinding"),
+    (lambda r: _counter_feed_read(r).update(counterLevels=[], counterReason="bounds", counter=12),
+     "mmFeed.counterBinding"),
+    (_strict(lambda r: r["frames"][0]["rows"][0]["feedRead"].update(
+        referenceLevels=[], referenceReason="source", referenceCounter=12,
+    )), "mmFeed.counterBinding"),
 ])
 def test_mm_feed_contract_rejects_required_field_and_generation_breaks(mutate: Any, clause: str) -> None:
     report = _mm_feed_report()
@@ -508,20 +568,6 @@ def test_mm_feed_contract_accepts_null_draw_and_source_geometry_values() -> None
     report["contexts"][0]["firstDrawAt"] = None
     report["frames"][0]["riders"][0]["sourceRectError"] = None
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
-
-
-@pytest.mark.parametrize("field", ["firstDrawAt", "sourceRectError"])
-def test_mm_feed_contract_requires_geometry_producer_fields_in_v2(field: str) -> None:
-    report = _mm_feed_report()
-    report.update(version=2, browserFrames=[{"index": 0, "timestamp": 2.0}], handbacks=[])
-    report["contexts"][0].update(closedAt=None, closedFrameIndex=None)
-    report["frames"][0].update(frameIndex=0, frameTimestamp=2.0)
-    report["departures"][0].update(generation=1, visit=1)
-    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
-    target = report["contexts"][0] if field == "firstDrawAt" else report["frames"][0]["riders"][0]
-    target.pop(field)
-    errors = [problem.split(" at ")[0] for problem in contract.mm_feed_report(report)]
-    assert f"mmFeed.{'context' if field == 'firstDrawAt' else 'rider'}.{field}:missing" in errors
 
 
 def _feed_verdict_record() -> dict[str, Any]:

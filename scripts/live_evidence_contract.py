@@ -12,6 +12,7 @@ import re
 from itertools import islice
 from typing import Any, Iterable, Iterator
 
+import binary_counter_movie
 import paint_instrument
 
 CONTRACT_ERROR_LIMIT = 5
@@ -681,6 +682,18 @@ def _mm_feed_decoder(value: Any, path: str) -> Iterator[str]:
             yield f"mmFeed.decoder.{key} at {path}"
 
 
+def _counter_read(levels: Any, counter: Any, reason: Any, counter_layout: Any, path: str) -> Iterator[str]:
+    blocks = counter_layout.get("blockRects") if isinstance(counter_layout, dict) else None
+    if not isinstance(levels, list) or not isinstance(blocks, list):
+        return
+    if len(levels) == len(blocks):
+        decoded = binary_counter_movie.decode_counter(levels, counter_layout)
+        if decoded["counter"] != counter or decoded["reason"] != reason:
+            yield f"mmFeed.counterBinding at {path}"
+    elif reason is not None and counter is not None:
+        yield f"mmFeed.counterBinding at {path}"
+
+
 def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
     """`mm_feed_instrument.INSTRUMENT_JS` report and its decoder/GL frame producers."""
     if not isinstance(value, dict):
@@ -690,7 +703,7 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
     config = value.get("config")
     counter_layout = config.get("counterLayout") if isinstance(config, dict) else None
     counter_blocks = counter_layout.get("blockRects") if isinstance(counter_layout, dict) else None
-    strict_counter = isinstance(config, dict) and "counterLayout" in config
+    strict_counter = "sampling" in value or isinstance(config, dict) and "counterLayout" in config
     if value.get("kind") != "mm-feed" or version not in (1, 2):
         yield f"mmFeed:version at {path}"
     lists = ("contexts", "frames", "media", "mediaDropped", "artwork", "errors", "killedOnce", "uploads", "claims", "standDowns", "departures")
@@ -756,6 +769,10 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                                 or entry.get("references") == 0 and entry.get("latestFrame") is None and reason is None
                             )):
                         yield f"mmFeed.sampling.entry.latestLevels at {where}"
+                    yield from _counter_read(
+                        levels, entry.get("latestCounter"), reason, counter_layout,
+                        f"{where}.latestLevels",
+                    )
     contexts_by_serial = {}
     for index, context in enumerate(value.get("contexts") or []):
         where = f"{path}.contexts[{index}]"
@@ -841,6 +858,10 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                         if isinstance(levels, list) and isinstance(counter_blocks, list) \
                                 and len(levels) != len(counter_blocks) and not (not levels and reason in ("bounds", "layout", "read", "source")):
                             yield f"mmFeed.feedRead.{prefix}Levels at {rwhere}.feedRead"
+                        yield from _counter_read(
+                            levels, read.get(prefix if prefix == "counter" else "referenceCounter"), reason,
+                            counter_layout, f"{rwhere}.feedRead.{prefix}Levels",
+                        )
                 if read.get("kind") is None and read.get("late") is not True:
                     yield f"mmFeed.feedRead.late at {rwhere}.feedRead"
             match = row.get("holdMatch")
