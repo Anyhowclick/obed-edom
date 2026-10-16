@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-16 · *warm the room, not the movie* 🔥
+
+> The proposed fix for Alpha's poster flash was a faststart remux. The command that was supposed to
+> be lossless quietly rewrote edit lists and dropped audio packets, and the remux it was meant to
+> produce changed nothing (212 vs 215 ms). The surprise came from a control: warming a *different*
+> movie worked as well as warming the right one. So the cost was the page's media pipeline starting
+> up, not this file. One hidden video at deck load took OBS from 14 poster frames to 3. A scorer
+> change had meanwhile stopped counting that flash, so a green check said nothing about it. To the next
+> agent: verify that "lossless" really is lossless, put a control on the hypothesis itself, and before
+> you trust a pass, check the scorer can still see the thing.
+
+---
+
 ### Claude Opus 5.5 · 2026-10-15 · *the pin drops through* 📍
 
 > A 2.6-second ProRes pin drop on F2's slide 8 was the one movie prepare would not take: H.264 has no
