@@ -317,6 +317,11 @@ if [ -n "$STUB_LOAD_AFTER_PREWARM" ] && grep -q '^prewarm' "$STUB_EVENTS" 2>/dev
 echo "{ $load 9.99 9.99 }"
 """
 
+SLEEP_STUB = """#!/bin/sh
+echo "$1" >> "$STUB_SLEEPS"
+exec /bin/sleep "$1"
+"""
+
 
 @pytest.fixture
 def gates(tmp_path: Path):
@@ -351,6 +356,9 @@ def gates(tmp_path: Path):
     stub_bin.mkdir()
     (stub_bin / "sysctl").write_text(SYSCTL_STUB)
     (stub_bin / "sysctl").chmod(0o755)
+    (stub_bin / "sleep").write_text(SLEEP_STUB)
+    (stub_bin / "sleep").chmod(0o755)
+    sleeps = tmp_path / "sleeps.txt"
 
     def env(**extra: str) -> dict[str, str]:
         drop = (
@@ -361,7 +369,7 @@ def gates(tmp_path: Path):
         base = {k: v for k, v in os.environ.items() if k not in drop}
         base["PATH"] = f"{stub_bin}{os.pathsep}{base.get('PATH', '')}"
         return {
-            **base, "STUB_EVENTS": str(events), "STUB_MARKER": str(marker),
+            **base, "STUB_EVENTS": str(events), "STUB_MARKER": str(marker), "STUB_SLEEPS": str(sleeps),
             "QUAL_B_SOURCE": str(qual_b_source), **extra,
         }
 
@@ -383,6 +391,9 @@ def gates(tmp_path: Path):
     def events_list() -> list[str]:
         return events.read_text().splitlines() if events.exists() else []
 
+    def sleeps_list() -> list[float]:
+        return [float(line) for line in sleeps.read_text().splitlines()] if sleeps.exists() else []
+
     def survivors() -> list[str]:
         # Deliberately global: catch every leaked descendant under tmp_path, not only stub PIDs.
         found = subprocess.run(["pgrep", "-fl", str(tmp_path)], capture_output=True, text=True).stdout
@@ -397,7 +408,8 @@ def gates(tmp_path: Path):
         return copy
 
     yield {
-        "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list, "survivors": survivors,
+        "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list, "sleeps": sleeps_list,
+        "survivors": survivors,
         "patched": patched, "tmp": tmp_path, "qual_b_source": qual_b_source,
     }
     subprocess.run(["pkill", "-KILL", "-f", str(tmp_path)], capture_output=True)
@@ -633,13 +645,17 @@ def test_known_bad_load_that_does_not_settle_after_the_prewarm_launches_no_timed
 
 
 def test_the_settle_wait_never_sleeps_past_its_deadline(gates) -> None:
-    """Codex r4: a fixed 5 s sleep overshot a GATE_SETTLE_S that is not a multiple of 5."""
-    start = time.monotonic()
-    done = gates["run"](timeout=30, STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="9.50", GATE_SETTLE_S="2")
-    elapsed = time.monotonic() - start
+    """Codex r4: a fixed 5 s sleep overshot a GATE_SETTLE_S that is not a multiple of 5.
+    The sleeps are checked rather than the round timed: the pre-launch staging shares the settle budget and xdist load
+    stretches it past any wall-clock bound. The patched copy restarts the deadline at the loop, so the loop always
+    sleeps and every sleep must stay strictly inside the remaining budget."""
+    loop = "while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do"
+    script = gates["patched"](loop, f"settle_deadline=$((EPOCHREALTIME + GATE_SETTLE_S)); {loop}")
+    done = gates["run"](script=script, timeout=30, STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="9.50", GATE_SETTLE_S="4")
+    sleeps = gates["sleeps"]()
     assert done.returncode == 2
-    assert "still exceeds GATE_MAX_START_LOAD=4 2s after the prewarm" in done.stderr, done.stderr
-    assert elapsed < 4.5, f"settle wait overshot its 2 s deadline: round took {elapsed:.1f} s"
+    assert "still exceeds GATE_MAX_START_LOAD=4 4s after the prewarm" in done.stderr, done.stderr
+    assert sleeps and all(0 < t < 4 for t in sleeps) and sum(sleeps) < 4, f"settle wait overshot its 4 s deadline: slept {sleeps}"
 
 
 def test_positive_control_load_that_stays_low_after_the_prewarm_launches(gates) -> None:
