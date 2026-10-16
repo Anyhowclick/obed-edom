@@ -529,7 +529,7 @@ def test_an_outdir_that_is_a_file_is_refused(gates) -> None:
 
 def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
     gates["out"].mkdir()
-    done = gates["run"]("--tier", "dev")
+    done = gates["run"]()
     assert "round nonce " in done.stdout and "HOST 1920x1080: pass" in done.stdout, done.stdout + done.stderr
     args = _probe_args(gates["events"]())
     for deck in ("D7", "D7s"):
