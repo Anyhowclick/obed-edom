@@ -78,6 +78,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -938,17 +939,9 @@ def test_known_bad_every_non_pass_pass_g_outcome_fails_the_round_and_is_counted(
 
 def test_known_bad_one_errored_pass_g_adds_exactly_one_failure_to_the_summary(gates) -> None:
     """The positive control is the same round with every Pass G run passing."""
-    def failed(stdout: str) -> int:
-        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", stdout, re.M)
-        assert summary, stdout
-        return int(summary.group(1))
-
-    good = gates["shared"]("--tier", "full")
-    bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({"passG-D3": "g-error"}))
+    good, block = _multi_fault_round(gates, "passG-D3", "g-error")
     assert "GATE FAILED: PASSG" not in good.stdout
-    assert "[PASSG D3] status=error exit=0" in bad.stdout and "    stub g-error" in bad.stdout
-    assert [line for line in bad.stdout.splitlines() if "GATE FAILED: PASSG" in line] == ["    GATE FAILED: PASSG D3"]
-    assert failed(bad.stdout) == failed(good.stdout) + 1
+    assert "[PASSG D3] status=error exit=0" in block and "    stub g-error" in block
 
 
 def test_the_full_round_p2_arm_list(gates) -> None:
@@ -1079,6 +1072,121 @@ CC_LABELS = ["green", "--core-variant linear-bridge", "--carry-cover-null",
              "D1 green", "D1 --core-variant no-gl-clock", "D1 --carry-cover-null"]
 CC_EXTRA = [[], ["--core-variant", "linear-bridge"], ["--carry-cover-null"],
             [], ["--core-variant", "no-gl-clock"], ["--carry-cover-null"]]
+CARRY_COVER_BAD_CASES = [
+    ("carry-cover", "cc-fail", "status 'fail' != 'pass'"),
+    ("carry-cover", "cc-inconclusive", "status 'inconclusive' != 'pass'"),
+    ("carry-cover", "cc-error", "status 'error' != 'pass'"),
+    ("carry-cover", "cc-sha", "installed core sha is not the arm's"),
+    ("carry-cover", "cc-none", None),
+    ("carry-cover", "die", None),
+    ("carry-cover", "foreign", None),
+    ("carry-cover--core-variantlinear-bridge", "cc-pass", "status 'pass' != 'fail'"),
+    ("carry-cover--core-variantlinear-bridge", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
+    ("carry-cover--core-variantlinear-bridge", "cc-control", "control 'green' != 'red'"),
+    ("carry-cover--carry-cover-null", "cc-pass", "status 'pass' != 'fail'"),
+    ("carry-cover--carry-cover-null", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
+    ("carry-coverD1", "cc-clock", "bridge clocks ['fallback'] are not all 'gl'"),
+    ("carry-coverD1--core-variantno-gl-clock", "cc-clock", "bridge clocks ['gl'] are not all 'fallback'"),
+    ("carry-coverD1", "cc-fixture", "fixture 'elsewhere' != "),
+]
+_RED = "PASSG-RED D1 --core-variant no-pin-hold"
+INSTRUMENT_BAD_CASES = [
+    (PASSG_RED_STEM, "gr-sha", _RED, "nullControl installed core sha"),
+    (PASSG_RED_STEM, "gr-extra", _RED, "red set ['G1-3-4:b2to3:carry', 'G2-1-2:b0to1:carry'] != registered"),
+    (PASSG_RED_STEM, "gr-unknown", _RED, "unknown ['G1-2-3:b1to2:carry']"),
+    (PASSG_RED_STEM, "gr-floor", _RED, "G1-3-4:b2to3:carry longest unpainted run 108 below the 109-frame floor"),
+    (PASSG_RED_STEM, "gr-nofloor", _RED, "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
+    (PASSG_RED_STEM, "die", _RED, None),
+    (PC_STEMS[0], "pc-plus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "hiddenTicks 7 != 6"),
+    (PC_STEMS[1], "pc-minus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "hiddenTicks 5 != 6"),
+    (PC_STEMS[1], "pc-shift", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}",
+     "target seq set [301, 302, 303, 304, 305, 306] != injected"),
+    (PC_STEMS[2], "pc-unfired", f"PAINT-CONTROL D5 {PAINT_CONTROLS[2]}", "injector never fired"),
+    (PC_STEMS[0], "pc-control", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "control '1:ancestor-half:pin@2' != "),
+    *((PC_STEMS[0], f"pc-no-{key}", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}",
+       f"controlRecord unreadable: {key} missing") for key in ("aborted", "events", "errors")),
+    ("host-redD5--core-variantno-pin-hold", "red-noself", "HOST red D5 --core-variant no-pin-hold",
+     "arm.sampler is not schema 2 with selfCheck.ok"),
+    ("host-redD5--core-variantno-pin-hold", "red-floor", "HOST red D5 --core-variant no-pin-hold",
+     "b0to1:A:carry longest unpainted run 108 below the 109-frame floor"),
+    ("host-redD5--core-variantno-pin-hold", "red-nofloor", "HOST red D5 --core-variant no-pin-hold",
+     "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
+]
+
+
+def _multi_fault_cases() -> list[tuple[str, str, str]]:
+    cases = [
+        *((stem, mode, f"CARRY-COVER {CC_LABELS[CC_STEMS.index(stem)]}")
+          for stem, mode, _ in CARRY_COVER_BAD_CASES),
+        *((stem, mode, failed) for stem, mode, failed, _ in INSTRUMENT_BAD_CASES),
+        ("passG-D3", "g-error", "PASSG D3"),
+    ]
+    return cases
+
+
+def _multi_fault_rounds() -> tuple[dict[str, str], ...]:
+    rounds: list[dict[str, str]] = []
+    counts: Counter[str] = Counter()
+    for stem, mode, _ in _multi_fault_cases():
+        slot = counts[stem]
+        counts[stem] += 1
+        if slot == len(rounds):
+            rounds.append({})
+        assert stem not in rounds[slot]
+        rounds[slot][stem] = mode
+    assert len(rounds) == 7 and sum(map(len, rounds)) == 33
+    return tuple(rounds)
+
+
+MULTI_FAULT_ROUNDS = _multi_fault_rounds()
+MULTI_FAULT_SLOTS = {
+    (stem, mode): slot
+    for slot, modes in enumerate(MULTI_FAULT_ROUNDS)
+    for stem, mode in modes.items()
+}
+
+
+def _gate_failed(stdout: str) -> Counter[str]:
+    return Counter(line for line in stdout.splitlines() if line.startswith("    GATE FAILED: "))
+
+
+def _fault_block(stdout: str, failure: str) -> str:
+    lines = stdout.splitlines()
+    failed = f"    GATE FAILED: {failure}"
+    positions = [i for i, line in enumerate(lines) if line == failed]
+    assert len(positions) == 1, stdout
+    end = positions[0]
+    start = max(i for i, line in enumerate(lines[:end + 1]) if line.startswith("["))
+    block = lines[start:end + 1]
+    assert [line for line in block if line.startswith("    GATE FAILED: ")] == [failed]
+    return "\n".join(block)
+
+
+def _multi_fault_round(gates, stem: str, mode: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    slot = MULTI_FAULT_SLOTS[(stem, mode)]
+    modes = MULTI_FAULT_ROUNDS[slot]
+    good = gates["shared"]("--tier", "full")
+    bad = gates["shared"](STUB_MODES=json.dumps(modes, sort_keys=True))
+    expected = _gate_failed(good.stdout)
+    if "host-redD5--core-variantno-pin-hold" in modes:
+        baseline = "    GATE FAILED: HOST red D5 --core-variant no-pin-hold"
+        expected[baseline] -= 1
+        if expected[baseline] == 0:
+            del expected[baseline]
+    expected.update(f"    GATE FAILED: {failure}" for case_stem, case_mode, failure in _multi_fault_cases()
+                    if modes.get(case_stem) == case_mode)
+    actual = _gate_failed(bad.stdout)
+    assert actual == expected, bad.stdout
+    findings = sum(case_stem.startswith("host-redD5") and case_mode.startswith("red-")
+                   for case_stem, case_mode in modes.items())
+    summary = re.search(r"^DONE tier=full failed=(\d+) pending=(\d+) findings=(\d+)$", bad.stdout, re.M)
+    assert summary, bad.stdout
+    assert tuple(map(int, summary.groups())) == (sum(actual.values()), 0, findings)
+    assert "PENDING REGISTRATION:" not in bad.stdout
+    assert bad.returncode == 1
+    failure = next(failure for case_stem, case_mode, failure in _multi_fault_cases()
+                   if (case_stem, case_mode) == (stem, mode))
+    return good, _fault_block(bad.stdout, failure)
 
 
 def _full_launch_stems() -> list[str]:
@@ -1135,45 +1243,18 @@ def test_the_dev_tier_runs_no_carry_cover_pass_g_red_paint_control_or_pin_hold_r
     assert "[PASSG-RED" not in done.stdout and "[PAINT-CONTROL" not in done.stdout
 
 
-@pytest.mark.parametrize(("stem", "mode", "why"), [
-    ("carry-cover", "cc-fail", "status 'fail' != 'pass'"),
-    ("carry-cover", "cc-inconclusive", "status 'inconclusive' != 'pass'"),
-    ("carry-cover", "cc-error", "status 'error' != 'pass'"),
-    ("carry-cover", "cc-sha", "installed core sha is not the arm's"),
-    ("carry-cover", "cc-none", None),
-    ("carry-cover", "die", None),
-    ("carry-cover", "foreign", None),
-    ("carry-cover--core-variantlinear-bridge", "cc-pass", "status 'pass' != 'fail'"),
-    ("carry-cover--core-variantlinear-bridge", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
-    ("carry-cover--core-variantlinear-bridge", "cc-control", "control 'green' != 'red'"),
-    ("carry-cover--carry-cover-null", "cc-pass", "status 'pass' != 'fail'"),
-    ("carry-cover--carry-cover-null", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
-    ("carry-coverD1", "cc-clock", "bridge clocks ['fallback'] are not all 'gl'"),
-    ("carry-coverD1--core-variantno-gl-clock", "cc-clock", "bridge clocks ['gl'] are not all 'fallback'"),
-    ("carry-coverD1", "cc-fixture", "fixture 'elsewhere' != "),
-])
+@pytest.mark.parametrize(("stem", "mode", "why"), CARRY_COVER_BAD_CASES)
 def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, stem: str, mode: str, why: str | None) -> None:
     """Fail closed: a green that does not pass, a red or null control that passes (the instrument is blind) or is
     inconclusive, a foreign core sha, fixture or control, a bridge on the wrong clock (a green on the fallback, the D1
     red on the GL clock), no artifact, and a missing or stale status each count as exactly one GATE FAILED -- never
     pending."""
-    good = gates["shared"]("--tier", "full")
-    bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({stem: mode}))
+    _, block = _multi_fault_round(gates, stem, mode)
     label = CC_LABELS[CC_STEMS.index(stem)]
-    failed = [line for line in bad.stdout.splitlines() if "GATE FAILED: CARRY-COVER" in line]
-    assert failed == [f"    GATE FAILED: CARRY-COVER {label}"], bad.stdout
     if why is not None:
-        assert f"    MISMATCH: {why}" in bad.stdout, bad.stdout
+        assert f"    MISMATCH: {why}" in block, block
     else:
-        assert re.search(rf"^\[CARRY-COVER {re.escape(label)}\] no artifact \(.+\) exit=", bad.stdout, re.M), bad.stdout
-
-    def count(stdout: str) -> int:
-        summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", stdout, re.M)
-        assert summary, stdout
-        return int(summary.group(1))
-
-    assert count(bad.stdout) == count(good.stdout) + 1
-    assert "PENDING REGISTRATION: CARRY-COVER" not in bad.stdout and bad.returncode == 1
+        assert re.search(rf"^\[CARRY-COVER {re.escape(label)}\] no artifact \(.+\) exit=", block, re.M), block
 
 
 # --------------------------------------------------------------------------
@@ -1209,32 +1290,7 @@ def test_pass_g_red_and_the_paint_controls_run_in_order_and_match_a_well_formed_
     assert [stdout.index(o) for o in order] == sorted(stdout.index(o) for o in order)
 
 
-_RED = "PASSG-RED D1 --core-variant no-pin-hold"
-
-
-@pytest.mark.parametrize(("stem", "mode", "failed", "why"), [
-    (PASSG_RED_STEM, "gr-sha", _RED, "nullControl installed core sha"),
-    (PASSG_RED_STEM, "gr-extra", _RED, "red set ['G1-3-4:b2to3:carry', 'G2-1-2:b0to1:carry'] != registered"),
-    (PASSG_RED_STEM, "gr-unknown", _RED, "unknown ['G1-2-3:b1to2:carry']"),
-    (PASSG_RED_STEM, "gr-floor", _RED, "G1-3-4:b2to3:carry longest unpainted run 108 below the 109-frame floor"),
-    # Astra r1 #5: a no-pin-hold red arm that emits no floor is never matched on the red ids alone.
-    (PASSG_RED_STEM, "gr-nofloor", _RED, "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
-    (PASSG_RED_STEM, "die", _RED, None),
-    (PC_STEMS[0], "pc-plus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "hiddenTicks 7 != 6"),
-    (PC_STEMS[1], "pc-minus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "hiddenTicks 5 != 6"),
-    (PC_STEMS[1], "pc-shift", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "target seq set [301, 302, 303, 304, 305, 306] != injected"),
-    (PC_STEMS[2], "pc-unfired", f"PAINT-CONTROL D5 {PAINT_CONTROLS[2]}", "injector never fired"),
-    (PC_STEMS[0], "pc-control", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "control '1:ancestor-half:pin@2' != "),
-    # Astra r6 #2: a record missing an integrity field is never "no problems".
-    *((PC_STEMS[0], f"pc-no-{key}", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", f"controlRecord unreadable: {key} missing")
-      for key in ("aborted", "events", "errors")),
-    ("host-redD5--core-variantno-pin-hold", "red-noself", "HOST red D5 --core-variant no-pin-hold",
-     "arm.sampler is not schema 2 with selfCheck.ok"),
-    ("host-redD5--core-variantno-pin-hold", "red-floor", "HOST red D5 --core-variant no-pin-hold",
-     "b0to1:A:carry longest unpainted run 108 below the 109-frame floor"),
-    ("host-redD5--core-variantno-pin-hold", "red-nofloor", "HOST red D5 --core-variant no-pin-hold",
-     "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
-])
+@pytest.mark.parametrize(("stem", "mode", "failed", "why"), INSTRUMENT_BAD_CASES)
 def test_known_bad_every_broken_instrument_artifact_fails_exactly_its_own_check(
     gates, stem: str, mode: str, failed: str, why: str | None,
 ) -> None:
@@ -1243,20 +1299,13 @@ def test_known_bad_every_broken_instrument_artifact_fails_exactly_its_own_check(
     never fired, another control's artifact; a host red artifact with no selfCheck. Each is exactly one GATE FAILED
     among the instrument checks (the default host red stub artifact for D5 no-pin-hold already fails, so it is
     counted only in its own case)."""
-    done = gates["run"](STUB_MODES=json.dumps({stem: mode}))
-    prefixes = ("    GATE FAILED: PASSG-RED", "    GATE FAILED: PAINT-CONTROL")
-    lines = [line for line in done.stdout.splitlines() if line.startswith(prefixes)]
-    if failed.startswith("HOST"):
-        assert lines == [] and f"    GATE FAILED: {failed}" in done.stdout, done.stdout
-        if mode in ("red-noself", "red-nofloor"):
-            assert "    observed red: ['b0to1:A:carry'] -> MISMATCH" in done.stdout, done.stdout
-    else:
-        assert lines == [f"    GATE FAILED: {failed}"], done.stdout
+    _, block = _multi_fault_round(gates, stem, mode)
+    if failed.startswith("HOST") and mode in ("red-noself", "red-nofloor"):
+        assert "    observed red: ['b0to1:A:carry'] -> MISMATCH" in block, block
     if why is not None:
-        assert why in done.stdout, done.stdout
+        assert why in block, block
     else:
-        assert f"[{_RED}] no artifact (" in done.stdout
-    assert "PENDING REGISTRATION: PASSG-RED" not in done.stdout and done.returncode == 1
+        assert f"[{_RED}] no artifact (" in block
 
 
 def test_paint_census_entries_are_findings_that_never_change_the_verdict_or_the_exit(gates) -> None:
