@@ -126,7 +126,10 @@ def video(
 
 def sample(t: float, scene: float | None, *videos: dict[str, Any], stage_map: Any = _UNSET) -> dict[str, Any]:
     resolved = IDENTITY_STAGE_MAP if stage_map is _UNSET else stage_map
-    return {"t": t, "scene": scene, "videos": list(videos), "stageMap": resolved}
+    return {
+        "t": t, "scene": scene, "playerState": "IdleAtFinalState", "busy": False,
+        "videos": list(videos), "stageMap": resolved,
+    }
 
 
 def rows_around_boundary(
@@ -286,7 +289,7 @@ class TestWindowedAdvance:
         # history above).
         freeze_frames = int((pad_ms + 500.0) / dt_ms)
         for _ in range(freeze_frames):
-            samples.append(sample(t, 1.9, video(id=1, el_id=1, t=t, scene=1.9, current_time=frozen_at, rect=dict(SRC_RECT))))
+            samples.append(sample(t, 1.0, video(id=1, el_id=1, t=t, scene=1.0, current_time=frozen_at, rect=dict(SRC_RECT))))
             t += dt_ms
         for _ in range(freeze_frames):
             samples.append(sample(t, 2.0, video(id=1, el_id=1, t=t, scene=2.0, current_time=frozen_at, rect=dict(DST_RECT))))
@@ -5960,8 +5963,17 @@ def _continuity_batteries() -> dict[str, tuple[list[dict[str, Any]], dict[str, A
     }
 
 
+def _without_c3_report_fields(value: Any) -> Any:
+    out = copy.deepcopy(value)
+    window = out.get("window") if isinstance(out, dict) else None
+    if isinstance(window, dict):
+        for key in ("groundedStart", "coldStart", "chainClip", "forcedSeek"):
+            window.pop(key, None)
+    return out
+
+
 class TestWrapAwareScorerDefaultIsLegacy:
-    """`loop_period_s=None` must be today's scorer byte-for-byte (L2 CvC, offline half)."""
+    """`loop_period_s=None` preserves the legacy judgement and non-C3 evidence."""
 
     @pytest.mark.skipif(LEGACY is None, reason=f"git history for {LEGACY_REV} is unavailable")
     @pytest.mark.parametrize("name", sorted(_continuity_batteries()))
@@ -5970,7 +5982,7 @@ class TestWrapAwareScorerDefaultIsLegacy:
         scene = 8 if kwargs else 2.0
         legacy = LEGACY.score_continuity(samples, ASSET, scene, SRC_RECT, DST_RECT, True, **kwargs)
         current = probe.score_continuity(samples, ASSET, scene, SRC_RECT, DST_RECT, True, loop_period_s=None, **kwargs)
-        assert json.dumps(current, sort_keys=True) == json.dumps(legacy, sort_keys=True)
+        assert json.dumps(_without_c3_report_fields(current), sort_keys=True) == json.dumps(legacy, sort_keys=True)
 
     @pytest.mark.skipif(LEGACY is None, reason=f"git history for {LEGACY_REV} is unavailable")
     def test_score_boundaries_default_matches_the_pre_loop_scorer(self) -> None:
@@ -5989,12 +6001,12 @@ class TestWrapAwareScorerDefaultIsLegacy:
         assert json.dumps(scored, sort_keys=True) == json.dumps(legacy, sort_keys=True)
 
     @pytest.mark.parametrize("name", sorted(_continuity_batteries()))
-    def test_none_adds_no_keys(self, name: str) -> None:
+    def test_none_adds_only_c3_window_report_keys(self, name: str) -> None:
         samples, kwargs = _continuity_batteries()[name]
         scene = 8 if kwargs else 2.0
         result = probe.score_continuity(samples, ASSET, scene, SRC_RECT, DST_RECT, True, **kwargs)
         assert "wraps" not in result and "wrapTimes" not in result
-        assert "groundedStart" not in (result.get("window") or {})
+        assert {"groundedStart", "coldStart"} <= set(result.get("window") or {})
 
 
 class TestWrapAwareScorer:
@@ -6298,13 +6310,6 @@ class TestRecorderClock:
         recorder = _fw_recorder(period=1.5, offset_ms=-600.0)
         result = probe.score_recorder_clock(recorder, _fw_window())
         assert result["verdict"] is False and result["wraps"] > 1
-
-    def test_forced_window_is_clipped_past_the_seek(self) -> None:
-        samples = rows_around_boundary(n_before=200, n_after=200)
-        window = probe.forced_window(samples, 2.0, None, seeked_t=1000.0)
-        assert window["start"] == 2000.0
-        assert window["groundedStart"] < window["start"]
-
 
 class TestScoreForcedWrap:
     def test_bridge_carry_holds_across_exactly_one_wrap(self) -> None:
@@ -6660,7 +6665,7 @@ class TestRunForceWrap:
         monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
         monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
         monkeypatch.setattr(probe, "POST_ADVANCE_SETTLE_S", 0.0)
-        monkeypatch.setattr(probe, "forced_window", lambda *a: _fw_window())
+        monkeypatch.setattr(probe, "forced_window", lambda *a, **k: _fw_window())
         monkeypatch.setattr(probe, "sampler_record", lambda transport, rows: dict(_sampler_ok(), selfCheck={"ok": self_check}))
 
         args = probe.parse_args(["--force-wrap", "3to4:375", "--fixture", str(tmp_path)])
@@ -6805,7 +6810,7 @@ class TestWrapScorerSparseGap:
             for v in row["videos"]:
                 v["t"] = row["t"]
                 v["currentTime"] -= 20.0
-        result = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True, loop_period_s=LOOP_P, pad_s=30.0)
+        result = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True, loop_period_s=LOOP_P)
         assert result["wraps"] == 0
         assert result["verdict"] is False and result["maxDropS"] > 19.0
 
@@ -7375,7 +7380,7 @@ class TestCarryVerdict:
         assert {key: value["verdict"] for key, value in legacy.items()} == {
             "continue1to2": True, "restart2to3": True, "continue3to4": True,
         }
-        assert _plain(scored["continue3to4"]) == _plain(legacy["continue3to4"])
+        assert _plain(_without_c3_report_fields(scored["continue3to4"])) == _plain(legacy["continue3to4"])
         # S2 i1: the 1->2 window now stops before slide 2's own outgoing transition (scene 5).
         clipped = _plain(scored["continue1to2"])
         assert clipped["verdict"] is True and clipped["window"].pop("chainClipped") == {"end": legacy["continue1to2"]["window"]["end"]}
@@ -7390,7 +7395,8 @@ class TestCarryVerdict:
             loop_period_s=FW_PERIOD,
         )
         scored = probe.score_verdicts(_real_samples(), {}, facts, True, {"mode": "qualified"}, loop_period_s=FW_PERIOD)
-        assert scored[P2_CARRY34]["verdict"] is True and _plain(scored[P2_CARRY34]) == _plain(legacy)
+        assert scored[P2_CARRY34]["verdict"] is True
+        assert _plain(_without_c3_report_fields(scored[P2_CARRY34])) == _plain(legacy)
 
     def test_a_missing_crossing_is_inconclusive_not_red(self) -> None:
         """The Codex scenario: sampling stops before slide 4."""
@@ -9354,12 +9360,354 @@ class TestChainCarryWindow:
             next(r for r in I1["D1_A_samples"] if r["t"] == m["t"])["scene"] == 2 for m in after
         )
 
-    def test_a_spec_without_chain_fields_is_not_clipped(self) -> None:
-        assert probe.carry_window_clip(I1["D2_A_samples"], {"atScene": 2}) == (None, None)
 
-    def test_a_single_scene_destination_is_not_clipped_at_its_own_arrival(self) -> None:
-        rows = [{"t": 1.0, "scene": 2}, {"t": 2.0, "scene": 3}]
-        assert probe.carry_window_clip(rows, {"atScene": 2, "untilScene": 3, "sourceScene": 0}) == (1.0, None)
+@pytest.mark.parametrize("case", [
+    "alpha-cold-start", "d7-decoded-source", "never-decoded", "later-decode-loss",
+    "decoded-then-lost-entering-source", "mid-source-replacement", "hidden-premounted-successor",
+    "entry-hidden-decoded", "multi-scene-source", "chain-clip", "forced-seek",
+    "gl-excused-missing", "differing-clocks", "schema2-visible-undecoded", "union-start",
+    "prior-zero-rect-first-destination-decode", "pin-busy-first-decode",
+    "alpha-zero-rect-cold-start", "hidden-prior-decode-loss", "gl-absent-decoder",
+    "gl-after-only-decoder",
+    "multi-scene-build", "source-zero-rect-decode-loss", "cut-short-cold-start",
+    "hidden-busy-entry-decode-loss",
+])
+def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
+    boundary = 9 if case == "differing-clocks" else 4 if case == "multi-scene-build" else 3 if case == "multi-scene-source" else 2
+    rows = rows_around_boundary(boundary_scene=boundary, n_before=40, n_after=40, dt_ms=20.0, start_time=0.0)
+    for row in rows:
+        row["scene"] = int(row["scene"])
+    spec = {
+        "id": f"c3-{case}", "kind": "carry", "asset": ASSET, "atScene": boundary,
+        "transitionScene": None, "sourceScene": boundary - 1, "untilScene": None,
+        "srcRect": dict(SRC_RECT), "dstRect": dict(DST_RECT),
+        "fromPlayer": 0, "toPlayer": 1, "expect": True, "alias": None,
+    }
+    if case == "alpha-cold-start":
+        for row in rows[:15]:
+            row["videos"][0]["readyState"] = 1
+            row["videos"][0]["currentTime"] = rows[0]["videos"][0]["currentTime"]
+    elif case == "alpha-zero-rect-cold-start":
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for row in rows[:15]:
+            row["videos"][0].update(readyState=1, rect=dict(zero))
+    elif case == "prior-zero-rect-first-destination-decode":
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        prior = sample(-20.0, 0, video(
+            id=1, el_id=1, t=-20.0, scene=0, current_time=4.98, rect=zero,
+        ))
+        for row in rows[:40]:
+            row["videos"][0]["readyState"] = 1
+        rows = [prior, *rows]
+    elif case == "pin-busy-first-decode":
+        for row in rows[:39]:
+            row["videos"][0]["readyState"] = 1
+        rows[39]["busy"] = True
+    elif case == "hidden-prior-decode-loss":
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        prior = sample(-20.0, 0, video(
+            id=1, el_id=1, t=-20.0, scene=0, current_time=4.98, rect=zero,
+        ))
+        for row in rows[:20]:
+            row["videos"][0]["readyState"] = 1
+        rows = [prior, *rows]
+    elif case == "gl-absent-decoder":
+        rows = []
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for index, scene in enumerate([0] * 10 + [1] * 40 + [2] * 40):
+            t = index * 20.0
+            videos = [video(
+                id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=zero,
+            )] if scene == 0 else []
+            rows.append(sample(t, scene, *videos))
+    elif case == "gl-after-only-decoder":
+        rows = []
+        for index, scene in enumerate([0] * 10 + [1] * 40 + [2] * 40):
+            t = index * 20.0
+            videos = [video(
+                id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=dict(DST_RECT),
+            )] if scene == 2 else []
+            rows.append(sample(t, scene, *videos))
+    elif case == "never-decoded":
+        for row in rows:
+            row["videos"][0]["readyState"] = 1
+        rows[0]["videos"].append(video(
+            id=2, el_id=2, t=rows[0]["t"], scene=rows[0]["scene"], current_time=1.0,
+            rect={"x": 900.0, "y": 600.0, "w": 200.0, "h": 100.0},
+        ))
+    elif case == "later-decode-loss":
+        for row in rows[55:]:
+            row["videos"][0]["readyState"] = 1
+    elif case == "mid-source-replacement":
+        for row in rows[20:]:
+            row["videos"][0].update(id=2, elId=2)
+            row["videos"][0]["footprintOwner"]["elId"] = 2
+    elif case == "decoded-then-lost-entering-source":
+        prior = []
+        for index in range(5):
+            t = -100.0 + index * 20.0
+            prior.append(sample(
+                t, 0, video(id=1, el_id=1, t=t, scene=0, current_time=4.9 + index * 0.02, rect=dict(SRC_RECT)),
+            ))
+        for row in rows[:40]:
+            row["videos"][0].update(readyState=1, currentTime=5.0)
+        rows = prior + rows
+    elif case == "multi-scene-source":
+        rows = []
+        for index, scene in enumerate([0] * 5 + [1] * 15 + [2] * 10 + [3] * 30):
+            t = index * 20.0
+            current = 5.0 + t / 1000.0 - (0.5 if index >= 15 else 0.0)
+            rect = dict(DST_RECT if scene >= 3 else SRC_RECT)
+            row = sample(t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=current, rect=rect))
+            row.update(playerState="IdleAtFinalState", busy=False, hash=f"#{scene}", nextSceneId=None)
+            rows.append(row)
+        spec["sourceScene"] = 1
+    elif case == "multi-scene-build":
+        rows = []
+        scenes = [0] * 20 + [1] * 100 + [2] * 200 + [3] * 40 + [4] * 80
+        for index, scene in enumerate(scenes):
+            t = 1000.0 + index * 16.0
+            if scene <= 2:
+                rect = dict(SRC_RECT)
+            elif scene == 3:
+                progress = (index - 319) / 41.0
+                rect = {key: SRC_RECT[key] + (DST_RECT[key] - SRC_RECT[key]) * progress for key in SRC_RECT}
+            else:
+                rect = dict(DST_RECT)
+            row = sample(
+                t, scene, video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=5 + index * 0.016, rect=rect,
+                ),
+            )
+            row["busy"] = scene in (2, 3)
+            row["playerState"] = "Playing" if row["busy"] else "IdleAtFinalState"
+            rows.append(row)
+        spec.update(transitionScene=3, sourceScene=1)
+    elif case == "source-zero-rect-decode-loss":
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for index, row in enumerate(rows[:40]):
+            if index < 20:
+                row["videos"][0].update(rect=dict(zero), readyState=4)
+            else:
+                row["videos"][0]["readyState"] = 1
+    elif case == "cut-short-cold-start":
+        rows = []
+        for index, scene in enumerate([0] * 20 + [1] * 75 + [2] * 150):
+            t = 1000.0 + index * 16.0
+            videos = []
+            if scene >= 1:
+                source_index = index - 20
+                ready = 1 if source_index < 12 else 4
+                current = 0.0 if source_index < 12 else (source_index - 12) * 0.016
+                videos.append(video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=current, ready_state=ready,
+                    rect=dict(SRC_RECT if scene < 2 else DST_RECT),
+                ))
+            row = sample(t, scene, *videos)
+            row["busy"] = scene == 1 and index - 20 < 19
+            row["playerState"] = "Playing" if row["busy"] else "IdleAtFinalState"
+            rows.append(row)
+    elif case == "hidden-busy-entry-decode-loss":
+        rows = []
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for index, scene in enumerate([0] * 20 + [1] * 160 + [2] * 100):
+            t = index * 16.0
+            videos = []
+            if scene == 1 and index < 30:
+                videos.append(video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=0.0, ready_state=4,
+                    rect=dict(zero),
+                ))
+            elif scene == 1:
+                videos.append(video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=0.0, ready_state=1,
+                    rect=dict(SRC_RECT),
+                ))
+            elif scene == 2:
+                videos.append(video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=(index - 180) * 0.016,
+                    ready_state=4, rect=dict(DST_RECT),
+                ))
+            row = sample(t, scene, *videos)
+            row["busy"] = scene == 1 and index < 30
+            row["playerState"] = "Playing" if row["busy"] else "IdleAtFinalState"
+            rows.append(row)
+    elif case == "hidden-premounted-successor":
+        rows = []
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for index, scene in enumerate([0] * 10 + [1] * 40 + [2] * 40):
+            t = index * 20.0
+            videos = []
+            if index < 30:
+                videos.append(video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000))
+            videos.append(video(
+                id=2, el_id=2, t=t, scene=scene, current_time=max(0, index - 30) * 0.02,
+                paused=index < 30, rect=zero if index < 30 else dict(DST_RECT if scene >= 2 else SRC_RECT),
+            ))
+            rows.append(sample(t, scene, *videos))
+    elif case == "forced-seek":
+        spec["untilScene"] = 4
+    elif case == "chain-clip":
+        spec["untilScene"] = 4
+        for index in range(10):
+            t = rows[-1]["t"] + 20.0
+            rows.append(sample(
+                t, 3,
+                video(id=1, el_id=1, t=t, scene=3, current_time=2.0 + index / 50, rect=dict(DST_RECT)),
+            ))
+    elif case == "schema2-visible-undecoded":
+        for row in rows[:5]:
+            row["videos"][0]["readyState"] = 1
+    elif case == "union-start":
+        rows = []
+        for index, scene in enumerate([0] * 5 + [1] * 180 + [2] * 40):
+            t = index * 20.0
+            rect = dict(DST_RECT if scene >= 2 else SRC_RECT)
+            rows.append(sample(
+                t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=rect),
+            ))
+
+    _v2(rows)
+    for row in rows:
+        row["hash"] = "#9" if case == "differing-clocks" else f"#{int(row['scene'])}"
+        row["nextSceneId"] = 9 if case == "differing-clocks" and row["scene"] == 8 else None
+        row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+        for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
+            pv.update(
+                elId=decoder["elId"], instance=None, readyState=decoder["readyState"],
+                currentTime=decoder["currentTime"], paused=decoder["paused"], ended=decoder["ended"], clippedBy=None,
+            )
+            if pv["rect"]["w"] == 0 or pv["rect"]["h"] == 0:
+                pv["visibleRect"] = None
+    if case == "entry-hidden-decoded":
+        for row in rows[:10]:
+            row["pp"]["videos"][0]["opacity"] = 0.0
+    if case == "hidden-premounted-successor":
+        for row in rows[:30]:
+            row["pp"]["videos"][1].update(rect=dict(SRC_RECT), visibleRect=dict(SRC_RECT), opacity=0.0)
+    if case == "gl-excused-missing":
+        rows[54]["videos"] = []
+        rows[54]["pp"]["videos"] = []
+        rows[55]["videos"] = []
+        rows[55]["pp"]["videos"] = []
+        rows[56]["videos"][0]["readyState"] = 1
+        rows[56]["pp"]["videos"][0]["readyState"] = 1
+
+    capture = {
+        "samples": rows, "sampleSpace": "authored", "sampler": {"schema": 2},
+        "continuity": {"mode": "qualified"}, "evidence": {},
+    }
+    arm = probe.score_arm(capture, {"verdicts": [spec]}, {})
+    scored = arm[spec["id"]]
+    cold = arm["entryColdStart"].get("1")
+    assert set(arm["verdicts"]) == {spec["id"]} and "entryColdStart" not in scored
+    if case == "alpha-cold-start":
+        assert scored["verdict"] is True
+        assert cold["durationMs"] is None and cold["rows"] == 15
+        assert scored["window"]["start"] == 300.0
+        assert scored["window"]["coldStart"] == {
+            "rows": 15, "durationMs": 300.0, "firstSeenT": 0.0,
+        }
+    elif case == "alpha-zero-rect-cold-start":
+        assert scored["verdict"] is False
+        assert scored["window"]["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
+    elif case == "prior-zero-rect-first-destination-decode":
+        assert scored["verdict"] is None
+        assert scored["reason"] == "inconclusive: carried decoder never decoded before the crossing"
+    elif case == "pin-busy-first-decode":
+        assert scored["verdict"] is None
+        assert scored["reason"] == "inconclusive: carried decoder never decoded on a settled source row before the crossing"
+    elif case == "hidden-prior-decode-loss":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+        assert scored["window"]["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
+    elif case in ("gl-absent-decoder", "gl-after-only-decoder"):
+        gl_interval = {"start": rows[25]["ts"] - 1.0, "end": rows[55]["ts"] + 1.0}
+        scored = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            gl_interval=gl_interval, phases=None, spec=spec,
+        )
+        assert scored["verdict"] is False
+        assert scored["reason"] == "no decoder id spans the boundary within the window"
+        assert scored["paint"]["status"] == "fail"
+    elif case in ("d7-decoded-source", "differing-clocks"):
+        assert scored["verdict"] is True
+        assert cold["durationMs"] is None and cold["rows"] == 0
+        assert "chainClipped" not in scored["window"]
+        if case == "differing-clocks":
+            assert arm["samples"][0]["scene"] == 8 and arm["samples"][0]["hash"] == "#9"
+            start = next(row for row in arm["samples"] if row["t"] == scored["window"]["start"])
+            assert start["scene"] == 8 and start["playerState"] == "IdleAtFinalState"
+    elif case == "never-decoded":
+        assert scored["verdict"] is None
+        assert scored["reason"] == "inconclusive: carried decoder never decoded before the crossing"
+        assert cold["firstDecodedT"] is None
+    elif case == "later-decode-loss":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+    elif case == "decoded-then-lost-entering-source":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+        assert scored["longestStallS"] >= 0.78
+    elif case in ("mid-source-replacement", "hidden-premounted-successor", "entry-hidden-decoded"):
+        assert scored["verdict"] is False
+    elif case == "chain-clip":
+        first_scene_3 = min(row["t"] for row in rows if row["scene"] == 3)
+        assert spec["untilScene"] - 1 > spec["atScene"]
+        assert scored["verdict"] is True
+        assert scored["window"]["end"] < first_scene_3 and "end" in scored["window"]["chainClipped"]
+        single = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            phases=None, spec={**spec, "untilScene": 3},
+        )
+        assert single["verdict"] is True and "end" not in single["window"].get("chainClipped", {})
+    elif case == "multi-scene-source":
+        assert scored["verdict"] is False and scored["maxDropS"] >= 0.48, scored
+        assert scored["window"]["start"] == 100.0
+    elif case == "multi-scene-build":
+        assert scored["verdict"] is None
+        assert scored["integrity"] == "the sampler recorded no settled source sample"
+    elif case == "source-zero-rect-decode-loss":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+    elif case == "cut-short-cold-start":
+        assert scored["verdict"] is True
+        assert scored["window"]["coldStart"]["rows"] > 0
+    elif case == "hidden-busy-entry-decode-loss":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+    elif case == "gl-excused-missing":
+        first, second = rows[55], rows[56]
+        assert scored["verdict"] is False and scored["missingSamples"] and scored["decodeLoss"]
+        scored = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            gl_interval={"start": first["ts"] - 1.0, "end": second["ts"] + 1.0}, phases=None, spec=spec,
+        )
+        assert scored["verdict"] is False and scored["glExcusedMissing"] == 1
+        assert len(scored["missingSamples"]) == 1 and "decodeLoss" not in scored
+    elif case == "schema2-visible-undecoded":
+        assert scored["verdict"] is True
+        assert cold["visibleUndecodedRows"] == 5 and cold["visibleUndecodedDurationMs"] > 0
+    elif case == "union-start":
+        gl_interval = {"start": 1600.0, "end": 1760.0}
+        scored = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            gl_interval=gl_interval, phases=None, spec=spec,
+        )
+        assert gl_interval["start"] < 1680.0 < gl_interval["end"]
+        assert scored["verdict"] is True
+        assert scored["window"]["start"] == 100.0
+        assert scored["window"]["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
+    elif case == "forced-seek":
+        phases = probe.paint_instrument.read_phases(rows, {"verdicts": [spec]})
+        forced = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            min_window_start=300.0, phases=phases, spec=spec,
+        )
+        assert arm[spec["id"]]["verdict"] is True and forced["verdict"] is True
+        assert forced["window"]["start"] == 300.0
+        assert forced["window"]["forcedSeek"]["start"] == 300.0
+        assert "chainClip" not in forced["window"] and "chainClipped" not in forced["window"]
+        recorder = probe.forced_window(
+            rows, boundary, None, -700.0, asset=ASSET, element_id=1, phases=phases, spec=spec,
+        )
+        assert recorder["start"] == 300.0 and recorder["groundedStart"] == 0.0
+        assert "chainClip" not in recorder and "chainClipped" not in recorder
 
 
 class TestRetireHandback:
@@ -10347,8 +10695,13 @@ class TestCarryPaintWiring:
         expected = ("unreadable", f"schema: {field} missing") if field else ("unpainted", "offscreen")
         assert probe.paint_instrument.painted_state(rows[0]["pp"]["videos"][0]) == expected
         assert bool(probe.sample_schema_errors(rows)) is bool(field)
-        paint = score_moving_boundary(rows)["paint"]
-        assert (paint["status"], bool(paint["unreadable"])) == (("inconclusive", True) if field else ("fail", False))
+        scored = score_moving_boundary(rows)
+        if field:
+            paint = scored["paint"]
+            assert (paint["status"], bool(paint["unreadable"])) == ("inconclusive", True)
+        else:
+            paint = scored["paint"]
+            assert (scored["verdict"], paint["status"], bool(paint["unreadable"])) == (False, "fail", False)
 
     @pytest.mark.parametrize(("gap", "verdict", "status"), [
         pytest.param(False, False, "fail", id="identity-change-on-complete-evidence-stays-red"),
@@ -10428,25 +10781,6 @@ class TestCarryPaintWiring:
         for row in samples[40:148]:
             row["pp"]["videos"][0].update(opacity=1.0, hiding=None)
         assert probe.score_continuity(*args)["verdict"] is True
-
-    @pytest.mark.parametrize(("decoded_from", "floor", "expected"), [
-        pytest.param(0, None, 0.0, id="a-pin-transition-longer-than-the-pad-is-covered-from-the-settled-source"),
-        pytest.param(50, None, 800.0, id="never-before-the-first-decode-no-initial-load-false-red"),
-        pytest.param(200, None, 1184.0, id="no-decoded-settled-source-keeps-the-window-start"),
-        pytest.param(0, 1500.0, 1500.0, id="never-before-the-chain-clip"),
-    ])
-    def test_paint_start_is_grounded_at_the_first_decoded_settled_source_row(
-        self, decoded_from: int, floor: float | None, expected: float,
-    ) -> None:
-        """Plan §3.5: paintStart = max(clip, min(window.start, t0)), t0 the first settled row of
-        scene atScene-1 on which the carried decoder has readyState >= 2."""
-        samples = rows_around_boundary(n_before=200)
-        for index, row in enumerate(samples[:200]):
-            row["busy"] = False
-            row["videos"][0]["readyState"] = 4 if index >= decoded_from else 0
-        window = probe.find_boundary_window(samples, 2.0)
-        assert window["start"] == 1184.0
-        assert probe.paint_start(samples, 1, 2.0, window, floor) == expected
 
     @pytest.mark.parametrize(("source_frames", "fresh_from", "expected"), [
         (5, 6, {"frames": 1, "ms": 16.0, "t0": 80.0, "t1": 96.0}),
@@ -11715,15 +12049,6 @@ class TestFold5VerificationRound2:
         assert result["verdict"] is expected
         assert result["window"]["start"] == 0.0
 
-    def test_paint_start_is_the_source_slides_own_visit(self) -> None:
-        samples = rows_around_boundary(n_before=200)
-        for row in samples[:200]:
-            row["busy"] = False
-        lead = [dict(copy.deepcopy(samples[0]), t=t, scene=scene) for t, scene in ((-200.0, 1.0), (-100.0, 0.0))]
-        window = probe.find_boundary_window(lead + samples, 2.0)
-        assert probe.paint_start(lead + samples, 1, 2.0, window, None) == 0.0
-
-
 class TestFold5VerificationRound3:
     """S2 fold5 verification round 3: identity is resolved by probe id before an untagged row, a null owner or
     element id, an unreadable decoding state, an empty key, a null-scene row or an unparseable hash can move a
@@ -12221,18 +12546,20 @@ def test_gl_outer_settled_cadence_is_report_only_when_every_browser_frame_is_rea
         }
 
     monkeypatch.setattr(probe, "carry_paint", slow_settled)
+    carry = {
+        "glInterval": {"start": 150.0, "end": 250.0},
+        "glSegments": {1: [{"start": 0.0, "end": 100.0}, {"start": 300.0, "end": 300.0}]},
+    }
     scored = probe.carry_paint_outside_gl(
         rows, 1, ASSET, {"start": 0.0, "end": 300.0}, 8, SRC_RECT, DST_RECT,
-        transition_scene=7, rect_tolerance=2.0, floor=None, wrap_times=(),
-        gl_interval={"start": 150.0, "end": 250.0},
+        transition_scene=7, rect_tolerance=2.0, wrap_times=(), carry_window_data=carry,
     )
     assert scored["verdict"] is True
     assert all(row["settledCadenceReportOnly"] for row in scored["segments"])
     unreadable.append({"seq": 2})
     scored = probe.carry_paint_outside_gl(
         rows, 1, ASSET, {"start": 0.0, "end": 300.0}, 8, SRC_RECT, DST_RECT,
-        transition_scene=7, rect_tolerance=2.0, floor=None, wrap_times=(),
-        gl_interval={"start": 150.0, "end": 250.0},
+        transition_scene=7, rect_tolerance=2.0, wrap_times=(), carry_window_data=carry,
     )
     assert scored["verdict"] is None
 
@@ -12259,15 +12586,6 @@ def test_feed_off_expected_red_feed_live_does_not_red_the_under_artwork_aggregat
     assert scored["feedLive"]["verdict"] is False
     assert scored["verdict"] is True
     assert scored["reason"] is None
-
-
-def test_paint_start_begins_at_the_first_decoded_settled_source_frame() -> None:
-    samples = [
-        {"t": 1.0, "scene": 3, "busy": False, "videos": []},
-        {"t": 2.0, "scene": 4, "busy": False, "videos": [{"id": 7, "readyState": 1}]},
-        {"t": 3.0, "scene": 4, "busy": False, "videos": [{"id": 7, "readyState": 2}]},
-    ]
-    assert probe.paint_start(samples, 7, 5, {"start": 2.0, "end": 4.0}, None) == 3.0
 
 
 def _report_shaped_feed_fixture(mode: str = "continuous") -> tuple[dict[str, Any], dict[str, Any]]:
