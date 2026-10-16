@@ -69,9 +69,12 @@ What is pinned here:
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -300,11 +303,15 @@ if [ -n "$STUB_LOAD_AFTER_PREWARM" ] && grep -q '^prewarm' "$STUB_EVENTS" 2>/dev
 echo "{ $load 9.99 9.99 }"
 """
 
+SLEEP_STUB = """#!/bin/sh
+echo "$1" >> "$STUB_SLEEPS"
+exec /bin/sleep "$1"
+"""
 
-@pytest.fixture
-def gates(tmp_path: Path):
-    """A fake gate worktree plus a runner; every stub process is killed at teardown whatever happens."""
-    g = tmp_path / "gate"
+
+def _make_gates(root: Path) -> dict[str, object]:
+    root.mkdir(parents=True, exist_ok=True)
+    g = root / "gate"
     (g / "scripts").mkdir(parents=True)
     (g / "src").symlink_to(REPO / "src")
     (g / "scripts" / "continuity_core_variants.py").symlink_to(REPO / "scripts" / "continuity_core_variants.py")
@@ -312,14 +319,17 @@ def gates(tmp_path: Path):
     (g / "scripts" / "live_continuity_probe.py").write_text(PROBE_STUB)
     (g / "scripts" / "p2_recovery_html_adversarial.py").write_text(P2_STUB)
     (g / "scripts" / "p2_recovery_html_dissolve_live.py").write_text(PREWARM_STUB)
-    out = tmp_path / "out"
-    marker = tmp_path / "marker"
+    out = root / "out"
+    marker = root / "marker"
     marker.mkdir()
-    events = tmp_path / "events.txt"
-    stub_bin = tmp_path / "bin"
+    events = root / "events.txt"
+    stub_bin = root / "bin"
     stub_bin.mkdir()
     (stub_bin / "sysctl").write_text(SYSCTL_STUB)
     (stub_bin / "sysctl").chmod(0o755)
+    (stub_bin / "sleep").write_text(SLEEP_STUB)
+    (stub_bin / "sleep").chmod(0o755)
+    sleeps = root / "sleeps.txt"
 
     def env(**extra: str) -> dict[str, str]:
         drop = (
@@ -328,7 +338,9 @@ def gates(tmp_path: Path):
         )
         base = {k: v for k, v in os.environ.items() if k not in drop}
         base["PATH"] = f"{stub_bin}{os.pathsep}{base.get('PATH', '')}"
-        return {**base, "STUB_EVENTS": str(events), "STUB_MARKER": str(marker), **extra}
+        return {
+            **base, "STUB_EVENTS": str(events), "STUB_MARKER": str(marker), "STUB_SLEEPS": str(sleeps), **extra,
+        }
 
     def run(
         *args: str, timeout: float = 120, script: Path = SCRIPT, outdir: Path = out, **extra: str,
@@ -340,7 +352,7 @@ def gates(tmp_path: Path):
 
     def start(**extra: str) -> subprocess.Popen[str]:
         """Output goes to a file: a leaked run would hold a pipe open and hang the reader."""
-        with open(tmp_path / "gates.out", "w") as sink:
+        with open(root / "gates.out", "w") as sink:
             return subprocess.Popen(
                 ["/bin/zsh", str(SCRIPT), str(g), str(out)], env=env(**extra), stdout=sink, stderr=subprocess.STDOUT, text=True,
             )
@@ -348,23 +360,92 @@ def gates(tmp_path: Path):
     def events_list() -> list[str]:
         return events.read_text().splitlines() if events.exists() else []
 
+    def sleeps_list() -> list[float]:
+        return [float(line) for line in sleeps.read_text().splitlines()] if sleeps.exists() else []
+
     def survivors() -> list[str]:
-        found = subprocess.run(["pgrep", "-fl", str(tmp_path)], capture_output=True, text=True).stdout
+        found = subprocess.run(["pgrep", "-fl", str(root)], capture_output=True, text=True).stdout
         return [line for line in found.splitlines() if line.strip()]
 
     def patched(old: str, new: str) -> Path:
         """A copy of run_gates.sh with one exact line changed (the copy runs from the fake worktree)."""
         text = SCRIPT.read_text()
         assert text.count(old) == 1, old
-        copy = tmp_path / "run_gates_patched.sh"
+        copy = root / "run_gates_patched.sh"
         copy.write_text(text.replace(old, new))
         return copy
 
-    yield {
-        "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list, "survivors": survivors,
-        "patched": patched, "tmp": tmp_path,
+    return {
+        "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list,
+        "sleeps": sleeps_list, "survivors": survivors, "patched": patched, "tmp": root,
     }
-    subprocess.run(["pkill", "-KILL", "-f", str(tmp_path)], capture_output=True)
+
+
+def _cleanup_gates(root: Path) -> None:
+    subprocess.run(["pkill", "-KILL", "-f", str(root)], capture_output=True)
+
+
+@pytest.fixture(scope="session")
+def _gate_rounds(tmp_path_factory: pytest.TempPathFactory):
+    base = tmp_path_factory.getbasetemp()
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        base = base.parent
+
+    def get(args: tuple[str, ...], overrides: dict[str, str]) -> dict[str, object]:
+        identity = (str(SCRIPT.resolve()), args, tuple(sorted(overrides.items())))
+        key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+        lock_path = base / f"gates-{key}.lock"
+        record_path = base / f"gates-{key}.json"
+        round_dir = base / f"gates-{key}"
+        with open(lock_path, "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if record_path.exists():
+                record = json.loads(record_path.read_text())
+            else:
+                if round_dir.exists():
+                    shutil.rmtree(round_dir)
+                try:
+                    gates = _make_gates(round_dir)
+                    done = gates["run"](*args, **overrides)
+                    record = {
+                        "returncode": done.returncode,
+                        "stdout": done.stdout,
+                        "stderr": done.stderr,
+                        "events": gates["events"](),
+                        "paths": {name: str(gates[name]) for name in ("g", "out", "marker", "tmp")},
+                    }
+                except Exception as exc:
+                    record = {"error": f"{type(exc).__name__}: {exc}"}
+                finally:
+                    _cleanup_gates(round_dir)
+                temporary = record_path.with_name(f".{record_path.name}.{os.getpid()}.tmp")
+                temporary.write_text(json.dumps(record))
+                os.replace(temporary, record_path)
+        if "error" in record:
+            raise RuntimeError(record["error"])
+        return record
+
+    return get
+
+
+@pytest.fixture
+def gates(tmp_path: Path, _gate_rounds):
+    """A fake gate worktree plus a runner; every stub process is killed at teardown whatever happens."""
+    local = _make_gates(tmp_path)
+
+    def shared(*args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+        record = _gate_rounds(args, overrides)
+        paths = {name: Path(value) for name, value in record["paths"].items()}
+        local["out"] = paths["out"]
+        local["events"] = lambda: record["events"]
+        return subprocess.CompletedProcess(
+            ["/bin/zsh", str(SCRIPT), str(paths["g"]), str(paths["out"]), *args],
+            record["returncode"], record["stdout"], record["stderr"],
+        )
+
+    local["shared"] = shared
+    yield local
+    _cleanup_gates(tmp_path)
 
 
 def _nonce(stdout: str) -> str:
@@ -375,7 +456,7 @@ def _nonce(stdout: str) -> str:
 
 @pytest.mark.parametrize("jobs", ["1", "5"])
 def test_a_fresh_round_publishes_this_round_nonce_and_the_host_checks_read_it(gates, jobs: str) -> None:
-    done = gates["run"](GATE_JOBS=jobs)
+    done = gates["shared" if jobs == "1" else "run"](GATE_JOBS=jobs)
     nonce = _nonce(done.stdout)
     for v in VIEWPORTS:
         assert f"HOST {v}: pass" in done.stdout, done.stdout
@@ -412,7 +493,7 @@ def test_an_outdir_that_is_a_file_is_refused(gates) -> None:
 
 def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
     gates["out"].mkdir()
-    done = gates["run"]()
+    done = gates["run"]("--tier", "dev")
     assert "round nonce " in done.stdout and "HOST 1920x1080: pass" in done.stdout, done.stdout + done.stderr
 
 
@@ -434,24 +515,47 @@ def test_a_status_from_another_round_fails_closed(gates) -> None:
     assert "GATE FAILED: HOST red --strip bridge@8" in done.stdout
 
 
-@pytest.mark.parametrize(("sig", "code"), [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)])
-def test_killing_the_queue_owner_leaves_no_run_or_child_behind(gates, sig: signal.Signals, code: int) -> None:
-    proc = gates["start"](GATE_JOBS="3", STUB_DEFAULT="hang")
-    try:
-        deadline = time.monotonic() + 30
-        while len(list(gates["marker"].glob("child-*"))) < 3:
-            assert proc.poll() is None, "the round ended before its runs started"
-            assert time.monotonic() < deadline, f"runs never started: {gates['events']()}"
-            time.sleep(0.05)
-        time.sleep(0.3)
-        started = [e for e in gates["events"]() if e.endswith(" start")]
-        assert len(started) == 3, f"GATE_JOBS=3 caps the queue: {started}"
-        assert len(gates["survivors"]()) > 3, "the stubs and their children are running"
-        proc.send_signal(sig)
-        proc.wait(timeout=30)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
+@pytest.mark.parametrize(("sig", "code"), [
+    pytest.param(signal.SIGTERM, 143, id="15-143"),
+    pytest.param(signal.SIGINT, 130, id="2-130"),
+    pytest.param(signal.SIGHUP, 129, id="1-129"),
+    pytest.param(None, 143, id="refills-any-slot"),
+])
+def test_killing_the_queue_owner_leaves_no_run_or_child_behind(
+    gates, sig: signal.Signals | None, code: int,
+) -> None:
+    if sig is None:
+        modes = json.dumps({_p2_name(FULL_P2_ARMS[0]): "hang"})
+        proc = gates["start"](GATE_JOBS="2", STUB_MODES=modes)
+        try:
+            deadline = time.monotonic() + 30
+            while not any(e.startswith("probe passG-P2 ") for e in gates["events"]()):
+                assert proc.poll() is None, "the round ended before a later run started"
+                assert time.monotonic() < deadline, f"the queue did not refill around its oldest run: {gates['events']()}"
+                time.sleep(0.05)
+            assert list(gates["marker"].glob("child-*")), "the oldest run finished before the later run launched"
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+    else:
+        proc = gates["start"](GATE_JOBS="3", STUB_DEFAULT="hang")
+        try:
+            deadline = time.monotonic() + 30
+            while len(list(gates["marker"].glob("child-*"))) < 3:
+                assert proc.poll() is None, "the round ended before its runs started"
+                assert time.monotonic() < deadline, f"runs never started: {gates['events']()}"
+                time.sleep(0.05)
+            time.sleep(0.3)
+            started = [e for e in gates["events"]() if e.endswith(" start")]
+            assert len(started) == 3, f"GATE_JOBS=3 caps the queue: {started}"
+            assert len(gates["survivors"]()) > 3, "the stubs and their children are running"
+            proc.send_signal(sig)
+            proc.wait(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
     deadline = time.monotonic() + 10
     while gates["survivors"]() and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -476,7 +580,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
-    assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
+    assert "cache hit" in gates["run"]("--tier", "dev", outdir=gates["tmp"] / "out2").stdout
 
 
 @pytest.mark.parametrize("mode", ["fail", "empty"])
@@ -537,7 +641,7 @@ def test_known_bad_a_loaded_host_is_refused_before_anything_runs(gates, load: st
 @pytest.mark.parametrize(("load", "limit"), [("4.00", None), ("3.99", None), ("0.00", None), ("7.5", "8")])
 def test_positive_control_a_host_at_or_under_the_limit_starts(gates, load: str, limit: str | None) -> None:
     extra = {"STUB_LOAD": load} | ({"GATE_MAX_START_LOAD": limit} if limit else {})
-    done = gates["run"](**extra)
+    done = gates["run"]("--tier", "dev", **extra)
     assert f"load average (1 min) at start {load} (GATE_MAX_START_LOAD {limit or 4})" in done.stdout, done.stderr
     assert gates["events"]()[0] == "prewarm html-unmodified"
     assert re.search(rf"^load average \(1 min\) at start {re.escape(load)}, at launch {re.escape(load)}, at end {re.escape(load)}; wall \d+s$",
@@ -554,17 +658,21 @@ def test_known_bad_load_that_does_not_settle_after_the_prewarm_launches_no_timed
 
 
 def test_the_settle_wait_never_sleeps_past_its_deadline(gates) -> None:
-    """Codex r4: a fixed 5 s sleep overshot a GATE_SETTLE_S that is not a multiple of 5."""
-    start = time.monotonic()
-    done = gates["run"](timeout=30, STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="9.50", GATE_SETTLE_S="2")
-    elapsed = time.monotonic() - start
+    """Codex r4: a fixed 5 s sleep overshot a GATE_SETTLE_S that is not a multiple of 5.
+    The sleeps are checked rather than the round timed: the pre-launch staging shares the settle budget and xdist load
+    stretches it past any wall-clock bound. The patched copy restarts the deadline at the loop, so the loop always
+    sleeps and every sleep must stay strictly inside the remaining budget."""
+    loop = "while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do"
+    script = gates["patched"](loop, f"typeset -F SECONDS; settle_deadline=$((SECONDS + GATE_SETTLE_S)); {loop}")
+    done = gates["run"](script=script, timeout=30, STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="9.50", GATE_SETTLE_S="4")
+    sleeps = gates["sleeps"]()
     assert done.returncode == 2
-    assert "still exceeds GATE_MAX_START_LOAD=4 2s after the prewarm" in done.stderr, done.stderr
-    assert elapsed < 4.5, f"settle wait overshot its 2 s deadline: round took {elapsed:.1f} s"
+    assert "still exceeds GATE_MAX_START_LOAD=4 4s after the prewarm" in done.stderr, done.stderr
+    assert sleeps and all(0 < t < 4 for t in sleeps) and sum(sleeps) < 4, f"settle wait overshot its 4 s deadline: slept {sleeps}"
 
 
 def test_positive_control_load_that_stays_low_after_the_prewarm_launches(gates) -> None:
-    done = gates["run"](STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="2.00", GATE_SETTLE_S="0")
+    done = gates["run"]("--tier", "dev", STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="2.00", GATE_SETTLE_S="0")
     assert "load average (1 min) at launch 2.00" in done.stdout, done.stderr
     assert any(not e.startswith("prewarm") for e in gates["events"]())
 
@@ -592,7 +700,8 @@ GATE_JOBS_WARNING = (
 
 @pytest.mark.parametrize(("jobs", "warned"), [("4", True), ("5", True), ("3", False), ("1", False), (None, False)])
 def test_gate_jobs_above_three_warns_loudly_but_still_runs(gates, jobs: str | None, warned: bool) -> None:
-    done = gates["run"](**({"GATE_JOBS": jobs} if jobs else {}))
+    tier = ("--tier", "dev") if jobs in ("3", "4", "5") else ("--tier", "full") if jobs is None else ()
+    done = gates["shared" if jobs in ("1", None) else "run"](*tier, **({"GATE_JOBS": jobs} if jobs else {}))
     assert (GATE_JOBS_WARNING in done.stdout) is warned
     if warned:
         assert f"## WARNING: GATE_JOBS={jobs}. {GATE_JOBS_WARNING}" in done.stdout
@@ -608,6 +717,10 @@ HOST_RED_STEMS = {
     "host-red--core-variantstash-any", "host-red--stripbridge@8", "host-red--stripretire@2", "host-red--striprestart@6",
     "host-red--stripglReplay@2--gl-replayauto",
 }
+HOST_RED_STEMS_ORDERED = [
+    "host-red--core-variantstash-any", "host-red--stripbridge@8", "host-red--stripretire@2", "host-red--striprestart@6",
+    "host-red--stripglReplay@2--gl-replayauto",
+]
 FULL_P2_ARMS = [
     ["--wait-profile", "fast"],
     ["--wait-profile", "fast", "--disable-bridge34", "--skip-freeze-bracket"],
@@ -619,6 +732,8 @@ FULL_P2_ARMS = [
     ["--wait-profile", "fast", "--gl-replay", "auto", "--strip", "glReplay@2", "--skip-freeze-bracket"],
 ]
 DEV_P2_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[1], FULL_P2_ARMS[6]]
+FULL_P2_LAUNCH_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[6], *FULL_P2_ARMS[1:6], FULL_P2_ARMS[7]]
+DEV_P2_LAUNCH_ARMS = [FULL_P2_ARMS[0], FULL_P2_ARMS[6], FULL_P2_ARMS[1]]
 DECK_ARMS = [
     ("D1", "--strip bridge@2"), ("D1", "--strip bridge@4"), ("D1", "--strip pin@6"),
     ("D2", "--strip bridge@2"), ("D2", "--strip restart@4"), ("D2", "--strip pin@6"), ("D2", "--strip bridge@8"),
@@ -664,7 +779,7 @@ def _p2_name(argv: list[str]) -> str:
 
 
 def test_the_full_round_host_arm_matrix(gates) -> None:
-    done = gates["run"](GATE_JOBS="1")
+    done = gates["shared"](GATE_JOBS="1")
     runs = _probe_runs(gates["events"]())
     assert {k: v for k, v in runs.items() if k.startswith("host-") and not k.startswith("host-red")} == {
         f"host-{v}": (v, skip) for v, skip in FULL_HOST_SKIPS.items()
@@ -737,16 +852,12 @@ def _probe_args(events: list[str]) -> dict[str, tuple[str, str, list[str]]]:
 
 def test_the_deck_red_arms_run_on_their_own_export_through_the_queue_in_order(gates) -> None:
     """S2 (plan §3.4 Q3): the 22 S0 deck red arms are host red runs on the deck's `html-unmodified`
-    export (both fixture and original index), launched after the P2 host red arms and before the P2
-    arms, and checked after the wait in the same order."""
-    done = gates["run"](GATE_JOBS="1")
+    export (both fixture and original index), launched in the fixed group order and checked after the wait in today's
+    order."""
+    done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    p2_host_red = [s for s in starts if s.startswith("host-red--")]
-    assert [s for s in starts if s.startswith("host-redD")] == DECK_RED_STEMS
-    assert starts.index(DECK_RED_STEMS[0]) == starts.index(p2_host_red[-1]) + 1
-    assert starts.index(DECK_RED_STEMS[-1]) + 1 == starts.index(PASSG_STEMS[0]), "Pass G runs between them"
-    assert starts.index(DECK_RED_STEMS[-1]) < next(i for i, s in enumerate(starts) if s.startswith("p2"))
+    assert starts == _full_launch_stems()
     args = _probe_args(events)
     for (deck, arm), stem in zip(DECK_ARMS, DECK_RED_STEMS, strict=True):
         fixture, index, argv = args[stem]
@@ -771,14 +882,13 @@ def test_known_bad_a_deck_red_run_that_writes_no_status_fails_closed(gates) -> N
 def test_pass_g_runs_on_p2_and_every_deck_through_the_queue_in_order(gates) -> None:
     """Owner decision 2026-10-10 (plan §3.4 Q3): Pass G moved into the round. One `--pass G` probe run per
     fixture -- P2 on its player export with the unmodified index, each S0 deck on its own `html-unmodified`
-    export as both fixture and original index -- queued after the deck red arms and before the carry-cover and P2 arms, and
-    checked after the wait in the same order. Each run has its own artifact under <outdir> (the probe's
+    export as both fixture and original index -- launched in the fixed group order and checked after the wait in today's
+    order. Each run has its own artifact under <outdir> (the probe's
     `run_scope` keys its private run folder by the artifact path), so no two runs share a folder."""
-    done = gates["run"](GATE_JOBS="1")
+    done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    assert [s for s in starts if s.startswith("passG-") and not s.startswith("passG-red")] == PASSG_STEMS
-    assert starts.index(PASSG_STEMS[-1]) + 1 == starts.index(PASSG_RED_STEM)
+    assert starts == _full_launch_stems()
     args = _probe_args(events)
     artifacts = []
     for name, stem in zip(PASSG_FIXTURES, PASSG_STEMS, strict=True):
@@ -833,7 +943,7 @@ def test_known_bad_one_errored_pass_g_adds_exactly_one_failure_to_the_summary(ga
         assert summary, stdout
         return int(summary.group(1))
 
-    good = gates["run"](outdir=gates["tmp"] / "good")
+    good = gates["shared"]("--tier", "full")
     bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({"passG-D3": "g-error"}))
     assert "GATE FAILED: PASSG" not in good.stdout
     assert "[PASSG D3] status=error exit=0" in bad.stdout and "    stub g-error" in bad.stdout
@@ -842,9 +952,9 @@ def test_known_bad_one_errored_pass_g_adds_exactly_one_failure_to_the_summary(ga
 
 
 def test_the_full_round_p2_arm_list(gates) -> None:
-    gates["run"](GATE_JOBS="1")
+    gates["shared"](GATE_JOBS="1")
     argvs = _p2_argvs(gates["events"]())
-    assert argvs == FULL_P2_ARMS
+    assert argvs == FULL_P2_LAUNCH_ARMS
     assert not any("bridge@8" in a for argv in argvs for a in argv), "P2 --strip bridge@8 == --disable-bridge34, dropped"
     bracket = [argv for argv in argvs if "--skip-freeze-bracket" not in argv]
     assert bracket == [["--wait-profile", "fast"], ["--wait-profile", "fast", "--gl-replay", "auto"]]
@@ -916,7 +1026,7 @@ def test_the_dev_tier_runs_its_subset_and_a_pass_exits_10(gates) -> None:
                         STUB_P2_RED=_dev_red())
     events = gates["events"]()
     assert _probe_runs(events) == {"host-1920x1080": ("1920x1080", "C"), "host-1600x1000": ("1600x1000", "attach,B,Voff")}
-    assert _p2_argvs(events) == DEV_P2_ARMS
+    assert _p2_argvs(events) == DEV_P2_LAUNCH_ARMS
     assert not [e for e in events if e.startswith("probe passG-")] and "[PASSG" not in done.stdout, "Pass G is full tier only"
     assert done.stdout.count("DEV TIER -- NOT A QUALIFICATION PASS") == 2, done.stdout
     assert done.stdout.rstrip().splitlines()[-1] == "## DEV TIER -- NOT A QUALIFICATION PASS (exit 10) ##"
@@ -943,7 +1053,7 @@ def test_known_bad_a_freeze_bracket_header_that_disagrees_with_the_flags_fails(g
 
 
 def test_a_full_round_never_says_dev_and_never_exits_10(gates) -> None:
-    done = gates["run"]("--tier", "full")
+    done = gates["shared"]("--tier", "full")
     assert "DEV TIER" not in done.stdout and "DONE tier=full " in done.stdout
     assert done.returncode == 1, "the stub red arms cannot match"
 
@@ -971,6 +1081,20 @@ CC_EXTRA = [[], ["--core-variant", "linear-bridge"], ["--carry-cover-null"],
             [], ["--core-variant", "no-gl-clock"], ["--carry-cover-null"]]
 
 
+def _full_launch_stems() -> list[str]:
+    return [
+        *(_p2_name(argv) for argv in FULL_P2_LAUNCH_ARMS[:2]),
+        *PASSG_STEMS,
+        *(f"host-{viewport}" for viewport in FULL_HOST_SKIPS),
+        PASSG_RED_STEM,
+        *(_p2_name(argv) for argv in FULL_P2_LAUNCH_ARMS[2:]),
+        *HOST_RED_STEMS_ORDERED,
+        *DECK_RED_STEMS,
+        *CC_STEMS,
+        *PC_STEMS,
+    ]
+
+
 def _cc_argvs(events: list[str]) -> list[list[str]]:
     return [json.loads(e[len("ccargv "):]) for e in events if e.startswith("ccargv ")]
 
@@ -978,12 +1102,10 @@ def _cc_argvs(events: list[str]) -> list[list[str]]:
 def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_order(gates) -> None:
     """Each deck's arms run on that deck's Pass G fixture and original index; every check line names the deck (but
     P2's, whose stems and labels are unchanged) and prints one line per bridge with its clock."""
-    done = gates["run"](GATE_JOBS="1")
+    done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    assert [s for s in starts if s.startswith("carry-cover")] == CC_STEMS
-    first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
-    assert starts.index(CC_STEMS[0]) == starts.index(PC_STEMS[-1]) + 1 and starts.index(CC_STEMS[-1]) + 1 == first_p2
+    assert starts == _full_launch_stems()
     out = str(gates["out"].resolve())
     args = _probe_args(events)
     assert _cc_argvs(events) == [
@@ -1035,7 +1157,7 @@ def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, s
     inconclusive, a foreign core sha, fixture or control, a bridge on the wrong clock (a green on the fallback, the D1
     red on the GL clock), no artifact, and a missing or stale status each count as exactly one GATE FAILED -- never
     pending."""
-    good = gates["run"](outdir=gates["tmp"] / "good")
+    good = gates["shared"]("--tier", "full")
     bad = gates["run"](outdir=gates["tmp"] / "bad", STUB_MODES=json.dumps({stem: mode}))
     label = CC_LABELS[CC_STEMS.index(stem)]
     failed = [line for line in bad.stdout.splitlines() if "GATE FAILED: CARRY-COVER" in line]
@@ -1063,10 +1185,10 @@ def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, s
 def test_pass_g_red_and_the_paint_controls_run_in_order_and_match_a_well_formed_artifact(gates) -> None:
     """The stub writes a matching artifact for both new kinds by default: this is the positive control for every
     known-bad case below, and it pins the queue order, the argv and the check order."""
-    done = gates["run"](GATE_JOBS="1")
+    done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
-    assert starts[starts.index(PASSG_STEMS[-1]) + 1:starts.index(CC_STEMS[0])] == [PASSG_RED_STEM, *PC_STEMS]
+    assert starts == _full_launch_stems()
     args = _probe_args(events)
     out = str(gates["out"].resolve())
     fixture, index, argv = args[PASSG_RED_STEM]
@@ -1126,6 +1248,8 @@ def test_known_bad_every_broken_instrument_artifact_fails_exactly_its_own_check(
     lines = [line for line in done.stdout.splitlines() if line.startswith(prefixes)]
     if failed.startswith("HOST"):
         assert lines == [] and f"    GATE FAILED: {failed}" in done.stdout, done.stdout
+        if mode in ("red-noself", "red-nofloor"):
+            assert "    observed red: ['b0to1:A:carry'] -> MISMATCH" in done.stdout, done.stdout
     else:
         assert lines == [f"    GATE FAILED: {failed}"], done.stdout
     if why is not None:
