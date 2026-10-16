@@ -17,7 +17,13 @@ Review records: `c6-review-r1.md` through `c6-review-r4.md`.
 
 ## Tests
 Coordinator rerun on the committed tree, `test_live_continuity_probe.py` + `test_detach_experiment.py` + `test_managed_obs_qualify.py`:
-**2203 passed, 1 skipped** (the optional real-recording fixture). After the r3 fold (`-n 2`): **2204 passed, 1 skipped**. The full suites (3.12, 3.10 floor) are not yet run; plan gate 6a.
+**2203 passed, 1 skipped** (the optional real-recording fixture). After the r3 fold (`-n 2`): **2204 passed, 1 skipped**.
+
+Full suites, 2026-10-16, on `f9b5caf0` (the r3 fold plus the merged Alpha placement fix), `-n auto`:
+- worktree `.venv` (Python 3.13): 1 failed, 11244 passed, 38 skipped, 1 xfailed;
+- 3.10 floor: 1 failed, 11244 passed, 38 skipped, 1 xfailed.
+
+The one failure, on both interpreters, is `test_run_gates.py::test_the_settle_wait_never_sleeps_past_its_deadline`. Under the suite's own xdist load, the round took 5.1–6.7 s against its 4.5 s bound. Run alone, the test takes 2.33–2.45 s on both this branch and `origin/main`, and the whole file passes alone on 3.10. Before the merge, the 3.13 suite passed fully and the 3.10 suite failed only this test. The bound is wall-clock for the whole round, so load-sensitive work before the settle loop counts against it (follow-up: assert on the sleep durations instead). Plan gate 6a still re-runs the suites on the final tree.
 
 ## Offline replay (plan gate 1)
 This replays the 10 stored attempt-3 sessions through `score_arm`: Alpha ×2, D7 ×6, D7s ×2 (`q7-attempt3/*/runs/feed-*.json`).
