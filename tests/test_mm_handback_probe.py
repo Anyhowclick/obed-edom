@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import io
 import json
 import math
 import sys
@@ -640,13 +641,18 @@ def test_swap_read_judges_node_visibility_in_python() -> None:
 
 
 def write_runs(root: Path, runs: dict[str, tuple[dict[str, Any], dict[str, np.ndarray]]]) -> None:
+    encoded: dict[int, tuple[np.ndarray, bytes]] = {}
     for (record, images) in runs.values():
         run_dir = root / "runs" / probe.tag_of(record["gl"], tuple(record["viewport"]), record["arm"])
         run_dir.mkdir(parents=True)
         record = copy.deepcopy(record)
         record["shots"] = {}
         for name, img in images.items():
-            Image.fromarray(img).save(run_dir / f"{name}.png")
+            if id(img) not in encoded:
+                png = io.BytesIO()
+                Image.fromarray(img).save(png, format="PNG")
+                encoded[id(img)] = (img, png.getvalue())
+            (run_dir / f"{name}.png").write_bytes(encoded[id(img)][1])
             record["shots"][name] = {"file": f"{name}.png"}
         (run_dir / "record.json").write_text(json.dumps(record))
 
