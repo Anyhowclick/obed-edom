@@ -43,6 +43,7 @@ class FakeCdp:
         self.auto_play_run_kinds: list | None = None
         self.runtime_version = 2
         self.mm_feed_entries: Any = None
+        self.movie_warmup: Any = None
         self.space_rejects: bool = False
         self.slide_number_showing = False
         self.product: str | None = self.product_default
@@ -146,6 +147,8 @@ class FakeCdp:
             }
             if self.mm_feed_entries is not None:
                 snapshot["__obedMmFeedEntries"] = self.mm_feed_entries
+            if self.movie_warmup is not None:
+                snapshot["__obedMovieWarmup"] = self.movie_warmup
             return snapshot
         if ".hide()" in expression: self.visible = False; return None
         if ".show()" in expression: self.visible = True; return None
@@ -153,8 +156,8 @@ class FakeCdp:
 
 
 class FakeServer:
-    def __init__(self, _root=None, patched_player=b"", *_, alpha=False, continuity_script=""):
-        self.stopped = False; self.alpha = alpha; self.continuity_script = continuity_script; self.patched_player = patched_player
+    def __init__(self, _root=None, patched_player=b"", *_, alpha=False, continuity_script="", movie_warmup_script=""):
+        self.stopped = False; self.alpha = alpha; self.continuity_script = continuity_script; self.movie_warmup_script = movie_warmup_script; self.patched_player = patched_player
     def start(self): return "http://program.test/program.html"
     def stop(self): self.stopped = True
 
@@ -177,6 +180,7 @@ def host(tmp_path, monkeypatch, **kwargs: Any) -> live_host.LiveOutputHost:
     monkeypatch.setattr(live_host, "choose_display", lambda *_args, **_kwargs: live_host.OutputDisplay(9, 10, 20, 2560, 1440))
     monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
     monkeypatch.delenv(live_host.MM_FEED_ENV, raising=False)
+    monkeypatch.delenv(live_host.MOVIE_WARMUP_ENV, raising=False)
     FakeCdp.instances.clear()
     return live_host.LiveOutputHost(tmp_path, [{"originalOrdinal": 1, "playerIndex": 0, "skipped": False}, {"originalOrdinal": 2, "playerIndex": 1, "skipped": False}, {"originalOrdinal": 3, "skipped": True}], headless=True, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, **kwargs)
 
@@ -1434,6 +1438,7 @@ def host_with_continuity(
     monkeypatch.delenv("OBED_LIVE_GL_REPLAY", raising=False)
     monkeypatch.delenv(live_host.MM_OPACITY_ENV, raising=False)
     monkeypatch.delenv(live_host.MM_FEED_ENV, raising=False)
+    monkeypatch.delenv(live_host.MOVIE_WARMUP_ENV, raising=False)
     FakeCdp.instances.clear()
     kwargs: dict[str, Any] = {"attach_endpoint": "http://127.0.0.1:9222"} if attach else {}
     if gl_replay is not None:
@@ -1451,6 +1456,7 @@ def test_continuity_off_env_installs_nothing(tmp_path, monkeypatch):
     assert output._continuity_mode == "off"
     assert output.output["continuity"]["mode"] == "off"
     assert output._server.continuity_script == ""
+    assert "assets/s1/assets/movie.mov" in output._server.movie_warmup_script
     assert not FakeCdp.instances[0].keys
 
 
@@ -1743,24 +1749,71 @@ def test_continuity_transparent_background_only_in_attach_mode(tmp_path, monkeyp
 
 
 def test_continuity_scripts_injection_order_and_safe_json_embedding(tmp_path):
-    (tmp_path / "index.html").write_text('<html><head></head><body><div id="stage"></div></body></html>')
+    (tmp_path / "index.html").write_text('<html><head></head><body><div id="stage"></div><script src="assets/player/main.js"></script></body></html>')
     plan = {"movies": {"movie1": {"assetKeys": ["</script><script>alert(1)</script>"], "footprint": {"x": 0, "y": 0, "w": 1, "h": 1}}}, "boundaries": []}
     script = live_host._continuity_scripts(plan, {"width": 1920, "height": 1080})
+    movie_url = live_host.quote("assets/movie name %.mov", safe="/")
+    warmup = live_host._movie_warmup_script(movie_url)
     assert "</script><script>alert(1)" not in script
-    server = live_host._AssetServer(tmp_path, b"", resolver=resolver_for(tmp_path), continuity_script=script)
+    server = live_host._AssetServer(
+        tmp_path, b"", resolver=resolver_for(tmp_path), continuity_script=script, movie_warmup_script=warmup,
+    )
     document = server._program_html().decode()
     body = document[document.index("<body"):]
     assert (
         body.index('id="obed-output-black"')
+        < body.index('id="obed-movie-warmup"')
         < body.index('id="obed-continuity-plan"')
         < body.index('id="obed-continuity-core"')
         < body.index('id="obed-output-fit"')
         < body.index('id="stage"')
+        < body.index('src="assets/player/main.js"')
     )
+    assert 'video.src="assets/movie%20name%20%25.mov"' in warmup
     # A naive close of the script tag inside the embedded plan would truncate the
     # document before the core/fit scripts; both must still be present intact.
     assert document.count('id="obed-continuity-core"') == 1
     assert document.count('id="obed-output-fit"') == 1
+
+
+def test_movie_warmup_is_detached_silent_and_releases_with_captured_primitives():
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to exercise movie warm-up cleanup")
+    source = live_host._movie_warmup_script("assets/movie%20name%20%25.mov")
+    source = source[source.index(">") + 1:source.rindex("</script>")]
+    harness = (
+        "const vm=require('vm'),SOURCE=" + json.dumps(source) + ";"
+        "function run(trigger){let order=[],listeners={},timer=null,appended=0,played=0,times=[10,40];"
+        "function Element(){}Element.prototype.removeAttribute=function(name){order.push('remove:'+name);delete this._src};"
+        "function HTMLMediaElement(){}HTMLMediaElement.prototype=Object.create(Element.prototype);"
+        "HTMLMediaElement.prototype.load=function(){order.push('load')};"
+        "const video=Object.create(HTMLMediaElement.prototype);"
+        "for(const name of ['muted','defaultMuted','preload'])Object.defineProperty(video,name,{set(v){order.push(name+':'+v)}});"
+        "Object.defineProperty(video,'src',{set(v){order.push('src:'+v);this._src=v},get(){return this._src}});"
+        "video.addEventListener=(name,fn)=>{listeners[name]=fn};video.removeEventListener=name=>{delete listeners[name]};"
+        "video.play=()=>{played++};"
+        "const c={Element,HTMLMediaElement,performance:{now:()=>times.shift()},"
+        "document:{createElement:tag=>{order.push('create:'+tag);return video},body:{appendChild:()=>{appended++}}},"
+        "setTimeout:fn=>{timer=fn;return 1},clearTimeout:()=>{timer=null}};c.window=c;vm.createContext(c);vm.runInContext(SOURCE,c);"
+        "Element.prototype.removeAttribute=function(){throw Error('tampered')};"
+        "if(trigger==='ready')listeners.loadeddata();else timer();"
+        "return {order,appended,played,state:c.__obedMovieWarmup,srcRemoved:video.src===undefined,listeners:Object.keys(listeners)}}"
+        "console.log(JSON.stringify({ready:run('ready'),timeout:run('timeout')}));"
+    )
+    result = json.loads(subprocess.run([node, "-e", harness], check=True, text=True, capture_output=True).stdout)
+    for row in result.values():
+        assert row["order"].index("muted:true") < next(i for i, value in enumerate(row["order"]) if value.startswith("src:"))
+        assert row["appended"] == 0
+        assert row["played"] == 0
+        assert row["srcRemoved"] is True
+        assert row["order"][-2:] == ["remove:src", "load"]
+        assert row["listeners"] == []
+    assert result["ready"]["state"] == {"state": "ready", "readyMs": 30}
+    assert result["timeout"]["state"] == {"state": "timeout", "readyMs": None}
 
 
 def test_nothing_continuity_related_injected_when_off(tmp_path, monkeypatch):
@@ -1791,6 +1844,12 @@ def test_observe_logs_only_on_change(tmp_path, monkeypatch):
     output.observe()
     observation_logs = [entry for entry in seen if entry[0] == "observation"]
     assert observation_logs == []
+    FakeCdp.instances[0].movie_warmup = {"state": "ready", "readyMs": 30}
+    output.observe()
+    output.observe()
+    assert [entry for entry in seen if entry[0] == "movieWarmup"] == [
+        ("movieWarmup", {"state": "ready", "readyMs": 30}),
+    ]
     output.execute("goTo", 2)
     observation_logs = [entry for entry in seen if entry[0] == "observation"]
     assert len(observation_logs) == 1
@@ -1931,9 +1990,14 @@ def test_continuity_inactive_html_is_byte_identical_to_pre_i2(tmp_path, monkeypa
     else:
         monkeypatch.setattr(live_host, "derive_plan", lambda *_a, **_k: live_host.Unsupported("unsupported fixture"))
     output = host_with_continuity(tmp_path, monkeypatch, attach=alpha)
+    monkeypatch.setenv(live_host.MOVIE_WARMUP_ENV, "off")
     output.start()
     assert output._continuity_mode == mode
-    server = live_host._AssetServer(output.export_root, b"", resolver=output.resolver, alpha=alpha, continuity_script=output._server.continuity_script)
+    server = live_host._AssetServer(
+        output.export_root, b"", resolver=output.resolver, alpha=alpha,
+        continuity_script=output._server.continuity_script,
+        movie_warmup_script=output._server.movie_warmup_script,
+    )
     assert hashlib.sha256(server._program_html()).hexdigest() == expected_sha
 
 
@@ -2638,7 +2702,10 @@ def served_html(output: live_host.LiveOutputHost, tmp_path: Path) -> str:
     (page / "index.html").write_text(
         '<html><head></head><body><div id="stage"></div><script src="assets/player/main.js"></script></body></html>'
     )
-    server = live_host._AssetServer(page, b"", resolver=resolver_for(page), continuity_script=output._server.continuity_script)
+    server = live_host._AssetServer(
+        page, b"", resolver=resolver_for(page), continuity_script=output._server.continuity_script,
+        movie_warmup_script=output._server.movie_warmup_script,
+    )
     return server._program_html().decode()
 
 
@@ -3132,13 +3199,20 @@ def test_gl_replay_constructor_rejects_anything_but_auto_or_off(tmp_path, monkey
         live_host.LiveOutputHost(tmp_path, [], headless=True, transport_factory=FakeCdp, server_factory=FakeServer, resolver=resolver, gl_replay=value)
 
 
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        (live_host.GL_REPLAY_ENV, "OBED_LIVE_GL_REPLAY must be off or auto."),
+        (live_host.MOVIE_WARMUP_ENV, "OBED_LIVE_MOVIE_WARMUP must be off or auto."),
+    ],
+)
 @pytest.mark.parametrize("managed", [False, True])
 @pytest.mark.parametrize("value", ["on", "1", "true", "auto-ish"])
-def test_invalid_gl_replay_env_refuses_before_starting_resources(tmp_path, monkeypatch, value, managed):
+def test_invalid_gl_replay_env_refuses_before_starting_resources(tmp_path, monkeypatch, value, managed, env, message):
     """A mistyped Keyer opt-out (`false`, `0`) refuses loudly rather than silently defaulting to auto."""
     output = managed_host(tmp_path, monkeypatch) if managed else host_with_continuity(tmp_path, monkeypatch)
-    monkeypatch.setenv(live_host.GL_REPLAY_ENV, value)
-    with pytest.raises(live_host.LiveHostError, match="OBED_LIVE_GL_REPLAY must be off or auto."):
+    monkeypatch.setenv(env, value)
+    with pytest.raises(live_host.LiveHostError, match=re.escape(message)):
         output.start()
     assert not FakeCdp.instances
     assert output._server is None

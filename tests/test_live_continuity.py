@@ -20,6 +20,7 @@ from obed_edom.live_continuity import (
     codec_report,
     derive_plan,
     effect_opacity_overrides,
+    first_h264_movie,
 )
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
@@ -1996,6 +1997,45 @@ def _probe_by_slide(codecs: dict[str, str | None]):
 
 def _entry(report: list[dict], asset: str) -> dict:
     return next(entry for entry in report if entry["asset"] == asset)
+
+
+@pytest.mark.parametrize(
+    ("slides_spec", "codecs", "expected"),
+    [
+        ([("s1", False, [("z-first.mov", True)]), ("s2", False, [("a-second.mov", True)])],
+         {"z-first.mov": "avc1", "a-second.mov": "avc1"}, ("z-first.mov", "s1")),
+        ([("s1", True, [("skipped.mov", True)]), ("s2", False, [("active.mov", True)])],
+         {"skipped.mov": "avc1", "active.mov": "avc1"}, ("active.mov", "s2")),
+        ([("s1", False, [("shared.mov", False)]), ("s2", False, [("shared.mov", True)])],
+         {"shared.mov": "avc1"}, ("shared.mov", "s2")),
+        ([("s1", False, [("first.mov", True)]), ("s2", False, [("later.mov", True)])],
+         {"first.mov": "hvc1", "later.mov": "avc1"}, ("later.mov", "s2")),
+        ([("s1", False, [("first.mov", True)]), ("s2", False, [("later.mov", True)])],
+         {"first.mov": "hvc1", "later.mov": "vp09"}, None),
+    ],
+    ids=["slide-order-not-alphabetical", "skipped-slide", "none-then-valid-copy", "later-h264", "no-h264"],
+)
+def test_first_h264_movie_follows_the_referenced_movie_census(tmp_path, slides_spec, codecs, expected):
+    slides = []
+    for uuid, skipped, movies in slides_spec:
+        folder = tmp_path / 'assets' / uuid
+        folder.mkdir(parents=True)
+        assets, effects = {}, []
+        for index, (asset, resolvable) in enumerate(movies):
+            asset_id = f"asset-{index}" if resolvable else asset
+            assets[asset_id] = {"url": {"web": f"assets/{asset}"}} if resolvable else {}
+            effects.append({"movie": {"asset": asset_id}, "baseLayer": {}})
+        (folder / f"{uuid}.json").write_text(json.dumps({"events": [{"effects": effects}], "assets": assets}))
+        slides.append({"playerIndex": len(slides), "originalOrdinal": len(slides) + 1,
+                       "exportedUuid": uuid, "skipped": skipped})
+    selected = first_h264_movie(
+        tmp_path, slides, resolver=_unchecked_resolver, probe=lambda path: codecs[path.name],
+    )
+    if expected is None:
+        assert selected is None
+    else:
+        asset, uuid = expected
+        assert selected == (asset, tmp_path / "assets" / uuid / "assets" / asset)
 
 
 @pytest.mark.parametrize(
