@@ -9368,9 +9368,10 @@ class TestChainCarryWindow:
     "gl-excused-missing", "differing-clocks", "schema2-visible-undecoded", "union-start",
     "prior-zero-rect-first-destination-decode", "pin-busy-first-decode",
     "alpha-zero-rect-cold-start", "hidden-prior-decode-loss", "gl-absent-decoder",
+    "multi-scene-build", "source-zero-rect-decode-loss", "cut-short-cold-start",
 ])
 def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
-    boundary = 9 if case == "differing-clocks" else 3 if case == "multi-scene-source" else 2
+    boundary = 9 if case == "differing-clocks" else 4 if case == "multi-scene-build" else 3 if case == "multi-scene-source" else 2
     rows = rows_around_boundary(boundary_scene=boundary, n_before=40, n_after=40, dt_ms=20.0, start_time=0.0)
     for row in rows:
         row["scene"] = int(row["scene"])
@@ -9451,6 +9452,51 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
             row.update(playerState="IdleAtFinalState", busy=False, hash=f"#{scene}", nextSceneId=None)
             rows.append(row)
         spec["sourceScene"] = 1
+    elif case == "multi-scene-build":
+        rows = []
+        scenes = [0] * 20 + [1] * 100 + [2] * 200 + [3] * 40 + [4] * 80
+        for index, scene in enumerate(scenes):
+            t = 1000.0 + index * 16.0
+            if scene <= 2:
+                rect = dict(SRC_RECT)
+            elif scene == 3:
+                progress = (index - 319) / 41.0
+                rect = {key: SRC_RECT[key] + (DST_RECT[key] - SRC_RECT[key]) * progress for key in SRC_RECT}
+            else:
+                rect = dict(DST_RECT)
+            row = sample(
+                t, scene, video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=5 + index * 0.016, rect=rect,
+                ),
+            )
+            row["busy"] = scene in (2, 3)
+            row["playerState"] = "Playing" if row["busy"] else "IdleAtFinalState"
+            rows.append(row)
+        spec.update(transitionScene=3, sourceScene=1)
+    elif case == "source-zero-rect-decode-loss":
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for index, row in enumerate(rows[:40]):
+            if index < 20:
+                row["videos"][0].update(rect=dict(zero), readyState=4)
+            else:
+                row["videos"][0]["readyState"] = 1
+    elif case == "cut-short-cold-start":
+        rows = []
+        for index, scene in enumerate([0] * 20 + [1] * 75 + [2] * 150):
+            t = 1000.0 + index * 16.0
+            videos = []
+            if scene >= 1:
+                source_index = index - 20
+                ready = 1 if source_index < 12 else 4
+                current = 0.0 if source_index < 12 else (source_index - 12) * 0.016
+                videos.append(video(
+                    id=1, el_id=1, t=t, scene=scene, current_time=current, ready_state=ready,
+                    rect=dict(SRC_RECT if scene < 2 else DST_RECT),
+                ))
+            row = sample(t, scene, *videos)
+            row["busy"] = scene == 1 and index - 20 < 19
+            row["playerState"] = "Playing" if row["busy"] else "IdleAtFinalState"
+            rows.append(row)
     elif case == "hidden-premounted-successor":
         rows = []
         zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
@@ -9580,6 +9626,14 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
     elif case == "multi-scene-source":
         assert scored["verdict"] is False and scored["maxDropS"] >= 0.48, scored
         assert scored["window"]["start"] == 100.0
+    elif case == "multi-scene-build":
+        assert scored["verdict"] is None
+        assert scored["integrity"] == "the sampler recorded no settled source sample"
+    elif case == "source-zero-rect-decode-loss":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+    elif case == "cut-short-cold-start":
+        assert scored["verdict"] is True
+        assert scored["window"]["coldStart"]["rows"] > 0
     elif case == "gl-excused-missing":
         first, second = rows[55], rows[56]
         assert scored["verdict"] is False and scored["missingSamples"] and scored["decodeLoss"]

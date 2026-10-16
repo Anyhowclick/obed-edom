@@ -2722,6 +2722,8 @@ def score_continuity(
             "an unreadable footprint owner or element id decides which decoder is the carried one",
             elementId=element_id, contested=contested, window=window,
         )
+    source_scene = (boundary_scene if transition_scene is None else transition_scene) - 1
+
     def carried_decoded(row: Mapping[str, Any]) -> bool:
         ready = _finite_number(row.get("readyState"))
         width = _finite_number(row.get("videoWidth")) if "videoWidth" in row else 1.0
@@ -2735,29 +2737,31 @@ def score_continuity(
             and matches_asset_keys(row.get("src"), [asset])
             and ready is not None and ready >= 2
             and width is not None and width > 0
-            and connected is True and rect_ok
+            and connected is True
+            and (
+                rect_ok
+                or row.get("busy") is False and _finite_number(row.get("scene")) == source_scene
+            )
         )
 
     window = _legacy_carry_window(carry, phases, element_id)
     if window is None:
         return _inconclusive("boundary crossing not observed in samples")
+    if not any(carried_decoded(row) for row in tracks[element_id]):
+        return _inconclusive("carried decoder never decoded before the crossing", elementId=element_id, window=window)
     cold_start = window.get("coldStart") if isinstance(window.get("coldStart"), Mapping) else {}
     if cold_start.get("rows", 0) > 0:
-        shared = next((row for row in phases.get("rows") or [] if row.get("t") == window["start"]), None)
-        source_scene = (boundary_scene if transition_scene is None else transition_scene) - 1
-        if not (
-            shared is not None
-            and shared.get("busy") is False
-            and _finite_number(shared.get("scene")) == source_scene
-            and shared["t"] <= crossing["lastBeforeT"]
+        if not any(
+            window["start"] <= row["t"] <= crossing["lastBeforeT"]
+            and row.get("busy") is False and _finite_number(row.get("scene")) == source_scene
+            and carried_decoded(row)
+            for row in tracks[element_id]
         ):
             return _inconclusive(
                 "carried decoder never decoded on a settled source row before the crossing",
                 elementId=element_id, window=window,
             )
 
-    if not any(carried_decoded(row) for row in tracks[element_id]):
-        return _inconclusive("carried decoder never decoded before the crossing", elementId=element_id, window=window)
     if window["start"] < reach and (problem := integrity_problem(window["start"])) is not None:
         return problem
     reach = min(reach, window["start"])
