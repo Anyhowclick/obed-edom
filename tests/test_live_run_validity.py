@@ -21,7 +21,7 @@ def baseline(host_kind: str) -> dict:
     environment = {
         "qualificationIdentity": host_kind,
         "gitHead": "abc123",
-        "browserVersion": {"product": f"Chrome/{validity.QUALIFIED_CHROME_BUILD}"},
+        "browserVersion": {"product": "Chrome/155.0.8059.79"},
         "observations": {
             "before": {"loadAverage": [1.0, 2.0, 3.0], "uptime": "up", "chromeCounts": {"owned": 1, "foreign": 0}},
             "during": {"loadAverage": [2.0, 2.0, 3.0], "uptime": "up", "chromeCounts": {"owned": 1, "foreign": 0}},
@@ -65,8 +65,11 @@ def baseline(host_kind: str) -> dict:
         (validity.HOST_HEADLESS_CHROME, "negative count high p95", None, "cost: malformed hook entries"),
         (validity.HOST_HEADLESS_CHROME, "huge p95", None, "cost: malformed hook entries"),
         (validity.HOST_HEADLESS_CHROME, "missing cost", None, "cost: instrumentCost is missing or malformed"),
-        (validity.HOST_HEADLESS_CHROME, "wrong Chrome", False, "environment: Chrome 154.0.0.0 is not the qualified"),
+        (validity.HOST_HEADLESS_CHROME, "Chrome patch update", None, "cadence: settled-cadence statistic is open"),
+        (validity.HOST_HEADLESS_CHROME, "new Chrome major", False, "environment: Chrome 156.0.1.2 is outside the qualified majors (155)"),
+        (validity.HOST_HEADLESS_CHROME, "old Chrome major", False, "environment: Chrome 154.0.8037.59 is outside the qualified majors (155)"),
         (validity.HOST_HEADLESS_CHROME, "missing browser", None, "environment: Chrome browserVersion.product"),
+        (validity.HOST_HEADLESS_CHROME, "unparseable browser", None, "environment: Chrome browserVersion.product"),
         (validity.HOST_HEADLESS_CHROME, "HeadlessChrome", None, "cadence: settled-cadence statistic is open"),
         (validity.HOST_MANAGED_OBS_25, "CEF product", None, "cadence: settled-cadence statistic is open"),
         (validity.HOST_MANAGED_OBS_25, "wrong OBS", False, "environment: obsVersion"),
@@ -119,14 +122,18 @@ def test_run_validity_matrix(host_kind, case, expected, reason):
         capture["instrumentCost"][validity.REQUIRED_HOOKS[1]]["p95"] = 10**1000
     elif case == "missing cost":
         del capture["instrumentCost"]
-    elif case == "wrong Chrome":
-        capture["environment"]["browserVersion"]["product"] = "Chrome/154.0.0.0"
+    elif case == "Chrome patch update":
+        capture["environment"]["browserVersion"]["product"] = "Chrome/155.0.8059.80"
+    elif case == "new Chrome major":
+        capture["environment"]["browserVersion"]["product"] = "Chrome/156.0.1.2"
+    elif case == "old Chrome major":
+        capture["environment"]["browserVersion"]["product"] = "Chrome/154.0.8037.59"
     elif case == "missing browser":
         del capture["environment"]["browserVersion"]
+    elif case == "unparseable browser":
+        capture["environment"]["browserVersion"]["product"] = "Chrome/not-a-version"
     elif case == "HeadlessChrome":
-        capture["environment"]["browserVersion"]["product"] = (
-            f"HeadlessChrome/{validity.QUALIFIED_CHROME_BUILD}"
-        )
+        capture["environment"]["browserVersion"]["product"] = "HeadlessChrome/155.0.8059.80"
     elif case == "CEF product":
         capture["environment"]["browserVersion"]["product"] = "HeadlessChrome/0.0.0.0"
     elif case == "wrong OBS":
@@ -177,6 +184,17 @@ def test_run_validity_matrix(host_kind, case, expected, reason):
             expected_reasons.insert(0, "environment: attach display/timing profile is not recorded")
         assert result["reasons"] == expected_reasons
         assert result["measured"]["environment"]["observations"] == capture["environment"]["observations"]
+        if host_kind == validity.HOST_HEADLESS_CHROME:
+            assert result["measured"]["environment"]["ok"] is True
+    if case == "Chrome patch update":
+        assert result["measured"]["environment"]["ok"] is True
+        assert result["measured"]["environment"]["chromeBuild"] == "155.0.8059.80"
+    if case in {"new Chrome major", "old Chrome major"}:
+        assert result["measured"]["environment"]["ok"] is False
+    if case in {"missing browser", "unparseable browser"}:
+        assert result["measured"]["environment"]["ok"] is None
+    if case == "missing browser":
+        assert result["measured"]["environment"]["chromeBuild"] is None
     if case in {"at budget", "zero call", "diagnostics do not gate", "HeadlessChrome", "CEF product"}:
         assert result["measured"]["cost"]["ok"] is True
     if case == "over budget and missing":
@@ -188,6 +206,7 @@ def test_run_validity_matrix(host_kind, case, expected, reason):
         assert result["policy"]["costBudgetP95Ms"] == validity.COST_BUDGET_P95_MS
     if case == "CEF product":
         assert result["measured"]["environment"]["browserVersion"] == {"product": "HeadlessChrome/0.0.0.0"}
+        assert "chromeBuild" not in result["measured"]["environment"]
     if host_kind in validity.QUALIFICATIONS and case not in {"unknown host", "missing host", "non-string host"}:
         assert result["policy"]["requiredHooks"] == list(validity.REQUIRED_HOOKS)
         assert result["policy"]["status"]["requiredHooks"] == validity.REQUIRED_HOOKS_POLICY_STATUS
@@ -287,6 +306,9 @@ def test_qualification_rows_do_not_drift_from_probe_or_managed_obs():
     assert set(validity.QUALIFICATIONS) == set(probe.HOST_KINDS)
     assert validity.QUALIFICATIONS[validity.HOST_HEADLESS_CHROME]["periodMs"] == 1000 / 60
     assert validity.QUALIFICATIONS[validity.HOST_QUALIFIED_CHROME_ATTACH]["periodMs"] == 1000 / 60
+    for host_kind in (validity.HOST_HEADLESS_CHROME, validity.HOST_QUALIFIED_CHROME_ATTACH):
+        assert validity.QUALIFICATIONS[host_kind]["chromeMajors"] == [155]
+        assert "chromeBuild" not in validity.QUALIFICATIONS[host_kind]
     for host_kind, output_hz in (
         (validity.HOST_MANAGED_OBS_25, 25),
         (validity.HOST_MANAGED_OBS_30, 30),

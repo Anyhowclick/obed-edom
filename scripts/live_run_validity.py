@@ -21,7 +21,7 @@ HOST_QUALIFIED_CHROME_ATTACH = "qualified Chrome attach"
 HOST_MANAGED_OBS_25 = "managed OBS 25"
 HOST_MANAGED_OBS_30 = "managed OBS 30"
 
-QUALIFIED_CHROME_BUILD = "155.0.8059.79"
+QUALIFIED_CHROME_MAJORS = (155,)
 COST_BUDGET_P95_MS = 8.0
 REQUIRED_HOOKS = ("sampler.tick", "paint.prePaint", "feed.rvfc", "feed.raf", "feed.draw", "frame.total")
 
@@ -47,7 +47,7 @@ def _row(host_kind: str, engine: str, period_ms: float, **extra: Any) -> dict[st
 
 QUALIFICATIONS: dict[str, dict[str, Any]] = {
     **{
-        host: _row(host, "chrome", 1000 / 60, chromeBuild=QUALIFIED_CHROME_BUILD)
+        host: _row(host, "chrome", 1000 / 60, chromeMajors=list(QUALIFIED_CHROME_MAJORS))
         for host in (HOST_HEADLESS_CHROME, HOST_QUALIFIED_CHROME_ATTACH)
     },
     **{
@@ -153,6 +153,8 @@ def _environment(capture: Mapping[str, Any], row: Mapping[str, Any] | None) -> t
         "browserVersion": None,
         "observations": None,
     }
+    if row is not None and row["engine"] == "chrome":
+        measured["chromeBuild"] = None
     if not isinstance(raw, Mapping):
         return None, ["environment: environment is missing or malformed"], measured
     measured.update({key: copy.deepcopy(raw.get(key)) for key in (
@@ -190,12 +192,19 @@ def _environment(capture: Mapping[str, Any], row: Mapping[str, Any] | None) -> t
         browser = raw.get("browserVersion")
         product = browser.get("product") if isinstance(browser, Mapping) else None
         match = _CHROME_PRODUCT.fullmatch(product) if isinstance(product, str) else None
-        if match is None:
+        build = match.group(1) if match is not None else None
+        measured["chromeBuild"] = build
+        try:
+            major = int(build.split(".", 1)[0]) if build is not None else None
+        except ValueError:
+            major = None
+        if major is None:
             checks.append(None)
             reasons.append("environment: Chrome browserVersion.product is missing or unparseable")
-        elif match.group(1) != row["chromeBuild"]:
+        elif major not in row["chromeMajors"]:
             checks.append(False)
-            reasons.append(f"environment: Chrome {match.group(1)} is not the qualified {row['chromeBuild']}")
+            majors = ", ".join(str(value) for value in row["chromeMajors"])
+            reasons.append(f"environment: Chrome {build} is outside the qualified majors ({majors})")
         else:
             checks.append(True)
         if row["hostKind"] == HOST_QUALIFIED_CHROME_ATTACH:
