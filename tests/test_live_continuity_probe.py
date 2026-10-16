@@ -12669,15 +12669,14 @@ videos.broken.drawSource=null;runChain(10,51,'3-canvas','alpha','alpha-hop');loc
 window.__obedMmFeedProbe.report();videos.alpha.__obedInstance='dalpha';videos.broken.__obedInstance='dbroken';tick();
 function screenRect(q,dx=0,dw=0){const left=stageX+q.x*stageSX+dx,top=stageY+q.y*stageSX,width=q.w*stageSX+dw,height=q.h*stageSX;return {x:left,y:top,left,top,right:left+width,bottom:top+height,width,height}}
 location.hash='#20';stageX=10;stageY=20;stageSX=.5;stageSY=.5;videos.geo1.opacity='1';videos.geo2.opacity='1';
-const q1={x:100,y:50,w:200,h:100},q2={x:400,y:50,w:200,h:100};videos.geo1.rect=screenRect(q1);videos.geo2.rect=screenRect(q2);
-const geoMove=openContext('6-canvas'),geoTexture=posterTexture(geoMove,new ImageSource(100,100,8));geoMove.gl.clear();geoMove.gl.activeTexture(geoMove.gl.TEXTURE0);geoMove.gl.bindTexture(geoMove.gl.TEXTURE_2D,geoTexture);geoMove.gl.uniformMatrix4fv(geoMove.m,false,matrices.alpha);
-videos.geo1.rect=screenRect(q1,.25,.25);videos.geo2.rect=screenRect(q2,1,0);geoMove.gl.drawArrays();const firstCompletedAt=geoMove.gl.completedAt;
+const q1={x:100,y:50,w:200,h:100},q2={x:400,y:50,w:200,h:100};videos.geo1.rect=screenRect(q1,.25,.25);videos.geo2.rect=screenRect(q2,1,0);
+const geoMove=openContext('6-canvas'),geoTexture=posterTexture(geoMove,new ImageSource(100,100,8));geoMove.gl.clear();geoMove.gl.activeTexture(geoMove.gl.TEXTURE0);geoMove.gl.bindTexture(geoMove.gl.TEXTURE_2D,geoTexture);geoMove.gl.uniformMatrix4fv(geoMove.m,false,matrices.alpha);geoMove.gl.drawArrays();const firstCompletedAt=geoMove.gl.completedAt;
 videos.geo1.visibility=false;videos.geo1.rect=screenRect(q1,100,100);tick();videos.geo1.visibility=true;videos.geo1.rect=screenRect(q1);videos.geo2.rect=screenRect(q2);tick();const firstReport=window.__obedMmFeedProbe.report(),firstContext=firstReport.contexts.find(c=>c.id==='6-canvas'),firstStamp=firstContext.firstDrawAt,geometryFirst=firstReport.frames.filter(f=>f.serial===firstContext.serial).at(-1).riders.map(r=>[r.entryId,r.sourceRectError]);
-geoMove.gl.clear();geoMove.gl.activeTexture(geoMove.gl.TEXTURE0);geoMove.gl.bindTexture(geoMove.gl.TEXTURE_2D,geoTexture);geoMove.gl.uniformMatrix4fv(geoMove.m,false,matrices.alpha);geoMove.gl.drawArrays();const geometrySecond=window.__obedMmFeedProbe.report().frames.filter(f=>f.serial===firstContext.serial).at(-1).riders.map(r=>[r.entryId,r.sourceRectError]);
-geoMove.gl.clear();stageSY=.6;tick();stageSY=.5;const geometrySticky=window.__obedMmFeedProbe.report().frames.filter(f=>f.serial===firstContext.serial).at(-1).riders.map(r=>[r.entryId,r.sourceRectError]);
+videos.geo1.rect=screenRect(q1,100,100);videos.geo2.rect=screenRect(q2,100,100);geoMove.gl.clear();geoMove.gl.activeTexture(geoMove.gl.TEXTURE0);geoMove.gl.bindTexture(geoMove.gl.TEXTURE_2D,geoTexture);geoMove.gl.uniformMatrix4fv(geoMove.m,false,matrices.alpha);geoMove.gl.drawArrays();const geometryAfterDraw=window.__obedMmFeedProbe.report().frames.filter(f=>f.serial===firstContext.serial).at(-1).riders.map(r=>[r.entryId,r.sourceRectError]);
+videos.geo1.rect=screenRect(q1);videos.geo2.rect=screenRect(q2);const stickyMove=openContext('9-canvas');stickyMove.gl.clear();stageSY=.6;tick();stageSY=.5;const stickyContext=window.__obedMmFeedProbe.report().contexts.find(c=>c.id==='9-canvas'),geometrySticky=window.__obedMmFeedProbe.report().frames.filter(f=>f.serial===stickyContext.serial).at(-1).riders.map(r=>[r.entryId,r.sourceRectError]);
 location.hash='#22';const unframed=openContext('7-canvas'),unframedTexture=posterTexture(unframed,new ImageSource(100,100,8));unframed.gl.activeTexture(unframed.gl.TEXTURE0);unframed.gl.bindTexture(unframed.gl.TEXTURE_2D,unframedTexture);unframed.gl.uniformMatrix4fv(unframed.m,false,matrices.alpha);unframed.gl.drawArrays();const unframedCompletedAt=unframed.gl.completedAt;
 const thrownGl=makeGl();thrownGl.drawArrays=function(){this.completedAt=performance.now();throw new Error('draw failed')};const thrownCanvas=new Canvas('8-canvas',thrownGl);thrownGl.canvas=thrownCanvas;thrownCanvas.getContext('webgl');try{thrownGl.drawArrays()}catch(e){}
-const finalReport=window.__obedMmFeedProbe.report(),contexts=Object.fromEntries(finalReport.contexts.map(c=>[c.id,c]));finalReport.harnessChecks={geometryFirst,geometrySecond,geometrySticky,framed:{completedAt:firstCompletedAt,firstDrawAt:contexts['6-canvas'].firstDrawAt,firstStamp},unframed:{completedAt:unframedCompletedAt,firstDrawAt:contexts['7-canvas'].firstDrawAt},thrown:{completedAt:thrownGl.completedAt,firstDrawAt:contexts['8-canvas'].firstDrawAt}};
+const finalReport=window.__obedMmFeedProbe.report(),contexts=Object.fromEntries(finalReport.contexts.map(c=>[c.id,c]));finalReport.harnessChecks={geometryFirst,geometryAfterDraw,geometrySticky,framed:{completedAt:firstCompletedAt,firstDrawAt:contexts['6-canvas'].firstDrawAt,firstStamp},unframed:{completedAt:unframedCompletedAt,firstDrawAt:contexts['7-canvas'].firstDrawAt},thrown:{completedAt:thrownGl.completedAt,firstDrawAt:contexts['8-canvas'].firstDrawAt}};
 console.log(JSON.stringify(finalReport));
 """
     completed = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
@@ -12685,7 +12684,7 @@ console.log(JSON.stringify(finalReport));
     report = json.loads(completed.stdout)
     checks = report["harnessChecks"]
     assert dict(checks["geometryFirst"]) == {"geo-1": 1.0, "geo-2": 2.0}
-    assert dict(checks["geometrySecond"]) == {"geo-1": 0.0, "geo-2": 0.0}
+    assert dict(checks["geometryAfterDraw"]) == {"geo-1": 0.0, "geo-2": 0.0}
     assert dict(checks["geometrySticky"]) == {"geo-1": None, "geo-2": None}
     assert checks["framed"]["firstDrawAt"] > checks["framed"]["completedAt"]
     assert checks["framed"]["firstDrawAt"] == checks["framed"]["firstStamp"]
