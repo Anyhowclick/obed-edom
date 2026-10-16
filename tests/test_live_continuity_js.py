@@ -4016,6 +4016,7 @@ a.__inStage = false;
 detach(a);
 a.parentElement = null;
 const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once,
+  translate: a.style.translate,
   rect: {{left: a.style.left, top: a.style.top, width: a.style.width, height: a.style.height}},
   parent: a.parentNode === sourceRoot ? 'source-root' : a.parentNode === bodyEl ? 'body' : 'other',
   order: sourceRoot.kids.map((node) => node.id || node.__obedInstance)}};
@@ -4024,6 +4025,11 @@ let emptyInside = null, insideBefore = null, insideAfter = null;
 window.requestAnimFrame(function() {{ emptyInside = a.style.opacity; {first_callback} }});
 glFrames.shift()(8);
 const afterEmptyCallback = a.style.opacity;
+const afterFirstFedCallback = a.style.translate === undefined ? undefined : {{
+  translate: a.style.translate,
+  opacity: a.style.opacity,
+  onBody: a.parentNode === bodyEl,
+}};
 window.requestAnimFrame(function() {{
   insideBefore = a.style.opacity;
   {second_callback}
@@ -4033,6 +4039,7 @@ glFrames.shift()(16);
 console.log(JSON.stringify({{
   {departure_interim}
   claimed, beforeDraw, emptyInside, afterEmptyCallback, insideBefore, insideAfter,
+  afterFirstFedCallback,
   afterCallback: a.style.opacity,
   afterRect: {{left: a.style.left, top: a.style.top, width: a.style.width, height: a.style.height}},
   onBody: a.parentNode === bodyEl, frameCount: entry.framesFed,
@@ -4111,11 +4118,13 @@ def test_startup_moved_decoder_restores_source_placement_after_the_first_draw(mo
 
     monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variant_core("startup-moved-decoder"))
     result = _departure_hide("continuous")
-    assert result["beforeDraw"]["parent"] == "body"
+    assert result["beforeDraw"]["parent"] == "source-root"
     assert result["beforeDraw"]["opacity"] == "1"
+    assert result["beforeDraw"]["translate"] == "8px 0px"
     assert result["beforeDraw"]["rect"] == {
-        "left": "108px", "top": "200px", "width": "300px", "height": "150px",
+        "left": "100px", "top": "200px", "width": "300px", "height": "150px",
     }
+    assert result["afterFirstFedCallback"] == {"translate": "", "opacity": "0", "onBody": True}
     assert {key: float(value.removesuffix("px")) for key, value in result["afterRect"].items()} == pytest.approx(
         {"left": 100, "top": 200, "width": 300, "height": 150}, abs=.01,
     )

@@ -54,20 +54,19 @@ _STARTUP_HOLD = """    if (waitForGl && (document.contains(v) || departureInteri
     }
 """
 _STARTUP_MOVED_DECODER = """    if (waitForGl && (document.contains(v) || departureInterimPlace(v, boundary))) {
-      const screenRect = toScreen(boundary.src.rect);
-      if (screenRect) {
-        if (v.parentNode !== stage) {
-          beginMove(v);
-          stage.appendChild(v);
-        }
-        v.style.left = (screenRect.x + 8) + 'px';
-        v.style.top = screenRect.y + 'px';
-        v.style.width = screenRect.w + 'px';
-        v.style.height = screenRect.h + 'px';
-      }
+      v.style.translate = '8px 0px';
       v.style.opacity = '1';
       return true;
     }
+"""
+_DEPARTURE_FINISH_HIDE = """      beginMove(v);
+      (document.getElementById('body') || document.body).appendChild(v);
+      v.style.opacity = '0';
+"""
+_DEPARTURE_FINISH_HIDE_MOVED_DECODER = """      beginMove(v);
+      (document.getElementById('body') || document.body).appendChild(v);
+      v.style.translate = '';
+      v.style.opacity = '0';
 """
 _DEPARTURE_HIDE = """  function rideTransition(v, owner, boundary, rectAt, caller, hidden) {
     // The ride owns the decoder now: end any footprint hold, or it drags the
@@ -201,7 +200,10 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
         "    });\n",
     ),),
     "departure-early-hide": ((_DEPARTURE_HIDE, _DEPARTURE_EARLY_HIDE),),
-    "startup-moved-decoder": ((_STARTUP_HOLD, _STARTUP_MOVED_DECODER),),
+    "startup-moved-decoder": (
+        (_STARTUP_HOLD, _STARTUP_MOVED_DECODER),
+        (_DEPARTURE_FINISH_HIDE, _DEPARTURE_FINISH_HIDE_MOVED_DECODER),
+    ),
 }
 
 
