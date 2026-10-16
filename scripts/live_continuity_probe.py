@@ -125,6 +125,7 @@ import live_host_probe  # noqa: E402 - reuse the headless window-size compensati
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
 import mm_feed_variants  # noqa: E402
 import paint_instrument  # noqa: E402
+import binary_counter_movie  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
 from live_evidence_contract import stage_map_valid  # noqa: E402
@@ -1966,6 +1967,7 @@ def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tupl
     config = {
         "entries": entries, "tamper": FEED_CONTROL.get("tamper"), "tamperScene": FEED_CONTROL.get("tamperScene"),
         "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
+        "counterLayout": binary_counter_movie.layout(),
     }
     source = mm_feed_instrument.INSTRUMENT_JS + "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
     return (source,)
@@ -1997,6 +1999,7 @@ def drive_and_sample(
                 "entries": feed_specs, "tamper": FEED_CONTROL.get("tamper"),
                 "tamperScene": FEED_CONTROL.get("tamperScene"),
                 "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
+                "counterLayout": binary_counter_movie.layout(),
             }) + ")"
         )
     transport.evaluate(ENSURE_PLAYING_JS)
