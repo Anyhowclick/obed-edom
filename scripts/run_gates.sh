@@ -256,9 +256,10 @@ print(f"    expected red: {sorted(want) or '{}'}; expected inconclusive: {sorted
 sys.exit(0 if ok else 1)
 PYEOF
 }
-# Every run goes through one queue, refilled whenever any slot opens, GATE_JOBS at a time. Launch groups are positive
-# P2 freeze brackets, Pass G, host, Pass G red, remaining P2, host red, carry-cover, paint control. Checks keep their
-# listed order. Each process group atomically writes <name>.rc; traps stop running groups (TERM, then KILL after 5 s).
+# Every run goes through one queue, GATE_JOBS at a time, refilled whenever any slot opens; the launch section below
+# starts the long groups first. Each run has its own process group and atomically writes <name>.rc as "<round
+# nonce> <exit>"; a missing .rc or one from another round fails its check. Checks run in their own order once every
+# run has finished. Exit, HUP, INT or TERM stops the running groups (TERM, then KILL after 5 s).
 NONCE="$$-$(date +%s)-$RANDOM"; echo "round nonce $NONCE"
 zmodload zsh/parameter
 zmodload zsh/zselect

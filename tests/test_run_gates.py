@@ -40,12 +40,10 @@ What is pinned here:
   1920x1080 skips C; every host arm runs at least once a round or the round is refused; a host gate
   passes only when its artifact records exactly that skip and holds exactly the other arms;
 - the S0 deck red arms (S2, plan §3.4 Q3): every `DECK_ARMS` entry goes through the same queue as a host
-  red run on its deck's own `html-unmodified` export, after the P2 host red arms and before the P2 arms,
-  is checked after the wait in the same order, and runs in the full tier only;
+  red run on its deck's own `html-unmodified` export and runs in the full tier only;
 - Pass G (owner decision 2026-10-10, plan §3.4 Q3): one `--pass G` probe run per fixture (P2 and D1-D6) goes through
-  the same queue after the deck red arms and before the P2 arms, full tier only, each with its own artifact under
-  `<outdir>`; a run passes only with this round's exit 0 and a Pass G artifact whose status is pass, and every other
-  outcome is counted FAILED (never pending);
+  the same queue, full tier only, each with its own artifact under `<outdir>`; a run passes only with this round's exit
+  0 and a Pass G artifact whose status is pass, and every other outcome is counted FAILED (never pending);
 - the P2 arm list: no `--strip bridge@8` arm, `--skip-freeze-bracket` on every arm but the two
   positive freeze-bracket arms (and refused on those), and the `Freeze bracket:` header checked;
 - `--tier dev` runs the 1920x1080 + 1600x1000 host gates and three P2 arms, says DEV loudly and
@@ -58,13 +56,16 @@ What is pinned here:
 - the load guard: a round refuses to start (exit 2) when the 1-minute load average (`sysctl -n vm.loadavg`, stubbed
   on PATH here so the real host's load never decides a test) exceeds `GATE_MAX_START_LOAD` (default 4), and the
   summary prints the load at start and end and the round's wall time;
+- launch order (owner 2026-10-16): positive freeze-bracket P2 arms, Pass G, host, Pass G red, remaining P2, host red
+  (P2 then decks), carry-cover, paint control — refilled into any free slot; checks run after the wait in their own fixed
+  order (host, host red, deck red, Pass G, Pass G red, paint control, carry-cover, P2);
 - the carry-cover gate (gl-clock plan §5): green, red and null arms on P2 and on D1 (each on its deck's own export),
-  full tier only, after the paint controls and before the P2 arms; a check fails closed on every unexpected status, a
-  foreign core sha, fixture or control, and (but on the null arm) any bridge clock other than the arm's;
+  full tier only; a check fails closed on every unexpected status, a foreign core sha, fixture or control, and (but on
+  the null arm) any bridge clock other than the arm's;
 - the painted instrument (S2 instrument plan §5): the D2/D3/D5 `no-pin-hold` deck red arms, one Pass G red arm and three
-  paint controls run in the full tier only, queued and checked Pass G -> Pass G red -> paint control -> carry-cover;
-  each check fails closed on every known-bad shape, a host red artifact without `sampler.selfCheck.ok` fails, and
-  paint census entries are printed and counted as `findings=` on the DONE line without changing the exit code.
+  paint controls run in the full tier only; each check fails closed on every known-bad shape, a host red artifact
+  without `sampler.selfCheck.ok` fails, and paint census entries are printed and counted as `findings=` on the DONE line
+  without changing the exit code.
 """
 
 from __future__ import annotations
@@ -530,11 +531,11 @@ def test_killing_the_queue_owner_leaves_no_run_or_child_behind(
         proc = gates["start"](GATE_JOBS="2", STUB_MODES=modes)
         try:
             deadline = time.monotonic() + 30
-            while not any(e.startswith("probe passG-P2 ") for e in gates["events"]()):
+            while not (any(e.startswith("probe passG-P2 ") for e in gates["events"]())
+                       and list(gates["marker"].glob("child-*"))):
                 assert proc.poll() is None, "the round ended before a later run started"
                 assert time.monotonic() < deadline, f"the queue did not refill around its oldest run: {gates['events']()}"
                 time.sleep(0.05)
-            assert list(gates["marker"].glob("child-*")), "the oldest run finished before the later run launched"
             proc.send_signal(signal.SIGTERM)
             proc.wait(timeout=30)
         finally:
@@ -661,10 +662,10 @@ def test_known_bad_load_that_does_not_settle_after_the_prewarm_launches_no_timed
 def test_the_settle_wait_never_sleeps_past_its_deadline(gates) -> None:
     """Codex r4: a fixed 5 s sleep overshot a GATE_SETTLE_S that is not a multiple of 5.
     The sleeps are checked rather than the round timed: the pre-launch staging shares the settle budget and xdist load
-    stretches it past any wall-clock bound. The patched copy restarts the deadline at the loop, so the loop always
-    sleeps and every sleep must stay strictly inside the remaining budget."""
-    loop = "while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do"
-    script = gates["patched"](loop, f"typeset -F SECONDS; settle_deadline=$((SECONDS + GATE_SETTLE_S)); {loop}")
+    stretches it past any wall-clock bound. The patched copy only makes SECONDS fractional, so the real deadline and
+    sleep lines run and every sleep must stay strictly inside the remaining budget."""
+    anchor = "GATE_SETTLE_S=${GATE_SETTLE_S:-300}"
+    script = gates["patched"](anchor, f"typeset -F SECONDS; {anchor}")
     done = gates["run"](script=script, timeout=30, STUB_LOAD="1.00", STUB_LOAD_AFTER_PREWARM="9.50", GATE_SETTLE_S="4")
     sleeps = gates["sleeps"]()
     assert done.returncode == 2
@@ -714,11 +715,7 @@ def test_gate_jobs_above_three_warns_loudly_but_still_runs(gates, jobs: str | No
 # --------------------------------------------------------------------------
 
 FULL_HOST_SKIPS = {"2560x1440": "attach,B,Voff", "1600x1000": "attach,B,Voff", "1920x1080": "C"}
-HOST_RED_STEMS = {
-    "host-red--core-variantstash-any", "host-red--stripbridge@8", "host-red--stripretire@2", "host-red--striprestart@6",
-    "host-red--stripglReplay@2--gl-replayauto",
-}
-HOST_RED_STEMS_ORDERED = [
+HOST_RED_STEMS = [
     "host-red--core-variantstash-any", "host-red--stripbridge@8", "host-red--stripretire@2", "host-red--striprestart@6",
     "host-red--stripglReplay@2--gl-replayauto",
 ]
@@ -786,7 +783,7 @@ def test_the_full_round_host_arm_matrix(gates) -> None:
         f"host-{v}": (v, skip) for v, skip in FULL_HOST_SKIPS.items()
     }
     assert {k: v for k, v in runs.items() if k.startswith("host-red")} == {
-        s: ("1920x1080", "None") for s in HOST_RED_STEMS | set(DECK_RED_STEMS)
+        s: ("1920x1080", "None") for s in {*HOST_RED_STEMS, *DECK_RED_STEMS}
     }
     ran = {name: [v for v, skip in FULL_HOST_SKIPS.items() if name not in skip.split(",")] for name in ARMS}
     assert ran == {
@@ -853,7 +850,7 @@ def _probe_args(events: list[str]) -> dict[str, tuple[str, str, list[str]]]:
 
 def test_the_deck_red_arms_run_on_their_own_export_through_the_queue_in_order(gates) -> None:
     """S2 (plan §3.4 Q3): the 22 S0 deck red arms are host red runs on the deck's `html-unmodified`
-    export (both fixture and original index), launched in the fixed group order and checked after the wait in today's
+    export (both fixture and original index), launched in the fixed group order and checked after the wait in the check
     order."""
     done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
@@ -883,8 +880,8 @@ def test_known_bad_a_deck_red_run_that_writes_no_status_fails_closed(gates) -> N
 def test_pass_g_runs_on_p2_and_every_deck_through_the_queue_in_order(gates) -> None:
     """Owner decision 2026-10-10 (plan §3.4 Q3): Pass G moved into the round. One `--pass G` probe run per
     fixture -- P2 on its player export with the unmodified index, each S0 deck on its own `html-unmodified`
-    export as both fixture and original index -- launched in the fixed group order and checked after the wait in today's
-    order. Each run has its own artifact under <outdir> (the probe's
+    export as both fixture and original index -- launched in the fixed group order and checked after the wait in the
+    check order. Each run has its own artifact under <outdir> (the probe's
     `run_scope` keys its private run folder by the artifact path), so no two runs share a folder."""
     done = gates["shared"](GATE_JOBS="1")
     events = gates["events"]()
@@ -1196,7 +1193,7 @@ def _full_launch_stems() -> list[str]:
         *(f"host-{viewport}" for viewport in FULL_HOST_SKIPS),
         PASSG_RED_STEM,
         *(_p2_name(argv) for argv in FULL_P2_LAUNCH_ARMS[2:]),
-        *HOST_RED_STEMS_ORDERED,
+        *HOST_RED_STEMS,
         *DECK_RED_STEMS,
         *CC_STEMS,
         *PC_STEMS,
@@ -1259,7 +1256,7 @@ def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, s
 
 # --------------------------------------------------------------------------
 # Painted instrument (S2 instrument plan §5): the Pass G red arm and the paint positive controls, full tier only,
-# queued and checked Pass G -> Pass G red -> paint control -> carry-cover; census findings are report only.
+# checked Pass G -> Pass G red -> paint control -> carry-cover; census findings are report only.
 # --------------------------------------------------------------------------
 
 
