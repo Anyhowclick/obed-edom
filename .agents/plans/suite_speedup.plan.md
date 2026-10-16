@@ -1,6 +1,17 @@
 # Suite speed-up — revision 2 (final before owner review)
 
-## Owner decisions
+## Owner decisions — recorded 2026-10-16
+
+- **Approved:** base plan (A1, A2, B, C, D handback); live scheduling (any-slot + fixed group order, paired real
+  round); Stage B feed dwell (Stage B-owned, after merge, low priority); tmp-retention trial; Pass G option A.
+- **Multi-fault rounds (A3): A/B.** Implement as a separate commit on top of A1+A2, measure `tests/test_run_gates.py` and
+  full-suite wall with and without it, and bring the measured saving back to the owner before keeping it.
+- **D5 diagnostic (red-noself/red-nofloor):** owner left it to the coordinator. Decision: **add** the one-line
+  `observed red: ['b0to1:A:carry']` assertion inside the D5 block, so the two checks become evidential (no new test).
+- **Declined:** GATE_JOBS=4, event-driven post-advance settle, pruning the two inert restart arms. Lazy import/checker
+  batching stays conditional (profile only if the measured suite still misses the target).
+
+## Decision table (pre-approval)
 
 S = summed Python test seconds; W = wall seconds. Live-gate job-seconds are separate. Only Pass G option A is approved; all other decisions below remain **OPEN**.
 
