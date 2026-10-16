@@ -367,6 +367,15 @@ def _make_gates(root: Path) -> dict[str, object]:
     ], check=True)
     for name in sorted({path.name for paths in referenced.values() for path in paths if path is not None}):
         shutil.copy2(seed, alpha_donor / name)
+    alpha_relative = min(path for paths in referenced.values() for path in paths if path is not None).relative_to(
+        alpha_source / "html-unmodified"
+    )
+    alpha_relative_donor = alpha_donor / alpha_relative
+    alpha_relative_donor.parent.mkdir(parents=True)
+    shutil.copy2(seed, alpha_relative_donor)
+    with alpha_relative_donor.open("ab") as donor:
+        donor.write(b"\x01")
+    alpha_relative_bytes = alpha_relative_donor.read_bytes()
     seed.unlink()
     slide_uuid = "EC1B1743-BCCE-459F-9080-E0385E656256"
     slide_path = qual_b_source / "D7-html" / "assets" / slide_uuid / f"{slide_uuid}.json"
@@ -433,7 +442,8 @@ def _make_gates(root: Path) -> dict[str, object]:
     return {
         "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list,
         "sleeps": sleeps_list, "survivors": survivors, "patched": patched, "tmp": root, "qual_b_source": qual_b_source,
-        "alpha_source": alpha_source, "alpha_donor": alpha_donor,
+        "alpha_source": alpha_source, "alpha_donor": alpha_donor, "alpha_relative": alpha_relative,
+        "alpha_relative_bytes": alpha_relative_bytes,
     }
 
 
@@ -565,6 +575,9 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
         (gates["out"] / "alpha-dsk-repaired").rglob("*.mp4")
     )
     assert len(restored) == 11 and "Alpha movies restored 5" in done.stdout
+    assert (gates["out"] / "alpha-dsk-repaired" / gates["alpha_relative"]).read_bytes() == gates[
+        "alpha_relative_bytes"
+    ]
     assert not list((gates["alpha_source"] / "html-unmodified").rglob("*.mov"))
     assert not list((gates["alpha_source"] / "html-unmodified").rglob("*.mp4"))
 
@@ -607,13 +620,11 @@ def test_alpha_movie_staging_refuses_before_timed_runs(gates, failure: str) -> N
     if failure == "dir":
         shutil.rmtree(gates["alpha_donor"])
         expected = "Alpha complete export donor is missing at"
-    else:
-        donor = next(gates["alpha_donor"].iterdir())
-    if failure == "missing":
-        donor.unlink()
+    elif failure == "missing":
+        next(gates["alpha_donor"].iterdir()).unlink()
         expected = "is missing needed movie file name(s)"
-    elif failure == "unreadable":
-        donor.write_bytes(b"not a movie")
+    else:
+        next(gates["alpha_donor"].iterdir()).write_bytes(b"not a movie")
         expected = "has unreadable or mixed movie assets:"
     done = gates["run"](outdir=gates["tmp"] / f"alpha-{failure}")
     assert done.returncode == 2 and expected in done.stderr

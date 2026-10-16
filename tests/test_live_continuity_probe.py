@@ -12628,6 +12628,7 @@ def test_feed_instrument_is_registered_before_navigation(plan_sha: str, offset: 
     with pytest.raises(RuntimeError, match="not installed before page scripts"):
         probe.drive_and_sample(absent, feed_facts=facts)
 
+
 def test_feed_variant_patches_the_host_binding_and_reports_the_variant_sha(monkeypatch: pytest.MonkeyPatch) -> None:
     original_script = lambda *, continuous, once: f"source:{continuous}:{once}"
     original_sha = lambda: "a" * 64
