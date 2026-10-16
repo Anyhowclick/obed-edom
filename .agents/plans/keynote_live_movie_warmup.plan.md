@@ -1,12 +1,28 @@
 # Alpha Keynote live: one-shot movie warm-up at deck load
 
-**r3 · 2026-10-16 · awaiting owner approval · implementation not started**
+**r3 · 2026-10-16 · implemented and merged into `claude/stage-b-arch` (#295, `19cb4eae`)**
 
-## History
-- **r1:** GPT-6 Astra high planner (`.agents/reviews/movie-warmup-2026-10-16/plan-r1-astra.md`).
-- **r2:** coordinator folds of critique r1 (Opus 5.5 high, NOT READY: 1 blocker, 3 mediums).
-- **r3:** a clean rewrite that folds critique r2 (Opus 5.5 high, NOT READY: 3 mediums on stale r1 text; design
-  confirmed). The critique records are in the same folder.
+Acceptance numbers: `.agents/reviews/movie-warmup-2026-10-16/acceptance-record.md`.
+
+## Review log
+- **Plan r1:** GPT-6 Astra high planner.
+- **Critique r1** (Opus 5.5 high): NOT READY.
+  - Blocker: the suite commands would wipe the `.venv`.
+  - Mediums: the ordering rationale was overstated (pre-core injection is evidence hygiene, not retention); the
+    plan was over-built; gate discipline was missing.
+  - Lows: URL derivation, invalid env value should raise, honest hash test.
+  - All folded into r2.
+- **Critique r2** (Opus 5.5 high): NOT READY on stale r1 text only; design confirmed. Folded into r3, a clean
+  rewrite (pinned-worktree A5, mandatory snapshot readiness field, Node test included, `None` paths).
+- **Implementation:** Codex GPT-5.6 Sol high (`41800609`).
+- **Code review r1** (Opus 5.5 high): APPROVE.
+  - Five LOW findings folded: pin the embedded URL literal, log after the codec census, guarded observe log,
+    simpler readiness check. A fifth, extra env hygiene in `host()`, was kept as is.
+- **Acceptance:**
+  - A1 pass; A2 pass (212 → 17 ms); A4 pass (282 → 60 ms).
+  - A3 unscorable on the base (`47bc3698` starts paint at decode).
+  - A5: on/off gate rounds identical bar flakes. Suites pass bar a timing flake, since fixed on the base.
+  - Revalidated after the rebase onto `7746df27`.
 
 **This file is self-contained. Nothing in r1 applies unless it is restated here.**
 
