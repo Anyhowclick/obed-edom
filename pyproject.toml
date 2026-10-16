@@ -69,5 +69,3 @@ obed_edom = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 markers = ["deck: needs a local operator .key"]
-tmp_path_retention_policy = "failed"
-tmp_path_retention_count = 1
