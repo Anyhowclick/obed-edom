@@ -1,5 +1,7 @@
 # Suite speed-up → Stage B rebase notes (2026-10-16)
 
+Done: ported onto 15fa7c41 as `claude/stage-b-arch-speedup` (6adaa752 + fcd2b2ef); Stage B fast-forwards to it.
+
 For the Stage B session rebasing `claude/stage-b-arch` onto main after the suite speed-up PR merges. Plan:
 `.agents/plans/suite_speedup.plan.md`. Conflict hot spots: `scripts/run_gates.sh` and `tests/test_run_gates.py`. The
 other files the speed-up touches don't conflict with Stage B as of 7746df27:
@@ -52,6 +54,8 @@ other files the speed-up touches don't conflict with Stage B as of 7746df27:
   - load-stays-low
   - empty-outdir accepted
   - the prewarm test's second (cache-hit) run
+  - Exception on Stage B: the empty-outdir control stays full tier, because it also checks the mm-feed staging, which
+    only a full-tier round launches (ported as fcd2b2ef on `claude/stage-b-arch-speedup`).
 - **Launch-order oracles.**
   - `_full_launch_stems()` is the exact full-round launch sequence; Stage B must add its mm-feed stems there.
   - `FULL_P2_LAUNCH_ARMS` and `DEV_P2_LAUNCH_ARMS` hold the P2 launch order.
