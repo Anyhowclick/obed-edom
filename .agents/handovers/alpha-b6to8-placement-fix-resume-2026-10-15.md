@@ -22,7 +22,7 @@ after this commit.
    rounds (r1/r2 READY).
 4. Optional: the r2 low on the doc line's double parenthetical (moves the sha again; only together with another re-pin).
 
-5. **Queued: noRider headless A/B** (owner go, relayed by the Restructure session 2026-10-15: "do the dedicated
+5. **DONE 2026-10-16 (findings in the gate record): noRider headless A/B** (owner go, relayed by the Restructure session 2026-10-15: "do the dedicated
    headless A/B before Q7 attempt 4"). Diagnosis only: no product edits without a further owner go. Not started, because
    the owner paused this session for the night.
    - **Question:** why `noRiderAboveCanvas` reads False on Alpha b5to6, Alpha b7to8-wa0121 and D7 b0to1 a/b, with

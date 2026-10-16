@@ -91,3 +91,52 @@ arm); `labelsOverFeed` True; ambiguous ×4 / remount-done ×4 / departure-interi
 2. **Owner decision (spec step 5, untouched by this fix):** in every arm, decoders ride on body#body during the scene-9/13
    transitions, and `noRiderAboveCanvas` is False on b5to6 and b7to8-wa0121. The Restructure session is asking the owner.
 3. **Live check by the owner in Q7 attempt 4:** the slide 8–9 videos keep moving and the labels stay on top.
+
+## noRider headless A/B (2026-10-16, diagnosis only)
+Owner go relayed by the Restructure session: "do the dedicated headless A/B before Q7 attempt 4".
+Evidence: `output/evidence/stage-b-2026-10-13/norider-ab/` (`riders-summary.txt`, `riders-summary-fix-ab.txt`,
+`*.verdicts.json`, `uptime.txt`, `repro/`).
+
+**Setup**
+- Harness: `repro/run_dbg.py`, run one Chrome at a time. Load was 1.8–3.1.
+- `CAPTURE=on` leaves the pre-move `capture()` guard unpatched.
+- Every arm ran with the feed on.
+- The fix-ab artifacts from 2026-10-15 (capture off) were re-read with the same per-frame rider script.
+
+**Rider offenders, as (move-frame index, GL draws in that frame)**
+
+| Core | Capture | Alpha b5to6 / b7to8-wa0121 | D7 b0to1 a/b |
+|---|---|---|---|
+| 4c917be4 (pre-departure-fix, 03a35b28) | on | none / none | none |
+| 4c917be4 | off | none / none | none |
+| 302c218d | on | (0,0)(1,0) / (0,0)(1,0) | (0,0)(1,0) |
+| 302c218d | off (fix-ab) | (0,0) / (0,0)(1,0) | (0,0)(1,0) |
+| 838eeedf | on | (0,0)(1,0) / (0,0)(1,0) | (0,0)(1,0) |
+| 838eeedf | off (fix-ab) | (0,0) / (0,0)(1,0) | (0,0) |
+| departure-early-hide control | off | n/a | none |
+| overlay-ride control | off | (0,0)(1,5)(2,5)… on every carry | n/a |
+
+**Root cause: an instrument artefact around a designed behaviour; not a regression, not caused by capture, not caused by the placement fix.**
+- Every offender is one of the first one or two move frames, and in each of them GL has drawn nothing yet (`draws=0`).
+- In those frames the departure fix (af3edf73 + a538cf7f) holds the decoder visible in its source slot on purpose:
+  - `deferDepartureHide`: `src/obed_edom/live_continuity_js.py:846`
+  - `lingerFeed` sets opacity 1 while waiting for GL: `:1404-1408`
+  - `finishDepartureHides` hides it after the first feed advance: `:857-879`
+- The rider census counts any frame where the decoder is visible and overlaps the canvas. It doesn't check whether GL has
+  painted that frame, or the stacking order: `collectRiders` in `scripts/mm_feed_instrument.py:395-397`, scored by
+  `score_no_rider_above_canvas` at `:892-905`.
+- Pre-move capture has no effect: the offenders are identical with capture on and off.
+- The overlay-ride red control still separates: its offenders continue into frames where GL is drawing.
+
+**The `#body` rides during the scene-9/13 transitions are invisible on the fixed core.**
+- DOM-recorder rows on `body#body` (Alpha `*-dbg.json`) are at opacity 0 on 7fd84c8e and 838eeedf, for both feed on and off.
+- The only visible `#body` rows are on 302c218d (scenes 12 and 14). That is the placement bug this fix removes.
+
+**Run caveats**
+- The Alpha capture-on runs were marked invalid: "1 unplanned loop wrap; retake". The rider census is complete.
+- D7 b0to1 reads inconclusive:
+  - on the departure-fixed cores, because of this same noRider False;
+  - on 4c917be4, because `handbackContinuity` fails (the old core).
+
+**Owner decision:** whether the census should exclude move frames before the entry's first GL draw, or score stacking
+order. That is an instrument change; the product is unchanged.
