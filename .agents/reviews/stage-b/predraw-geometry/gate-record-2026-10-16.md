@@ -59,10 +59,13 @@ The tables below come from f9cdc159 and 2966a19d. **The final set on 9d5cf850 (`
 - D7 `feedLive` is None on every carry, both here and in a 7746df27 baseline (D7 ×2, Alpha ×1, `val/base/`). It predates this work.
 - One D7 b0to1-b `handbackContinuity` miss (pos-1920-2), and the Step 0 Alpha b7to8 `handbackContinuity`/`feedLive` miss at 533f88d5. Both are recorded timing variance (gate-record-2026-10-15); the baseline and the other runs are clean.
 
-## Suites (2966a19d)
-- 3.12: `uv run pytest tests/ -n auto --dist worksteal -rs`, **11233 passed, 88 skipped, 1 xfailed** (9:22). The skips are the worktree's sermon-outline fixtures and JXA/deck caches; none are in the changed test files.
-- 3.10 floor: SUITE310
-- Dashboard: DASHBOARD
+## Suites (005d5187: 1b49f801 + gate record, merged with origin/claude/stage-b-arch-speedup fcd2b2ef)
+- Merge conflict in `tests/test_run_gates.py`. Resolved to the speed-up's structure, with the MM feed arm count at 29 (this branch adds 2). `tests/test_run_gates.py`: 122 passed.
+- 3.12: `uv run pytest tests/ -n auto --dist worksteal -rs`, **11257 passed, 88 skipped, 1 xfailed** (3:26).
+- 3.10 floor (separate venv, all extras): **11257 passed, 88 skipped, 1 xfailed** (2:45).
+- Skips: the worktree's sermon-outline fixtures and JXA/deck caches; none in the changed test files.
+- Dashboard: `test:ui` 331/331; `test:maps` 542/542, then perf 2/2.
+- Earlier tries: a 3.12 pass at 2966a19d (11233 passed), and a 3.10 run spoiled by a peer's pytest `tmp_path_retention_count = 1`. That setting deleted live basetemps, and it has been reverted in that branch (26644ec2).
 
 ## Not done / follow-ups
 - Tighten `PRE_DRAW_GRACE_MS` after F4 lands, from completion-time (`firstDrawAt`) distributions.
