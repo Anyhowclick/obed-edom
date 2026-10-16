@@ -1,73 +1,48 @@
-# Handover: Stage B instrument restructure (resume after 2026-10-16)
+# Handover: Stage B instrument restructure (updated 2026-10-16 evening)
 
-The coordinator session stopped on 2026-10-16 at the owner's request. This file supersedes the "Resume here" sections of
-`stage-b-implementation-2026-10-15.md` and `alpha-b3to4-stall-2026-10-15.md`.
+**Coordinator (owner 2026-10-16):** session `local_4b825e27-26e0-4d7b-a4af-de1cc7d9d4c2`, worktree
+`funny-pasteur-751a72`; merges happen in worktree `stage-b-coord` (on `claude/stage-b-arch`). The old "Stage B
+Restructure" session is retired. This file supersedes the "Resume here" sections of `stage-b-implementation-2026-10-15.md`
+and `alpha-b3to4-stall-2026-10-15.md`.
 
 ## Resume here
 
-**FIRST THING ON RESUME (owner 2026-10-16): run the C1 tests.**
-The coordinator stopped as soon as Sol finished C1's probe side, so the committed C1 WIP on `claude/stage-b-c1` has NOT been tested by the coordinator.
-In the coordinator worktree, check out `claude/stage-b-c1`, then:
-```
-.venv/bin/python -m pytest tests/test_mm_feed_instrument.py tests/test_live_continuity_probe.py tests/test_managed_obs_qualify.py tests/test_detach_experiment.py tests/test_binary_counter_movie.py tests/test_live_evidence_contract.py tests/test_obs_cadence_decode.py -q -p no:cacheprovider -n 2
-```
-Before Sol's probe-side step, stream F alone gave 2455 passed and 1 failed (the old probe fake-GL test, which that step deletes). Investigate any failure at its root, then continue with the C1 next steps below.
+**Where things are** (`claude/stage-b-arch` @ `33cb7729`, pushed)
+- Merged today: C2 offline validity (`61b8082d`), gate 4 historical inventory (`733cd70f`), the Chrome rule (any 155.x,
+  one build per round, plan §4 amended; `749b63a0`), the Chrome 155.0.8059.80 requal record (`69c84865`), and **C1**
+  (`33cb7729`: review r1/r2/r3 READY, records `c1-review-r1..r3.md`).
+- Full suites on the C1 tree: 3.13 and 3.10 both 11366 passed / 38 skipped / 1 xfailed.
+- A fresh worktree needs the main checkout's git-ignored fixtures symlinked (`output/{bank,evidence,fixtures}`,
+  `Sermon Outlines/*.docx`) or ~50 extra tests skip (88 vs 38).
 
-**Where things are**
-- Coordinator worktree: `.claude/worktrees/inspiring-feynman-06914e`.
-- **`claude/stage-b-arch`** is pushed to origin and holds only reviewed work. It contains:
-  - C6 and its r3 fold;
-  - the Alpha placement fix and the noRider A/B;
-  - the pre-draw rider exemption: the Python bounds (`5422f4ec`, `7746df27`) and the geometry check (merge `1a421de2`, cleanup `397a26c9`);
-  - F4 movie warm-up (#295, #296);
-  - main, including #294, and the suite speed-up port (#297; `6adaa752`, `fcd2b2ef`, merge `4e8444a6`);
-  - the settle-wait test fix (`1a56be4c`);
-  - the C1 timing record (`b9f2340a`).
-- Full suites on `1a421de2`: 11311 passed / 38 skipped / 1 xfailed, on both 3.13 (157 s) and 3.10 (192 s).
-- **C1 is UNREVIEWED and on its own local branch, `claude/stage-b-c1`** (not pushed). See C1 below.
-- Env: the worktree `.venv` (3.13), and the 3.10 floor in the session scratchpad `venv310` (re-create it with `UV_PROJECT_ENVIRONMENT=<scratch>/venv310 uv sync --frozen --all-extras --all-groups --python 3.10`).
+**C1 gate 2** (`.agents/reviews/stage-b/instrument-restructure/c1-gate2-record.md`)
+- Timing PASS: `callbackCostP95Ms` 106–109 → 3.0–3.7 ms; scene 8/10/12 medians 100/100/200 → 33/17/33 ms.
+- **OPEN, due before gate 5a (owner 2026-10-16):** the feed-control colours and the holdMatch/poster positive/red
+  separation are not re-proved, and the D1 counter-policy obligations (D7 crossfade/from-only, at least one positive GL
+  counter decode) are open. All 25 MM-FEED arms fail in a full run_gates round, identically on the pre-C1 tree:
+  D7/D7s `feedLive` None (GL counter `coveredByLaterDraw`, flat 66.7 levels; F4 item 2, not a cost effect), and every
+  Alpha_DSK carry INCONCLUSIVE on the gate's repaired fixture ("movie never decoded" / "core feed seam did not identify a
+  feed or departure mode"; the q7 Alpha fixture scores normally). Diagnosis session: "Diagnose Stage B MM-FEED baseline
+  failures" (`local_6bc69277-054d-426a-b337-94574bac08fe`), on the C1 tree; it hands back before fixing.
+- Every host, P2, Pass G and carry-cover gate MATCHed in that round (wall 1251 s at GATE_JOBS=3).
 
-**Read first**
-- Plan: `.agents/plans/keynote_live_continuity_stage_b_instrument_restructure.plan.md` (r3, owner-approved), §3 (C1), §5 (C3), §9 streams, §10 gates.
-- C1 timing: `.agents/reviews/stage-b/instrument-restructure/c1-timing-split.md`.
-
-**C1: bounded sampling (plan §3)**
-- **Timing split: done.** `willReadFrequently:true` is the observer effect: a CPU-backed canvas makes about 115 ms drawImage stalls, and head runs show `callbackCostP95Ms` 113–116 ms with scene 8/10/12 medians of 100/100/200 ms.
-- Only **one 192 px draw + one read with `willReadFrequently:false`** meets the targets: p95 2.5 ms and medians of 33/17/33 ms.
-- The counter decodes identically (483/483). The patch vectors differ by up to 113.
-- **Implementation (UNREVIEWED), on `claude/stage-b-c1`:** Codex GPT-5.6 Sol high implemented it.
-  - Stream F: `sample()`/`decodeCounter()`, the layout from `binary_counter_movie.layout()`, the shared Python decoder in `obs_cadence_decode.py`, the 18-reference ring, `report()` shutdown, the contract patch, and a new `tests/test_mm_feed_instrument.py`.
-  - The tiny P side: the probe passes `counterLayout`, and the old probe fake-GL test (`test_instrument_js_runs_realistic_fake_gl_end_to_end`) is deleted after its assertions moved to the new file.
-  - WIP commit `b77ae598`. Sol's briefs and reports are in `output/evidence/stage-b-2026-10-13/c1-timing/sol-reports/`.
-- **C1 next steps:**
-  1. Opus 5.5 high review, in rounds 1–3, folding all severities.
-  2. Fresh paired Alpha captures (gate 2). Measure `callbackCostP95Ms` ≤ ~4 ms and scene medians ≤ 33 ms.
-  3. **Re-prove the holdMatch/poster positive/red separation.** The GL vector footprint now follows the 192 px source grid. Thresholds are unchanged; change them only on demonstrated separation.
-  4. Full suites.
-  5. Merge into `claude/stage-b-arch`. Expect a small probe/probe-test merge against C3.
-- Then delete `claude/stage-b-c1-unbriefed` (`0abf8772`); its ideas are reused and justified by the timing split.
-- Timing harness (reusable): `output/evidence/stage-b-2026-10-13/c1-timing/harness/`. It contains `variant_builder.py`, `run.sh`, `summarize.py` and `matrix.txt`. `run_probe_c1.py` pins the worktree HEAD, so re-pin it before reuse. Results summary: `output/evidence/stage-b-2026-10-13/c1-timing/`.
-
-**C3: phases and carry windows (plan §5), running in parallel**
-- Session "Stage B C3: arm-wide phases, carry windows" (`local_a393024c-7f20-4969-9cdf-f4fe6eec32ab`), branch `claude/stage-b-c3-adadcc`, worktree `distracted-cartwright-b450e1`.
-- r1 is in progress:
-  - **Blocker:** registered no-pin-hold/strip reds turn None for carries with `transitionScene` None. The fix is in progress.
-  - Fold: `score_continuity` excuses owner/rect rows inside the GL interval but not `missingSamples`. That is why Alpha arm A b6to7/b7to8 wa0125 read carry=False in all 10 C1 runs on `1a421de2`; the old instruments read None there. C3 is folding "a decoder absent inside a valid under-artwork glInterval is not a missing sample".
-- C3 also closes F4's A3 item: the slide-entry poster exposure becomes visible as REPORT-only `entryColdStart`.
-- It hands back to the coordinator, who merges; it never pushes `claude/stage-b-arch` itself.
+**C3** (session `local_a393024c-7f20-4969-9cdf-f4fe6eec32ab`, branch `claude/stage-b-c3-adadcc`): fold rounds r4/r5 in
+progress; it merges `claude/stage-b-arch` (now with C1: expect a small probe/probe-test merge), runs full suites in a
+window, then hands back. The Alpha arm A b6to7/b7to8 `wa0125` carry=False (`missingSamples` inside the glInterval)
+reproduces on both trees; C3's GL excuse fixes it.
 
 **Next, in order (plan)**
-C1 review/captures/merge and C3 merge → C2 → bounded C4 → C5 → C10 audit → **gate 5a (owner: Q1 host rows, Q2 cadence statistic, historical INVALID list)** → 6a full suites → gates 7–15 → Q7 attempt 4 (the owner's live check).
-- C2: validity (`live_run_validity.py`, stream V; a new file).
-  - The environment and host table can start any time.
-  - The cost gate now has C1 measurements.
-  - Gate 4's historical impact inventory is offline and pairs with it. It was proposed to the owner as a parallel session; no answer yet.
-- C4 (stream F, the same file as C1) follows C1.
+C3 merge → MM-FEED baseline fix + C1 separation re-proof → bounded C4 (stream F, same file as C1) → C5 → C10 audit →
+**gate 5a (owner: Q1 host rows, Q2 cadence statistic, gate 4's historical list and its decisions 2–5)** → 6a full
+suites → gates 7–15 → Q7 attempt 4 (the owner's live check).
 
 **Open items carried**
-- F4 (2): D7/D7s feedLive None (`coveredByLaterDraw`; pre-move capture ~128 ms). Probably the same `willReadFrequently` cost; re-check after C1.
-- F4 (3): the Alpha b5to6 / b7to8:wa0121 flips. In 12 C1 runs, b5to6 flipped once (single-96); b7to8:wa0121 was stable True. Re-check after C1 + C3.
-- `PRE_DRAW_GRACE_MS` = 320 ms. The warm-up doesn't shorten the 2-frame MM prefix, and the D7 controls reached 306.5 ms: a thin margin, and widening it is the owner's call.
+- F4 (2): D7/D7s feedLive None: coverage, not cost (see C1 gate 2). In the diagnosis session.
+- F4 (3): the Alpha b5to6 / b7to8:wa0121 flips. Re-check after C3.
+- `PRE_DRAW_GRACE_MS` = 320 ms: thin margin (D7 controls 306.5 ms); widening it is the owner's call.
+- C2 integration items (`c2-offline-gate-record.md` §Open): hook names, `gl_intervals`, attach profile field, probe
+  imports host kinds from `live_run_validity`.
+- Kernel measured only at the integer 10× downscale; non-integer ratios rely on the separation re-proof.
 
 **Roster** (until 2026-10-27; memory `feedback-delegate-implementation`)
 - Codex GPT-5.6 Sol high implements: `codex exec -m gpt-5.6-sol -c model_reasoning_effort=high -s workspace-write -c 'sandbox_workspace_write.writable_roots=["<scratch>"]' -C <worktree> -o <report> "<brief>" < /dev/null`.
@@ -87,6 +62,11 @@ C1 review/captures/merge and C3 merge → C2 → bounded C4 → C5 → C10 audit
   - Saves about 35 s of wall time per round.
 
 ## Owner decisions (2026-10-15/16)
+- 2026-10-16: requalify Chrome 155.0.8059.80; minor/patch builds auto-qualify (any build in a qualified major, one
+  build per round, recorded per run).
+- 2026-10-16: the coordinator role moves to this session; the old coordinator is retired.
+- 2026-10-16: MM-FEED arms need to pass on the post-C1 tree only; merge C1 after full suites, with the feed-colour and
+  holdMatch/poster separation proof open before gate 5a.
 - Scope C6, C1, C2, C3, C4-slice, C5, C10-audit approved; plan r3 approved.
 - C3 runs in parallel with C1, in its own session.
 - C4 keeps the report-wide producer-error rule.
@@ -112,4 +92,4 @@ C1 review/captures/merge and C3 merge → C2 → bounded C4 → C5 → C10 audit
 ## Machine
 - One heavy job machine-wide (full suites, gate rounds, captures). Send "need window" / "done" to the linked sessions.
 - At most 3 headless Chromes. Record uptime.
-- Chrome 155.0.8059.79.
+- Chrome 155.0.8059.80 (auto-updated 2026-10-16 08:53; requalified).
