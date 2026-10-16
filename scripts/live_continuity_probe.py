@@ -2564,8 +2564,6 @@ def _carry_window_problem(carry: Mapping[str, Any]) -> tuple[str, dict[str, Any]
         return "boundary crossing not observed in samples", {"unplaced": reasons["boundary crossing has an unplaced row after sampling began"]}
     if "boundary crossing not observed" in reasons:
         return "boundary crossing not observed in samples", {}
-    if "source settled at the transition scene's initial state is not interpreted" in reasons:
-        return "source settled at the transition scene's initial state is not interpreted", {}
     if "carried decoder never decoded on the settled source" in reasons:
         return "carried decoder never decoded on the settled source", {}
     if reasons:
@@ -2597,9 +2595,8 @@ def score_continuity(
     phases: paint_instrument.Phases | None = None,
     spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Pure: samples in, verdict dict out. Scores continuity of ONE tracked decoder
-    across `boundary_scene`, evaluated only within the crossing window (reviewer
-    finding #1), requiring (all within the window):
+    """Pure: samples in, verdict dict out. Scores one decoder over the decoded-source
+    carry window through `boundary_scene`, requiring:
       - the same element id present in every sampled frame in the window;
       - when `runtime_installed`, every after-cut sample reports that element (by
         the continuity runtime's own `footprintOwnerDecoderId`) as footprint owner;
@@ -2611,14 +2608,14 @@ def score_continuity(
       - total clock advance within the window at least `min_advance_s`.
     With `loop_period_s`, the clock is unwrapped across loop wraps (`unwrap_clock`) before
     the drop, stall and advance checks, and `wraps` is reported; `None` is the strict clock.
-    `min_window_start` is the forced-seek floor, distinct from the plan's chain bounds.
+    `min_window_start` is the forced-seek floor and disables the plan's chain bounds.
     Schema-2 rows (`seq`) are also scored per frame (`carry_paint`) unless `paint` is False, on
     every exit once the window is known (the no-spanning-decoder False included): a failing paint
     score is False and an incomplete one makes the verdict None, whatever the legacy checks said.
+    GL-interval rows are excluded only from the checks explicitly counted as GL excuses.
     Any row whose phase is unreadable (`phase_unreadable`, the source scene's settle state included
-    when a transition's or the paint's grounding reads it) in the window before its chain clip, or
-    anywhere back to the source slide's predecessor (where the window's, the clip's or the paint's
-    grounding would reach had it been placed), or that could have grounded the window earlier
+    when a transition's or the paint's grounding reads it) in the window or anywhere back through
+    the decoded source's predecessor, or that could have grounded the window earlier
     (`paint_instrument.carry_window`), is INCONCLUSIVE, never dropped from the before/after partition or from
     grounding; so is a tracked decoder's row there whose source no longer names the asset
     (`unnamed_rows`, identity before source), or an untracked decoding row that names no source
@@ -2633,8 +2630,6 @@ def score_continuity(
     if not decoded_anywhere(tracks):
         return {"verdict": None, "reason": "inconclusive: movie never decoded"}
     carry_spec = _carry_spec(asset, boundary_scene, transition_scene, spec)
-    if min_window_start is not None:
-        carry_spec.pop("untilScene", None)
     phases = phases if phases is not None else paint_instrument.read_phases(samples, {"verdicts": [carry_spec]})
     forced_seek = None
     if min_window_start is not None:
@@ -2676,10 +2671,12 @@ def score_continuity(
     }
     windowed = {element_id: rows for element_id, rows in windowed.items() if rows}
     source = (boundary_scene if transition_scene is None else transition_scene) - 1
-    prior = [s["t"] for s in samples if (scene := _finite_number(s.get("scene"))) is not None and scene < source]
+    requested_source = _finite_number(carry_spec.get("sourceScene"))
+    source_start = requested_source if requested_source is not None and requested_source <= source else source
+    prior = [s["t"] for s in samples if (scene := _finite_number(s.get("scene"))) is not None and scene < source_start]
     crossing = carry["crossing"]
     forced_floor = min_window_start if min_window_start is not None else -math.inf
-    reach = min(crossing["start"], max(max(prior, default=-math.inf), forced_floor))
+    reach = min(window["start"], crossing["start"], max(max(prior, default=-math.inf), forced_floor))
     grounded = transition_scene is not None or (paint and any("seq" in sample for sample in samples))
     unplaced = [
         {"t": s["t"], "reason": why} for s in samples
@@ -8174,7 +8171,6 @@ def forced_window(
     spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     carry_spec = _carry_spec(asset, boundary_scene, transition_scene, spec)
-    carry_spec.pop("untilScene", None)
     phases = phases if phases is not None else paint_instrument.read_phases(samples, {"verdicts": [carry_spec]})
     carry = paint_instrument.carry_window(phases, carry_spec, forced_seek={"seekedT": seeked_t})
     if carry.get("crossing") is None or any(
@@ -8197,10 +8193,7 @@ def forced_window(
     candidate = _finite_number(carry.get("candidateStart"))
     return {
         "start": max(forced["start"], candidate if candidate is not None else -math.inf),
-        "end": min(
-            crossing["end"],
-            _finite_number((carry.get("chainClip") or {}).get("end")) or math.inf,
-        ),
+        "end": crossing["end"],
         "lastBeforeT": crossing["lastBeforeT"],
         "firstAfterT": crossing["firstAfterT"],
         "groundedStart": candidate,
@@ -8558,7 +8551,6 @@ def score_force_wrap_run(result: dict[str, Any], gt: dict[str, Any], boundary: s
          if spec.get("kind") == "carry" and spec.get("atScene") == scene),
         {"kind": "carry", "asset": facts["asset"], "atScene": scene, "transitionScene": gt["transition"]},
     ))
-    carry_spec.pop("untilScene", None)
     phases = paint_instrument.read_phases(samples, arm_facts) if not schema_errors else None
     result["continuityVerdict"] = _inconclusive("sample schema is invalid", schemaErrors=schema_errors) if schema_errors else score_continuity(
         samples, facts["asset"], scene, gt["srcRect"], gt["dstRect"], installed, transition_scene=gt["transition"],
