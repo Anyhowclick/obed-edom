@@ -9368,6 +9368,7 @@ class TestChainCarryWindow:
     "gl-excused-missing", "differing-clocks", "schema2-visible-undecoded", "union-start",
     "prior-zero-rect-first-destination-decode", "pin-busy-first-decode",
     "alpha-zero-rect-cold-start", "hidden-prior-decode-loss", "gl-absent-decoder",
+    "gl-after-only-decoder",
     "multi-scene-build", "source-zero-rect-decode-loss", "cut-short-cold-start",
     "hidden-busy-entry-decode-loss",
 ])
@@ -9418,6 +9419,14 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
             videos = [video(
                 id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=zero,
             )] if scene == 0 else []
+            rows.append(sample(t, scene, *videos))
+    elif case == "gl-after-only-decoder":
+        rows = []
+        for index, scene in enumerate([0] * 10 + [1] * 40 + [2] * 40):
+            t = index * 20.0
+            videos = [video(
+                id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=dict(DST_RECT),
+            )] if scene == 2 else []
             rows.append(sample(t, scene, *videos))
     elif case == "never-decoded":
         for row in rows:
@@ -9611,7 +9620,7 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
     elif case == "hidden-prior-decode-loss":
         assert scored["verdict"] is False and scored["decodeLoss"]
         assert scored["window"]["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
-    elif case == "gl-absent-decoder":
+    elif case in ("gl-absent-decoder", "gl-after-only-decoder"):
         gl_interval = {"start": rows[25]["ts"] - 1.0, "end": rows[55]["ts"] + 1.0}
         scored = probe.score_continuity(
             rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
