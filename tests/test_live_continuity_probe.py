@@ -126,7 +126,10 @@ def video(
 
 def sample(t: float, scene: float | None, *videos: dict[str, Any], stage_map: Any = _UNSET) -> dict[str, Any]:
     resolved = IDENTITY_STAGE_MAP if stage_map is _UNSET else stage_map
-    return {"t": t, "scene": scene, "videos": list(videos), "stageMap": resolved}
+    return {
+        "t": t, "scene": scene, "playerState": "IdleAtFinalState", "busy": False,
+        "videos": list(videos), "stageMap": resolved,
+    }
 
 
 def rows_around_boundary(
@@ -286,7 +289,7 @@ class TestWindowedAdvance:
         # history above).
         freeze_frames = int((pad_ms + 500.0) / dt_ms)
         for _ in range(freeze_frames):
-            samples.append(sample(t, 1.9, video(id=1, el_id=1, t=t, scene=1.9, current_time=frozen_at, rect=dict(SRC_RECT))))
+            samples.append(sample(t, 1.0, video(id=1, el_id=1, t=t, scene=1.0, current_time=frozen_at, rect=dict(SRC_RECT))))
             t += dt_ms
         for _ in range(freeze_frames):
             samples.append(sample(t, 2.0, video(id=1, el_id=1, t=t, scene=2.0, current_time=frozen_at, rect=dict(DST_RECT))))
@@ -624,11 +627,11 @@ class TestMovingBoundary:
         result = probe.score_motion(rows, SRC_RECT, DST_RECT, probe.RECT_TOLERANCE_PX)
         assert "transition progress reverses" in result["errors"]
 
-    def test_transition_without_settled_source_evidence_fails(self) -> None:
+    def test_transition_without_settled_source_decode_is_inconclusive(self) -> None:
         samples = [row for row in moving_boundary_samples() if row["scene"] >= 7]
         result = score_moving_boundary(samples)
-        assert result["verdict"] is False
-        assert "settled source not observed" in result["motion"]["errors"]
+        assert result["verdict"] is None
+        assert result["reason"] == "inconclusive: carried decoder never decoded on the settled source"
 
     def test_static_same_asset_ghost_cannot_displace_actual_moving_owner(self) -> None:
         samples = moving_boundary_samples()
@@ -5960,8 +5963,17 @@ def _continuity_batteries() -> dict[str, tuple[list[dict[str, Any]], dict[str, A
     }
 
 
+def _without_c3_report_fields(value: Any) -> Any:
+    out = copy.deepcopy(value)
+    window = out.get("window") if isinstance(out, dict) else None
+    if isinstance(window, dict):
+        for key in ("groundedStart", "coldStart", "chainClip", "forcedSeek"):
+            window.pop(key, None)
+    return out
+
+
 class TestWrapAwareScorerDefaultIsLegacy:
-    """`loop_period_s=None` must be today's scorer byte-for-byte (L2 CvC, offline half)."""
+    """`loop_period_s=None` preserves the legacy judgement and non-C3 evidence."""
 
     @pytest.mark.skipif(LEGACY is None, reason=f"git history for {LEGACY_REV} is unavailable")
     @pytest.mark.parametrize("name", sorted(_continuity_batteries()))
@@ -5970,7 +5982,7 @@ class TestWrapAwareScorerDefaultIsLegacy:
         scene = 8 if kwargs else 2.0
         legacy = LEGACY.score_continuity(samples, ASSET, scene, SRC_RECT, DST_RECT, True, **kwargs)
         current = probe.score_continuity(samples, ASSET, scene, SRC_RECT, DST_RECT, True, loop_period_s=None, **kwargs)
-        assert json.dumps(current, sort_keys=True) == json.dumps(legacy, sort_keys=True)
+        assert json.dumps(_without_c3_report_fields(current), sort_keys=True) == json.dumps(legacy, sort_keys=True)
 
     @pytest.mark.skipif(LEGACY is None, reason=f"git history for {LEGACY_REV} is unavailable")
     def test_score_boundaries_default_matches_the_pre_loop_scorer(self) -> None:
@@ -5989,12 +6001,12 @@ class TestWrapAwareScorerDefaultIsLegacy:
         assert json.dumps(scored, sort_keys=True) == json.dumps(legacy, sort_keys=True)
 
     @pytest.mark.parametrize("name", sorted(_continuity_batteries()))
-    def test_none_adds_no_keys(self, name: str) -> None:
+    def test_none_adds_only_c3_window_report_keys(self, name: str) -> None:
         samples, kwargs = _continuity_batteries()[name]
         scene = 8 if kwargs else 2.0
         result = probe.score_continuity(samples, ASSET, scene, SRC_RECT, DST_RECT, True, **kwargs)
         assert "wraps" not in result and "wrapTimes" not in result
-        assert "groundedStart" not in (result.get("window") or {})
+        assert {"groundedStart", "coldStart"} <= set(result.get("window") or {})
 
 
 class TestWrapAwareScorer:
@@ -6298,13 +6310,6 @@ class TestRecorderClock:
         recorder = _fw_recorder(period=1.5, offset_ms=-600.0)
         result = probe.score_recorder_clock(recorder, _fw_window())
         assert result["verdict"] is False and result["wraps"] > 1
-
-    def test_forced_window_is_clipped_past_the_seek(self) -> None:
-        samples = rows_around_boundary(n_before=200, n_after=200)
-        window = probe.forced_window(samples, 2.0, None, seeked_t=1000.0)
-        assert window["start"] == 2000.0
-        assert window["groundedStart"] < window["start"]
-
 
 class TestScoreForcedWrap:
     def test_bridge_carry_holds_across_exactly_one_wrap(self) -> None:
@@ -6660,7 +6665,7 @@ class TestRunForceWrap:
         monkeypatch.setattr(probe, "check_no_leftover_chrome", lambda: "")
         monkeypatch.setattr(probe, "CLICK_DELAY_S", 0.0)
         monkeypatch.setattr(probe, "POST_ADVANCE_SETTLE_S", 0.0)
-        monkeypatch.setattr(probe, "forced_window", lambda *a: _fw_window())
+        monkeypatch.setattr(probe, "forced_window", lambda *a, **k: _fw_window())
         monkeypatch.setattr(probe, "sampler_record", lambda transport, rows: dict(_sampler_ok(), selfCheck={"ok": self_check}))
 
         args = probe.parse_args(["--force-wrap", "3to4:375", "--fixture", str(tmp_path)])
@@ -7375,7 +7380,7 @@ class TestCarryVerdict:
         assert {key: value["verdict"] for key, value in legacy.items()} == {
             "continue1to2": True, "restart2to3": True, "continue3to4": True,
         }
-        assert _plain(scored["continue3to4"]) == _plain(legacy["continue3to4"])
+        assert _plain(_without_c3_report_fields(scored["continue3to4"])) == _plain(legacy["continue3to4"])
         # S2 i1: the 1->2 window now stops before slide 2's own outgoing transition (scene 5).
         clipped = _plain(scored["continue1to2"])
         assert clipped["verdict"] is True and clipped["window"].pop("chainClipped") == {"end": legacy["continue1to2"]["window"]["end"]}
@@ -7390,7 +7395,8 @@ class TestCarryVerdict:
             loop_period_s=FW_PERIOD,
         )
         scored = probe.score_verdicts(_real_samples(), {}, facts, True, {"mode": "qualified"}, loop_period_s=FW_PERIOD)
-        assert scored[P2_CARRY34]["verdict"] is True and _plain(scored[P2_CARRY34]) == _plain(legacy)
+        assert scored[P2_CARRY34]["verdict"] is True
+        assert _plain(_without_c3_report_fields(scored[P2_CARRY34])) == _plain(legacy)
 
     def test_a_missing_crossing_is_inconclusive_not_red(self) -> None:
         """The Codex scenario: sampling stops before slide 4."""
@@ -9354,12 +9360,110 @@ class TestChainCarryWindow:
             next(r for r in I1["D1_A_samples"] if r["t"] == m["t"])["scene"] == 2 for m in after
         )
 
-    def test_a_spec_without_chain_fields_is_not_clipped(self) -> None:
-        assert probe.carry_window_clip(I1["D2_A_samples"], {"atScene": 2}) == (None, None)
 
-    def test_a_single_scene_destination_is_not_clipped_at_its_own_arrival(self) -> None:
-        rows = [{"t": 1.0, "scene": 2}, {"t": 2.0, "scene": 3}]
-        assert probe.carry_window_clip(rows, {"atScene": 2, "untilScene": 3, "sourceScene": 0}) == (1.0, None)
+@pytest.mark.parametrize("case", [
+    "alpha-cold-start", "d7-decoded-source", "never-decoded", "later-decode-loss",
+    "remount", "chain-clip", "forced-seek", "differing-clocks",
+])
+def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
+    boundary = 9 if case == "differing-clocks" else 2
+    rows = rows_around_boundary(boundary_scene=boundary, n_before=40, n_after=40, dt_ms=20.0, start_time=0.0)
+    for row in rows:
+        row["scene"] = int(row["scene"])
+    _v2(rows)
+    for row in rows:
+        row["hash"] = "#9" if case == "differing-clocks" else f"#{int(row['scene'])}"
+        row["nextSceneId"] = 9 if case == "differing-clocks" and row["scene"] == 8 else None
+        row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+        for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
+            pv.update(
+                elId=decoder["elId"], instance=None, paused=decoder["paused"], ended=decoder["ended"],
+                currentTime=decoder["currentTime"], clippedBy=None,
+            )
+    spec = {
+        "id": f"c3-{case}", "kind": "carry", "asset": ASSET, "atScene": boundary,
+        "transitionScene": None, "sourceScene": boundary - 1, "untilScene": None,
+        "srcRect": dict(SRC_RECT), "dstRect": dict(DST_RECT),
+        "fromPlayer": 0, "toPlayer": 1, "expect": True, "alias": None,
+    }
+    if case == "alpha-cold-start":
+        for row in rows[:15]:
+            row["videos"][0]["readyState"] = 1
+    elif case == "never-decoded":
+        for row in rows:
+            row["videos"][0]["readyState"] = 1
+    elif case == "later-decode-loss":
+        for row in rows[55:]:
+            row["videos"][0]["readyState"] = 1
+    elif case == "remount":
+        for row in rows[40:]:
+            row["videos"][0].update(id=2, elId=2)
+            row["videos"][0]["footprintOwner"]["elId"] = 2
+    elif case == "chain-clip":
+        spec["untilScene"] = 4
+        for index in range(10):
+            t = rows[-1]["t"] + 20.0
+            rows.append(sample(
+                t, 3,
+                video(id=1, el_id=1, t=t, scene=3, current_time=2.0 + index / 50, rect=dict(DST_RECT)),
+            ))
+        _v2(rows[-10:])
+        for offset, row in enumerate(rows[-10:], start=len(rows) - 9):
+            row["seq"] = offset
+            row["pp"]["seq"] = offset
+            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+            for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
+                pv.update(
+                    elId=decoder["elId"], instance=None, paused=decoder["paused"], ended=decoder["ended"],
+                    currentTime=decoder["currentTime"], clippedBy=None,
+                )
+
+    capture = {
+        "samples": rows, "sampleSpace": "authored", "sampler": {"schema": 2},
+        "continuity": {"mode": "qualified"}, "evidence": {},
+    }
+    arm = probe.score_arm(capture, {"verdicts": [spec]}, {})
+    scored = arm[spec["id"]]
+    cold = arm["entryColdStart"].get(1)
+    assert set(arm["verdicts"]) == {spec["id"]} and "entryColdStart" not in scored
+    if case == "alpha-cold-start":
+        assert scored["verdict"] is True
+        assert cold["durationMs"] == 300.0 and cold["rows"] == 15
+        assert scored["window"]["start"] == 300.0
+        assert scored["window"]["coldStart"] == {
+            "rows": 15, "durationMs": 300.0, "times": [0.0, 20.0, 40.0, 60.0, 80.0],
+        }
+    elif case in ("d7-decoded-source", "differing-clocks"):
+        assert scored["verdict"] is True
+        assert cold["durationMs"] == 0.0 and cold["rows"] == 0
+        assert "chainClipped" not in scored["window"]
+        if case == "differing-clocks":
+            assert arm["samples"][0]["scene"] == 8 and arm["samples"][0]["hash"] == "#9"
+    elif case == "never-decoded":
+        assert scored["verdict"] is None
+        assert scored["reason"] == "inconclusive: carried decoder never decoded on the settled source"
+        assert cold["firstDecodedT"] is None
+    elif case == "later-decode-loss":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+    elif case == "remount":
+        assert scored["verdict"] is not True
+    elif case == "chain-clip":
+        first_scene_3 = min(row["t"] for row in rows if row["scene"] == 3)
+        assert scored["verdict"] is True
+        assert scored["window"]["end"] < first_scene_3 and "end" in scored["window"]["chainClipped"]
+    else:
+        phases = probe.paint_instrument.read_phases(rows, {"verdicts": [spec]})
+        forced = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            min_window_start=300.0, phases=phases, spec=spec,
+        )
+        assert arm[spec["id"]]["verdict"] is True and forced["verdict"] is True
+        assert forced["window"]["start"] == 300.0
+        assert forced["window"]["forcedSeek"]["start"] == 300.0
+        recorder = probe.forced_window(
+            rows, boundary, None, -700.0, asset=ASSET, element_id=1, phases=phases, spec=spec,
+        )
+        assert recorder["start"] == 300.0 and recorder["groundedStart"] == 0.0
 
 
 class TestRetireHandback:
@@ -10429,25 +10533,6 @@ class TestCarryPaintWiring:
             row["pp"]["videos"][0].update(opacity=1.0, hiding=None)
         assert probe.score_continuity(*args)["verdict"] is True
 
-    @pytest.mark.parametrize(("decoded_from", "floor", "expected"), [
-        pytest.param(0, None, 0.0, id="a-pin-transition-longer-than-the-pad-is-covered-from-the-settled-source"),
-        pytest.param(50, None, 800.0, id="never-before-the-first-decode-no-initial-load-false-red"),
-        pytest.param(200, None, 1184.0, id="no-decoded-settled-source-keeps-the-window-start"),
-        pytest.param(0, 1500.0, 1500.0, id="never-before-the-chain-clip"),
-    ])
-    def test_paint_start_is_grounded_at_the_first_decoded_settled_source_row(
-        self, decoded_from: int, floor: float | None, expected: float,
-    ) -> None:
-        """Plan §3.5: paintStart = max(clip, min(window.start, t0)), t0 the first settled row of
-        scene atScene-1 on which the carried decoder has readyState >= 2."""
-        samples = rows_around_boundary(n_before=200)
-        for index, row in enumerate(samples[:200]):
-            row["busy"] = False
-            row["videos"][0]["readyState"] = 4 if index >= decoded_from else 0
-        window = probe.find_boundary_window(samples, 2.0)
-        assert window["start"] == 1184.0
-        assert probe.paint_start(samples, 1, 2.0, window, floor) == expected
-
     @pytest.mark.parametrize(("source_frames", "fresh_from", "expected"), [
         (5, 6, {"frames": 1, "ms": 16.0, "t0": 80.0, "t1": 96.0}),
         (5, 7, {"frames": 2, "ms": 32.0, "t0": 80.0, "t1": 112.0}),
@@ -11272,10 +11357,12 @@ class TestFold5IdentityBeforeSourceAndGrounding:
         assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
 
     @pytest.mark.parametrize(("unplaced", "expected"), [
-        (False, False),
+        (False, True),
         (True, None),  # inv R10: an unreadable scene moved the chain clip's start past the missing sample
     ])
-    def test_chain_clip_validates_the_rows_it_could_start_at(self, unplaced: bool, expected: bool | None) -> None:
+    def test_chain_clip_reports_entry_absence_but_keeps_unplaced_rows_inconclusive(
+        self, unplaced: bool, expected: bool | None,
+    ) -> None:
         spec = {"asset": ASSET, "atScene": 3, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None,
                 "sourceScene": 1}
         assert probe.score_carry(_fold5_source_clip_samples(unplaced), spec, True)["verdict"] is expected
@@ -11714,15 +11801,6 @@ class TestFold5VerificationRound2:
         result = score_moving_boundary(lead + samples)
         assert result["verdict"] is expected
         assert result["window"]["start"] == 0.0
-
-    def test_paint_start_is_the_source_slides_own_visit(self) -> None:
-        samples = rows_around_boundary(n_before=200)
-        for row in samples[:200]:
-            row["busy"] = False
-        lead = [dict(copy.deepcopy(samples[0]), t=t, scene=scene) for t, scene in ((-200.0, 1.0), (-100.0, 0.0))]
-        window = probe.find_boundary_window(lead + samples, 2.0)
-        assert probe.paint_start(lead + samples, 1, 2.0, window, None) == 0.0
-
 
 class TestFold5VerificationRound3:
     """S2 fold5 verification round 3: identity is resolved by probe id before an untagged row, a null owner or
@@ -12221,18 +12299,20 @@ def test_gl_outer_settled_cadence_is_report_only_when_every_browser_frame_is_rea
         }
 
     monkeypatch.setattr(probe, "carry_paint", slow_settled)
+    carry = {
+        "glInterval": {"start": 150.0, "end": 250.0},
+        "glSegments": {1: [{"start": 0.0, "end": 100.0}, {"start": 300.0, "end": 300.0}]},
+    }
     scored = probe.carry_paint_outside_gl(
         rows, 1, ASSET, {"start": 0.0, "end": 300.0}, 8, SRC_RECT, DST_RECT,
-        transition_scene=7, rect_tolerance=2.0, floor=None, wrap_times=(),
-        gl_interval={"start": 150.0, "end": 250.0},
+        transition_scene=7, rect_tolerance=2.0, wrap_times=(), carry_window_data=carry,
     )
     assert scored["verdict"] is True
     assert all(row["settledCadenceReportOnly"] for row in scored["segments"])
     unreadable.append({"seq": 2})
     scored = probe.carry_paint_outside_gl(
         rows, 1, ASSET, {"start": 0.0, "end": 300.0}, 8, SRC_RECT, DST_RECT,
-        transition_scene=7, rect_tolerance=2.0, floor=None, wrap_times=(),
-        gl_interval={"start": 150.0, "end": 250.0},
+        transition_scene=7, rect_tolerance=2.0, wrap_times=(), carry_window_data=carry,
     )
     assert scored["verdict"] is None
 
@@ -12259,15 +12339,6 @@ def test_feed_off_expected_red_feed_live_does_not_red_the_under_artwork_aggregat
     assert scored["feedLive"]["verdict"] is False
     assert scored["verdict"] is True
     assert scored["reason"] is None
-
-
-def test_paint_start_begins_at_the_first_decoded_settled_source_frame() -> None:
-    samples = [
-        {"t": 1.0, "scene": 3, "busy": False, "videos": []},
-        {"t": 2.0, "scene": 4, "busy": False, "videos": [{"id": 7, "readyState": 1}]},
-        {"t": 3.0, "scene": 4, "busy": False, "videos": [{"id": 7, "readyState": 2}]},
-    ]
-    assert probe.paint_start(samples, 7, 5, {"start": 2.0, "end": 4.0}, None) == 3.0
 
 
 def _report_shaped_feed_fixture(mode: str = "continuous") -> tuple[dict[str, Any], dict[str, Any]]:

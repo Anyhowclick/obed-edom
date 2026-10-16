@@ -308,6 +308,8 @@ def sample_rows(rows: Any, *, schema: Any = None, path: str = "samples") -> Iter
             yield from _fields(row, "row", where, ROW_RUNTIME_FIELDS)
         elif any(present):
             yield f"row:runtime state partly absent at {where}"
+        if "nextSceneId" in row and not (row["nextSceneId"] is None or _count(row["nextSceneId"])):
+            yield f"row.nextSceneId at {where}"
         if "stageMap" not in row:
             yield f"row.stageMap:missing at {where}"
         else:
