@@ -4015,7 +4015,8 @@ a.pause();
 a.__inStage = false;
 detach(a);
 a.parentElement = null;
-const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once,
+  const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once,
+    rect: {{left: a.style.left, top: a.style.top, width: a.style.width, height: a.style.height}},
   parent: a.parentNode === sourceRoot ? 'source-root' : a.parentNode === bodyEl ? 'body' : 'other',
   order: sourceRoot.kids.map((node) => node.id || node.__obedInstance)}};
 {before_first}
@@ -4032,7 +4033,9 @@ glFrames.shift()(16);
 console.log(JSON.stringify({{
   {departure_interim}
   claimed, beforeDraw, emptyInside, afterEmptyCallback, insideBefore, insideAfter,
-  afterCallback: a.style.opacity, onBody: a.parentNode === bodyEl, frameCount: entry.framesFed,
+  afterCallback: a.style.opacity,
+  afterRect: {{left: a.style.left, top: a.style.top, width: a.style.width, height: a.style.height}},
+  onBody: a.parentNode === bodyEl, frameCount: entry.framesFed,
 }}));
 """,
         after_core=(
@@ -4046,11 +4049,17 @@ console.log(JSON.stringify({{
 def test_under_artwork_decoder_hides_after_the_first_fed_gl_callback_returns():
     result = _departure_hide("continuous", capture_departure_interim=True)
     departure_interim = result.pop("departureInterim")
+    after_rect = result.pop("afterRect")
     assert len(departure_interim) == 1
     assert departure_interim[0]["places"] == 1
+    assert {key: float(value.removesuffix("px")) for key, value in after_rect.items()} == pytest.approx(
+        {"left": 100, "top": 200, "width": 300, "height": 150}, abs=.01,
+    )
     assert result == {
         "claimed": True,
-        "beforeDraw": {"opacity": "1", "paused": False, "once": 0, "parent": "source-root",
+        "beforeDraw": {"opacity": "1", "paused": False, "once": 0,
+                       "rect": {"left": "100px", "top": "200px", "width": "300px", "height": "150px"},
+                       "parent": "source-root",
                        "order": ["layerSourceMovie", "A1-video", "layerSourceLabel"]},
         "emptyInside": "1",
         "afterEmptyCallback": "0",
@@ -4063,9 +4072,16 @@ def test_under_artwork_decoder_hides_after_the_first_fed_gl_callback_returns():
 
 
 def test_feed_off_once_decoder_holds_its_departure_frame_until_the_first_gl_draw():
-    assert _departure_hide("once") == {
+    result = _departure_hide("once")
+    after_rect = result.pop("afterRect")
+    assert {key: float(value.removesuffix("px")) for key, value in after_rect.items()} == pytest.approx(
+        {"left": 100, "top": 200, "width": 300, "height": 150}, abs=.01,
+    )
+    assert result == {
         "claimed": None,
-        "beforeDraw": {"opacity": "1", "paused": True, "once": 1, "parent": "source-root",
+        "beforeDraw": {"opacity": "1", "paused": True, "once": 1,
+                       "rect": {"left": "100px", "top": "200px", "width": "300px", "height": "150px"},
+                       "parent": "source-root",
                        "order": ["layerSourceMovie", "A1-video", "layerSourceLabel"]},
         "emptyInside": "1",
         "afterEmptyCallback": "1",
@@ -4085,6 +4101,22 @@ def test_stand_down_at_the_first_callback_hides_the_decoder_at_callback_end():
     assert result["afterCallback"] == "0"
     assert result["onBody"] is True
     assert result["frameCount"] == 0
+
+
+def test_startup_moved_decoder_restores_source_placement_after_the_first_draw(monkeypatch):
+    import continuity_core_variants as variants
+
+    from obed_edom import live_continuity_js
+
+    monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variants.variant_core("startup-moved-decoder"))
+    result = _departure_hide("continuous")
+    assert result["beforeDraw"]["rect"] == {
+        "left": "108px", "top": "200px", "width": "300px", "height": "150px",
+    }
+    assert {key: float(value.removesuffix("px")) for key, value in result["afterRect"].items()} == pytest.approx(
+        {"left": 100, "top": 200, "width": 300, "height": 150}, abs=.01,
+    )
+    assert result["onBody"] is True
 
 
 def test_under_artwork_bridge_holds_hidden_then_rehomes_without_loading_the_stub():

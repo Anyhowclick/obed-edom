@@ -33,6 +33,7 @@ VARIANTS: tuple[str, ...] = (
     "no-pause",
     "interim-delay",
     "departure-early-hide",
+    "startup-moved-decoder",
 )
 
 _POOL_PLANNED_ONLY = "    if (!armedPool && !poolable(v)) return;\n"
@@ -47,6 +48,25 @@ _POSTER_PAUSE = (
     "    try { v.pause(); } catch (e) {}\n"
 )
 _INTERIM_SCAN = "    interimScan(roots, performance.now());\n"
+_STARTUP_HOLD = """    if (waitForGl && (document.contains(v) || departureInterimPlace(v, boundary))) {
+      v.style.opacity = '1';
+      return true;
+    }
+"""
+_STARTUP_MOVED_DECODER = """    if (waitForGl && (document.contains(v) || departureInterimPlace(v, boundary))) {
+      const screenRect = toScreen(boundary.src.rect);
+      if (screenRect) {
+        beginMove(v);
+        if (v.parentNode !== stage) stage.appendChild(v);
+        v.style.left = (screenRect.x + 8) + 'px';
+        v.style.top = screenRect.y + 'px';
+        v.style.width = screenRect.w + 'px';
+        v.style.height = screenRect.h + 'px';
+      }
+      v.style.opacity = '1';
+      return true;
+    }
+"""
 _DEPARTURE_HIDE = """  function rideTransition(v, owner, boundary, rectAt, caller, hidden) {
     // The ride owns the decoder now: end any footprint hold, or it drags the
     // landed decoder back to the source slot once the hash settles (live D2).
@@ -179,6 +199,7 @@ _TRANSFORMS: dict[str, tuple[tuple[str, str], ...]] = {
         "    });\n",
     ),),
     "departure-early-hide": ((_DEPARTURE_HIDE, _DEPARTURE_EARLY_HIDE),),
+    "startup-moved-decoder": ((_STARTUP_HOLD, _STARTUP_MOVED_DECODER),),
 }
 
 

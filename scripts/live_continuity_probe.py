@@ -375,6 +375,7 @@ MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
     "mm-opacity-off": {"labelsOverFeed": False},
     "no-linger": {"handbackContinuity": False},
     "interim-delay": {},
+    "startup-moved-decoder": {"labelsOverFeed": True},
 }
 MM_FEED_STRIP_EXPECTATIONS = {
     (ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off"): (
@@ -1174,12 +1175,30 @@ def feed_fixture_required(args: argparse.Namespace) -> bool:
         args.mm_feed != "auto" or args.feed_tamper is not None or args.feed_variant is not None
         or args.feed_dwell is not None or args.hold_upload_kill_switch or args.mm_opacity == "off"
         or args.strip is not None or args.core_variant in {
-            "overlay-ride", "settle-on-stage", "no-pause", "interim-delay",
+            "overlay-ride", "settle-on-stage", "no-pause", "interim-delay", "startup-moved-decoder",
         }
     )
 
 
 def mm_feed_control_aggregate_problems(label: str, rows: Sequence[dict[str, Any]]) -> list[str]:
+    if label == "startup-moved-decoder":
+        rider_verdicts = [row.get("noRiderAboveCanvas") if isinstance(row, dict) else None for row in rows]
+        problems = [
+            f"row {index} startup-moved-decoder noRiderAboveCanvas is unreadable"
+            for index, rider in enumerate(rider_verdicts)
+            if not isinstance(rider, dict) or rider.get("verdict") is None
+        ]
+        separated = any(
+            rider.get("verdict") is False and any(
+                _finite_number(offender.get("sourceRectError")) is not None
+                and offender["sourceRectError"] > mm_feed_instrument.SOURCE_RECT_TOLERANCE_PX
+                for offender in rider.get("offenders") or [] if isinstance(offender, dict)
+            )
+            for rider in rider_verdicts if isinstance(rider, dict)
+        )
+        if not separated:
+            problems.append("startup-moved-decoder did not expose a geometry-backed rider in any row")
+        return problems
     handbacks = [row.get("handbackContinuity") for row in rows if isinstance(row, dict)]
     if label == "no-linger":
         problems = []

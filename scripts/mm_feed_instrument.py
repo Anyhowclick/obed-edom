@@ -15,6 +15,7 @@ RIDER_OPACITY_FLOOR = 0.02
 MAX_INTER_FEED_GAP_MS = 50.0
 # Provisional: covers the measured cold-start prefixes (max 315 ms); tighten after the deck-load warm-up.
 PRE_DRAW_GRACE_MS = 320.0
+SOURCE_RECT_TOLERANCE_PX = 1.0
 # Provisional: re-bank from Phase 0 headless captures alongside ALPHA_POSTER_FLOOR.
 ALPHA_HOLD_MARGIN = 6.0
 # Provisional: re-bank from Phase 0 headless captures alongside ALPHA_POSTER_FLOOR.
@@ -119,7 +120,7 @@ INSTRUMENT_JS = r"""
     var s=getComputedStyle(el),r=el.getBoundingClientRect();
     return s.display!=='none'&&s.visibility==='visible'&&r.width>0&&r.height>0&&(!el.checkVisibility||el.checkVisibility({opacityProperty:true,visibilityProperty:true}));
   }
-  function sourceRectError(entry,v){try{var q=entry&&entry.srcRect;if(!q||!finite(q.x)||!finite(q.y)||!finite(q.w)||!finite(q.h)||!(q.w>0&&q.h>0))return null;var stage=document.getElementById('stage'),ow=stage&&stage.offsetWidth,oh=stage&&stage.offsetHeight;if(!stage||!finite(ow)||!finite(oh)||!(ow>1&&oh>1))return null;var sr=stage.getBoundingClientRect();if(!sr||!finite(sr.left)||!finite(sr.top)||!finite(sr.width)||!finite(sr.height)||!(sr.width>1&&sr.height>1))return null;var sx=sr.width/ow,sy=sr.height/oh,avg=(sx+sy)/2;if(!finite(sx)||!finite(sy)||!(sx>0&&sy>0&&avg>0)||Math.abs(sx-sy)/avg>0.001)return null;var r=v&&v.getBoundingClientRect?v.getBoundingClientRect():null;if(!r||!finite(r.left)||!finite(r.top)||!finite(r.right)||!finite(r.bottom)||!finite(r.width)||!finite(r.height)||!(r.width>0&&r.height>0))return null;var L=sr.left+q.x*sx,T=sr.top+q.y*sx,R=sr.left+(q.x+q.w)*sx,B=sr.top+(q.y+q.h)*sx;if(!finite(L)||!finite(T)||!finite(R)||!finite(B))return null;var error=Math.max(Math.abs(r.left-L),Math.abs(r.top-T),Math.abs(r.right-R),Math.abs(r.bottom-B));return finite(error)?error:null}catch(e){return null}}
+  function sourceRectError(entry,v){try{var q=entry&&entry.srcRect;if(!q||!finite(q.x)||!finite(q.y)||!finite(q.w)||!finite(q.h)||!(q.w>0&&q.h>0))return null;var stage=document.getElementById('stage'),ow=stage&&stage.offsetWidth,oh=stage&&stage.offsetHeight;if(!stage||!finite(ow)||!finite(oh)||!(ow>1&&oh>1))return null;var sr=stage.getBoundingClientRect();if(!sr||!finite(sr.left)||!finite(sr.top)||!finite(sr.width)||!finite(sr.height)||!(sr.width>1&&sr.height>1))return null;var sx=sr.width/ow,sy=sr.height/oh,avg=(sx+sy)/2;if(!finite(sx)||!finite(sy)||!(sx>0&&sy>0&&avg>0)||Math.abs(sx-sy)/avg>0.001)return null;var r=v&&v.getBoundingClientRect?v.getBoundingClientRect():null;if(!r||!finite(r.left)||!finite(r.top)||!finite(r.right)||!finite(r.bottom)||!finite(r.width)||!finite(r.height)||!(r.width>0&&r.height>0))return null;var L=sr.left+q.x*sx,T=sr.top+q.y*sx,R=sr.left+(q.x+q.w)*sx,B=sr.top+(q.y+q.h)*sx;if(!finite(L)||!finite(T)||!finite(R)||!finite(B))return null;var error=Math.max(Math.abs(r.left-L),Math.abs(r.top-T),Math.abs(r.right-R),Math.abs(r.bottom-B))/sx;return finite(error)?error:null}catch(e){return null}}
   function stageMap(){var stage=document.getElementById('stage');if(!stage||!(stage.offsetWidth>1))return null;var r=stage.getBoundingClientRect();return {stage:stage,s:r.width/stage.offsetWidth,ox:r.left,oy:r.top}}
   function expectedBox(entry,v){var m=stageMap(),r=entry&&entry.dstRect;if(m&&r)return {stage:m.stage,x:m.ox+r.x*m.s,y:m.oy+r.y*m.s,w:r.w*m.s,h:r.h*m.s,s:m.s};
     var vr=v&&v.getBoundingClientRect?v.getBoundingClientRect():null;return vr&&m?{stage:m.stage,x:vr.left,y:vr.top,w:vr.width,h:vr.height,s:m.s}:null}
@@ -224,7 +225,7 @@ INSTRUMENT_JS = r"""
     var active=entriesAt(atScene),O={},G={unit:gl.TEXTURE0,bindings:{},program:null,flip:false,premultiply:false,
       frame:null,serial:S.contexts.length+1,regularUploads:0,atScene:atScene,entries:active,closed:false};
     ['texImage2D','activeTexture','bindTexture','pixelStorei','useProgram','getUniformLocation','uniform1f','uniformMatrix4fv','clear','drawArrays','drawElements'].forEach(function(n){O[n]=gl[n]});
-    var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),closedAt:null,closedFrameIndex:null,atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};G.context=contextRecord;
+    var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),firstDrawAt:null,closedAt:null,closedFrameIndex:null,atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};G.context=contextRecord;
     S.contexts.push(contextRecord);S.live.push([gl,G]);
     active.forEach(function(e){var es=entryState[e.id];es.visit=(es.visit||0)+1;es.serial=G.serial;
       [S.claims,S.standDowns].forEach(function(stream){stream.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial})});
@@ -261,7 +262,7 @@ INSTRUMENT_JS = r"""
       var result=O.clear.apply(gl,arguments);collectRiders(gl,G);return result;
     };
     function draw(name,args){
-      if(!G.frame)return O[name].apply(gl,args);
+      if(!G.frame){var unframed=O[name].apply(gl,args);if(contextRecord.firstDrawAt===null)contextRecord.firstDrawAt=performance.now();return unframed}
       var F=G.frame,draw=++F.draws,u=G.program?(programUniforms.get(G.program)||{}):{},table=G.entries[0]&&G.entries[0].draws&&G.entries[0].draws.draws||[],drawFact=table.filter(function(r){return r.draw===draw})[0];
       if(drawFact&&u.MVPMatrix)F.quads[draw]=quad(u.MVPMatrix,gl.drawingBufferWidth,gl.drawingBufferHeight,drawFact.layerSize);
       if(drawFact&&finite(drawFact.labelBoxOpacity)&&F.quads[draw])G.entries.forEach(function(e){var fed=e.feed&&F.quads[e.feed.draw];if(!fed)return;
@@ -272,6 +273,7 @@ INSTRUMENT_JS = r"""
       var textures=[0,1].map(function(unit){var tex=G.bindings[gl.TEXTURE0+unit],info=tex&&textureInfo.get(tex);return info?{unit:unit,ordinal:info.ordinal,size:info.size,uploadedSize:info.uploadedSize,
         video:info.video,presentedFrames:info.presentedFrames,mediaTime:info.mediaTime,_poster:info.poster,flip:info.flip}:null});
       var result=O[name].apply(gl,args);
+      if(contextRecord.firstDrawAt===null)contextRecord.firstDrawAt=performance.now();
       G.entries.filter(function(e){return e.feed&&e.feed.draw===draw}).forEach(function(e){
         var layerSize=drawFact&&drawFact.layerSize,leafSize=textures[0]&&textures[0].size,points=u.MVPMatrix&&layerSize?quad(u.MVPMatrix,gl.drawingBufferWidth,gl.drawingBufferHeight,layerSize):null;
         var decoder=decoderRead(e),v=decoderForEntry(e),reference=null;try{if(v&&leafSize)reference=capture(v,leafSize,entryState[e.id])}catch(x){noteError('same-task reference',x)}
@@ -619,11 +621,20 @@ def _visit_record(
     first_draw = next((frame for frame in move_frames
                        if isinstance(frame.get("draws"), int) and not isinstance(frame["draws"], bool)
                        and frame["draws"] > 0), None)
-    pre_draw_ms = first_draw["t"] - move_frames[0]["t"] if first_draw is not None else None
+    first_draw_at = move.get("firstDrawAt")
+    pre_draw_ms = float(first_draw_at) - float(move_frames[0]["t"]) \
+        if first_draw is not None and _finite(first_draw_at) and first_draw_at >= first_draw["t"] \
+        and first_draw["t"] >= move_frames[0]["t"] else None
+    prefix_geometry = all(
+        len(group) == 1 and _finite(group[0].get("sourceRectError"))
+        and 0 <= group[0]["sourceRectError"] <= SOURCE_RECT_TOLERANCE_PX
+        for group in rider_rows[:pre_draw_frames]
+    )
     exempt = (
         pre_draw_frames > 0 and first_draw is not None
-        and pre_draw_ms <= PRE_DRAW_GRACE_MS
-        and not any(_finite(stand.get("t")) and stand["t"] <= first_draw["t"] for stand in entry_stands)
+        and pre_draw_ms is not None and 0 <= pre_draw_ms <= PRE_DRAW_GRACE_MS
+        and prefix_geometry
+        and not any(_finite(stand.get("t")) and stand["t"] <= first_draw_at for stand in entry_stands)
     )
     exempted = [r for group in rider_rows[:pre_draw_frames] for r in group] if exempt else []
     riders = [] if first_draw is None else [

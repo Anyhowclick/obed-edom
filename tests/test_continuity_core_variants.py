@@ -36,6 +36,7 @@ def test_the_variant_names_are_the_shared_contract() -> None:
         "no-pause",
         "interim-delay",
         "departure-early-hide",
+        "startup-moved-decoder",
     )
 
 
@@ -174,6 +175,15 @@ def test_departure_early_hide_is_the_behavioural_red_control(monkeypatch) -> Non
     result = _departure_hide("continuous")
     assert result["beforeDraw"]["opacity"] == "0"
     assert result["afterEmptyCallback"] == "0"
+
+
+def test_startup_moved_decoder_replaces_only_the_complete_hold_block() -> None:
+    core = variants.variant_core("startup-moved-decoder")
+    replacement = variants._TRANSFORMS["startup-moved-decoder"][0][1]
+    assert replacement in core
+    assert variants._STARTUP_HOLD not in core
+    assert "v.style.left = (screenRect.x + 8) + 'px';" in replacement
+    assert core.replace(replacement, variants._STARTUP_HOLD) == PRESERVE_CORE_JS
 
 
 @pytest.mark.parametrize(("name", "anchor"), ANCHORS)

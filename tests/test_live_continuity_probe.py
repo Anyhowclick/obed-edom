@@ -12077,6 +12077,13 @@ def test_feed_control_aggregate_expectations_cover_no_linger_and_intermittent_in
     assert probe.mm_feed_control_aggregate_problems(
         "interim-delay", [{"handbackContinuity": {"verdict": None}}],
     )
+    geometry_red = {"noRiderAboveCanvas": {
+        "verdict": False, "offenders": [{"sourceRectError": 8.0}],
+    }}
+    assert probe.mm_feed_control_aggregate_problems("startup-moved-decoder", [geometry_red]) == []
+    assert probe.mm_feed_control_aggregate_problems(
+        "startup-moved-decoder", [{"noRiderAboveCanvas": {"verdict": False, "offenders": [{}]}}],
+    ) == ["startup-moved-decoder did not expose a geometry-backed rider in any row"]
 
 
 @pytest.mark.parametrize(("rows", "expected"), [
@@ -12288,13 +12295,15 @@ def _report_shaped_feed_fixture(mode: str = "continuous") -> tuple[dict[str, Any
             "labels": [{"entryId": entry["id"], "serial": 1, "atScene": 2,
                         "opacity": .61, "spread": 30.0, "slope": .39}],
             "riders": [{"entryId": entry["id"], "serial": 1, "atScene": 2, "instance": "movie-a",
-                        "visible": False, "opacityProduct": 0.0, "intersectsCanvas": True}],
+                        "visible": False, "opacityProduct": 0.0, "intersectsCanvas": True,
+                        "sourceRectError": 0.0}],
             "glErrors": [],
         })
     report = {
         "kind": "mm-feed", "version": 1, "config": {}, "media": [], "mediaDropped": [], "mediaOverflow": 0,
         "errors": [], "killedOnce": [], "callbackCostP95Ms": .2,
-        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": .5, "closedAt": 5.0, "atScene": 2,
+        "contexts": [{"serial": 1, "id": "0-canvas", "createdAt": .5, "firstDrawAt": 1.1,
+                      "closedAt": 5.0, "atScene": 2,
                       "lost": False, "entryIds": [entry["id"]]}],
         "frames": frames,
         "uploads": [{"serial": 1, "atScene": 2, "t": float(index + 1) + .003, "frameN": index + 1,
@@ -12315,7 +12324,15 @@ def _report_shaped_feed_fixture(mode: str = "continuous") -> tuple[dict[str, Any
 
 @pytest.mark.parametrize(("case", "mode", "expected", "exempt", "exempted"), [
     ("stationary", "continuous", True, True, 1),
+    ("geometry-boundary", "continuous", True, True, 1),
+    ("geometry-exceeds", "departure", False, False, 0),
+    ("geometry-one-bad", "departure", False, False, 0),
+    ("geometry-null", "continuous", True, False, 0),
+    ("hidden-zero", "continuous", True, True, 0),
+    ("duration-boundary", "continuous", True, True, 1),
     ("duration", "departure", False, False, 0),
+    ("timing-null", "departure", False, False, 0),
+    ("timing-out-of-order", "departure", False, False, 0),
     ("other-entry", "continuous", False, False, 0),
     ("first-draw", "departure", False, True, 1),
     ("never-draw", "continuous", None, False, 0),
@@ -12333,9 +12350,27 @@ def test_rider_pre_draw_exemption(
         frame["t"] = [100.0, 130.0, 146.0, 162.0][index]
         frame["draws"] = 0 if index == 0 else 1
         frame["riders"][0].update(visible=index == 0, opacityProduct=1.0 if index == 0 else 0.0)
-    if case == "duration":
-        for frame, timestamp in zip(report["frames"][1:], (421.0, 437.0, 453.0), strict=True):
-            frame["t"] = timestamp
+    report["contexts"][0]["firstDrawAt"] = 131.0
+    if case == "geometry-boundary":
+        report["frames"][0]["riders"][0]["sourceRectError"] = 1.0
+    elif case == "geometry-exceeds":
+        report["frames"][0]["riders"][0]["sourceRectError"] = 1.000001
+    elif case == "geometry-one-bad":
+        report["frames"][1]["draws"] = 0
+        report["frames"][1]["riders"][0].update(visible=True, opacityProduct=1.0, sourceRectError=1.1)
+        report["contexts"][0]["firstDrawAt"] = 147.0
+    elif case == "geometry-null":
+        report["frames"][0]["riders"][0].update(sourceRectError=None, intersectsCanvas=False)
+    elif case == "hidden-zero":
+        report["frames"][0]["riders"][0].update(visible=False, opacityProduct=0.0, sourceRectError=0.0)
+    elif case == "duration-boundary":
+        report["contexts"][0]["firstDrawAt"] = 420.0
+    elif case == "duration":
+        report["contexts"][0]["firstDrawAt"] = 421.0
+    elif case == "timing-null":
+        report["contexts"][0]["firstDrawAt"] = None
+    elif case == "timing-out-of-order":
+        report["contexts"][0]["firstDrawAt"] = 129.0
     elif case == "other-entry":
         report["frames"][0]["draws"] = 1
         report["frames"][0]["rows"] = []
@@ -12347,7 +12382,7 @@ def test_rider_pre_draw_exemption(
     elif case in {"stand-down", "stand-down-before"}:
         report["standDowns"].append({
             "objectId": "movie-a", "entryId": entry["id"], "serial": 1, "atScene": 2,
-            "t": 95.0 if case == "stand-down-before" else 115.0, "reason": "test", "accepted": True,
+            "t": 95.0 if case == "stand-down-before" else 130.5, "reason": "test", "accepted": True,
         })
     elif case == "unreadable":
         report["frames"][2]["draws"] = None
@@ -12358,7 +12393,8 @@ def test_rider_pre_draw_exemption(
         for frame in report["frames"]:
             frame["rows"] = []
         report["contexts"].append({
-            **report["contexts"][0], "serial": 2, "id": "1-canvas", "createdAt": 1099.0, "closedAt": 1200.0,
+            **report["contexts"][0], "serial": 2, "id": "1-canvas", "createdAt": 1099.0,
+            "firstDrawAt": None, "closedAt": 1200.0,
         })
         for frame in copy.deepcopy(report["frames"]):
             frame.update(serial=2, n=frame["n"] + 10, t=frame["t"] + 1000, draws=0)
@@ -12376,10 +12412,13 @@ def test_rider_pre_draw_exemption(
     rider = probe.mm_feed_instrument.verdict_records(
         report, [entry], continuous_expected=mode == "continuous",
     )[entry["id"]]["rider"]
-    assert rider["preDrawFrames"] == (4 if case == "never-draw" else 0 if case == "other-entry" else 1)
-    assert rider["preDrawMs"] == (None if case == "never-draw" else 0.0 if case == "other-entry" else 321.0 if case == "duration" else 30.0)
+    assert rider["preDrawFrames"] == (4 if case == "never-draw" else 0 if case == "other-entry" else 2 if case == "geometry-one-bad" else 1)
+    expected_ms = None if case in {"never-draw", "timing-null", "timing-out-of-order"} else 47.0 if case == "geometry-one-bad" else 320.0 if case == "duration-boundary" else 321.0 if case == "duration" else 31.0
+    assert rider["preDrawMs"] == expected_ms
     assert rider["exempt"] is exempt
     assert rider["exemptedVisibleSamples"] == exempted
+    if case.startswith("geometry") or case == "hidden-zero":
+        assert rider["coverage"] is True
     assert probe.score_no_rider_above_canvas(rider)["verdict"] is expected
 
 
@@ -12520,21 +12559,17 @@ def test_score_verdicts_validates_feed_contract_per_entry(monkeypatch: pytest.Mo
     ]
     monkeypatch.setattr(probe, "score_carry", lambda *args, **kwargs: {"verdict": True})
     monkeypatch.setattr(probe, "score_restart_strict", lambda *args, **kwargs: {"verdict": True})
-    producer = {
-        "kind": "mm-feed", "version": 1, "contexts": [], "frames": [], "media": [],
-        "mediaDropped": [], "mediaOverflow": 0, "artwork": [], "errors": [], "killedOnce": [],
-        "uploads": [], "claims": [], "standDowns": [], "departures": [], "callbackCostP95Ms": None,
-    }
-    feed_evidence = {"producer": producer, "verdicts": {
-        "feed-a": {"mode": "continuous"},
-        "feed-b": {"mode": "unavailable", "reason": "not observed", "continuousExpected": False,
-                   "usableContext": False, "boundTextures": False, "interval": None},
-    }}
+    _, producer = _report_shaped_feed_fixture()
+    feed_evidence = {"producer": producer, "verdicts": {}}
     scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None, feed_evidence=feed_evidence)
-    assert scored["feed-a"]["verdict"] is None
+    assert scored["feed-a"]["verdict"] is True
     assert scored["feed-b"]["verdict"] is True
     assert scored["restart"]["verdict"] is True
-    producer.pop("frames")
+    producer["contexts"][0].pop("firstDrawAt")
+    scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None, feed_evidence=feed_evidence)
+    assert [scored[key]["verdict"] for key in ("feed-a", "feed-b", "restart")] == [None, None, True]
+    producer["contexts"][0]["firstDrawAt"] = 1.1
+    producer["frames"][0]["riders"][0].pop("sourceRectError")
     scored = probe.score_verdicts([], {}, {"verdicts": specs}, True, None, feed_evidence=feed_evidence)
     assert [scored[key]["verdict"] for key in ("feed-a", "feed-b", "restart")] == [None, None, True]
 
@@ -12550,8 +12585,8 @@ global.window=global; global.location={hash:'#1'}; global.performance={now:()=>+
 global.requestAnimationFrame=(fn)=>(raf.push(fn),raf.length);
 class Media {pause(){this.paused=true} play(){this.paused=false;return Promise.resolve()}}
 class Video extends Media {
-  constructor(id,dst,w,h,rect,counter=false){super();this.__obedInstance=id;this.__obedDst=dst;this.__obedElId=id.length;this.currentTime=1;this.paused=false;this.readyState=4;this.videoWidth=w;this.videoHeight=h;this.width=w;this.height=h;this.rect=rect;this.counter=counter;this.drawSource=null;this.isConnected=true;this.nodeType=1;this.parentElement=null;this.listeners={};this.callbacks=[]}
-  addEventListener(k,f){this.listeners[k]=f} requestVideoFrameCallback(f){this.callbacks.push(f)} checkVisibility(){return true}
+  constructor(id,dst,w,h,rect,counter=false){super();this.__obedInstance=id;this.__obedDst=dst;this.__obedElId=id.length;this.currentTime=1;this.paused=false;this.readyState=4;this.videoWidth=w;this.videoHeight=h;this.width=w;this.height=h;this.rect=rect;this.counter=counter;this.drawSource=null;this.opacity='0';this.isConnected=true;this.nodeType=1;this.parentElement=null;this.listeners={};this.callbacks=[]}
+  addEventListener(k,f){this.listeners[k]=f} requestVideoFrameCallback(f){this.callbacks.push(f)} checkVisibility(){return this.visibility!==false}
   present(frame){this.__obedPresentedFrames=frame;this.__obedMediaTime=frame/30;this.currentTime=frame/30;const pending=this.callbacks.splice(0);for(const cb of pending)cb(clock,{presentedFrames:frame,mediaTime:frame/30})}
   getBoundingClientRect(){return this.rect} contains(n){return n===this}
   pixel(x,y){
@@ -12571,10 +12606,11 @@ class Context2D {
 }
 class Canvas {constructor(id='',gl=null){this.id=id;this._gl=gl;this._2d=new Context2D(this);this.isConnected=true;this.listeners={};this.nodeType=1;this.parentElement=null}getContext(t){return t==='2d'?this._2d:this._gl}addEventListener(k,f){this.listeners[k]=f}getBoundingClientRect(){return {x:0,y:0,left:0,top:0,right:1920,bottom:540,width:1920,height:540}}}
 global.HTMLCanvasElement=Canvas;
-global.getComputedStyle=(el)=>({opacity:el instanceof Video?'0':'1',display:'block',visibility:'visible'});
-const styleParent={appendChild(n){n.parentNode=this},removeChild(n){n.parentNode=null}},stage={getBoundingClientRect:()=>({x:0,y:0,width:1920,height:540})};
+global.getComputedStyle=(el)=>({opacity:el instanceof Video?el.opacity:'1',display:'block',visibility:'visible'});
+let stageX=0,stageY=0,stageSX=1,stageSY=1;
+const styleParent={appendChild(n){n.parentNode=this},removeChild(n){n.parentNode=null}},stage={offsetWidth:1920,offsetHeight:540,querySelectorAll:()=>[],contains:()=>false,getBoundingClientRect(){const width=1920*stageSX,height=540*stageSY;return {x:stageX,y:stageY,left:stageX,top:stageY,right:stageX+width,bottom:stageY+height,width,height}}};
 const overlay={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:0,top:0,right:1920,bottom:540})},labelNode={nodeType:1,parentElement:null,contains:()=>false,getBoundingClientRect:()=>({left:50,top:50,right:250,bottom:150})};
-const videos={alpha:new Video('alpha','dalpha',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),broken:new Video('broken','dbroken',160,90,{x:550,y:0,left:550,top:0,right:1050,bottom:540,width:500,height:540}),counter:new Video('counter','dcounter',960,270,{x:1100,y:0,left:1100,top:0,right:1920,bottom:540,width:820,height:540},true),hold:new Video('hold','dhold',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),killed:new Video('killed','dkilled',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540})};
+const videos={alpha:new Video('alpha','dalpha',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),broken:new Video('broken','dbroken',160,90,{x:550,y:0,left:550,top:0,right:1050,bottom:540,width:500,height:540}),counter:new Video('counter','dcounter',960,270,{x:1100,y:0,left:1100,top:0,right:1920,bottom:540,width:820,height:540},true),hold:new Video('hold','dhold',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),killed:new Video('killed','dkilled',160,90,{x:0,y:0,left:0,top:0,right:500,bottom:540,width:500,height:540}),geo1:new Video('geo1','dgeo1',200,100,{x:0,y:0,left:0,top:0,right:1,bottom:1,width:1,height:1}),geo2:new Video('geo2','dgeo2',200,100,{x:0,y:0,left:0,top:0,right:1,bottom:1,width:1,height:1})};
 const decoders={...videos,'alpha-hop':videos.alpha,'alpha-final':videos.alpha};
 global.document={timeline:{get currentTime(){return clock}},head:styleParent,documentElement:styleParent,createElement:(k)=>k==='canvas'?new Canvas():{textContent:'',parentNode:null,nodeType:1,parentElement:null},getElementById:(id)=>id==='stage'?stage:null,elementsFromPoint:(x)=>x<500?[overlay,labelNode,videos.alpha]:[overlay,videos.broken]};
 const seam={decoderFor:(id)=>decoders[id]||null,claim:()=>true,onStandDown:()=>true};global.__OBED_P2_PRESERVE__={feed:seam};
@@ -12588,6 +12624,8 @@ entries.push({id:'carry-killed',objectId:'killed',dstObjectId:'dkilled',atScene:
 entries.push({id:'chain-10',objectId:'alpha',dstObjectId:'alpha-hop',atScene:10,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 entries.push({id:'chain-11',objectId:'alpha-hop',dstObjectId:'alpha-final',atScene:11,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 entries.push({id:'chain-14',objectId:'alpha-final',dstObjectId:'alpha-end',atScene:14,feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'geo-1',objectId:'geo1',dstObjectId:'dgeo1',atScene:20,srcRect:{x:100,y:50,w:200,h:100},feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
+entries.push({id:'geo-2',objectId:'geo2',dstObjectId:'dgeo2',atScene:20,srcRect:{x:400,y:50,w:200,h:100},feed:{draw:1,from:{upload:1,size:[100,100]},to:null},draws:simpleDraws,artwork:[]});
 const boundaries=entries.map(e=>({atScene:e.atScene,underArtwork:true,src:{objectId:e.objectId},dst:{objectId:e.dstObjectId},feed:e.feed}));
 global.__OBED_CONTINUITY_INFO__={authoredWidth:1920,authoredHeight:540};
 """ + "\neval(" + instrument + ");\n" + r"""
@@ -12601,7 +12639,7 @@ function paintSource(source,rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;
 function paintLabel(rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;x++){const i=((rect.y+y)*1920+rect.x+x)*4;pixels[i]=pixels[i+1]=pixels[i+2]=Math.round(pixels[i]*.39);pixels[i+3]=255}}
 function makeGl(){active=100;bound={};sources=new WeakMap();matrix=null;drawNo=0;pixels=new Uint8ClampedArray(1920*540*4);return {canvas:null,TEXTURE0:100,TEXTURE_2D:2,UNPACK_FLIP_Y_WEBGL:3,UNPACK_PREMULTIPLY_ALPHA_WEBGL:4,RGBA:5,UNSIGNED_BYTE:6,drawingBufferWidth:1920,drawingBufferHeight:540,
  activeTexture(u){active=u},bindTexture(t,texture){bound[active]=texture},pixelStorei(){},useProgram(){},getUniformLocation(p,n){return n==='MVPMatrix'?matrixLoc:mixLoc},uniform1f(){},uniformMatrix4fv(l,t,v){matrix=Array.from(v)},
- clear(){drawNo=0;pixels.fill(0)},drawElements(){this.drawArrays()},drawArrays(){drawNo++;const sizes=[[100,100],[100,100],[1920,540],[20,20]],r=rectFor(matrix,sizes[drawNo-1]);if(drawNo===4)paintLabel(r);else paintSource(sources.get(bound[active]),r)},
+ clear(){drawNo=0;pixels.fill(0)},drawElements(){this.drawArrays()},drawArrays(){drawNo++;const sizes=[[100,100],[100,100],[1920,540],[20,20]],r=rectFor(matrix,sizes[drawNo-1]);if(drawNo===4)paintLabel(r);else paintSource(sources.get(bound[active]),r);this.completedAt=performance.now()},
  texImage2D(){const source=arguments[5],s0=source.drawSource||source;sources.set(bound[active],Object.create(s0,{__obedPresentedFrames:{value:s0.__obedPresentedFrames}}))},readPixels(x,y,w,h,f,t,a){for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const src=((y+yy)*1920+x+xx)*4,dst=(yy*w+xx)*4;a.set(pixels.slice(src,src+4),dst)}}}}
 const gl=makeGl();
 const canvas=new Canvas('0-canvas',gl);gl.canvas=canvas;canvas.getContext('webgl');
@@ -12629,11 +12667,30 @@ function runChain(atScene,startFrame,id,objectId,dstObjectId){location.hash='#'+
 function runMidMoveStandDown(){location.hash='#13';for(const frame of [69,70])present(videos.alpha,frame);seam.claim('alpha-final');const move=openContext('5-canvas'),texture=posterTexture(move,new ImageSource(100,100,8));for(const frame of [71,72]){present(videos.alpha,frame);move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.texImage2D(0,0,0,0,0,videos.alpha);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}present(videos.alpha,73);seam.onStandDown('alpha-final','after-feed');videos.alpha.__obedPosterHeld=true;videos.alpha.pause();location.hash='#14';for(let n=0;n<2;n++){move.gl.clear();move.gl.activeTexture(move.gl.TEXTURE0);move.gl.bindTexture(move.gl.TEXTURE_2D,texture);move.gl.uniformMatrix4fv(move.m,false,matrices.alpha);move.gl.drawArrays();tick()}window.__obedMmFeedProbe.report();videos.alpha.play();present(videos.alpha,74);videos.alpha.__obedInstance='alpha-end'}
 videos.broken.drawSource=null;runChain(10,51,'3-canvas','alpha','alpha-hop');location.hash='#10';videos.alpha.__obedPosterHeld=true;videos.alpha.pause();videos.alpha.__obedPosterHeld=false;videos.alpha.play();runChain(11,61,'4-canvas','alpha-hop','alpha-final');runMidMoveStandDown();
 window.__obedMmFeedProbe.report();videos.alpha.__obedInstance='dalpha';videos.broken.__obedInstance='dbroken';tick();
-console.log(JSON.stringify(window.__obedMmFeedProbe.report()));
+function screenRect(q,dx=0,dw=0){const left=stageX+q.x*stageSX+dx,top=stageY+q.y*stageSX,width=q.w*stageSX+dw,height=q.h*stageSX;return {x:left,y:top,left,top,right:left+width,bottom:top+height,width,height}}
+location.hash='#20';stageX=10;stageY=20;stageSX=.5;stageSY=.5;videos.geo1.opacity='1';videos.geo2.opacity='1';
+const q1={x:100,y:50,w:200,h:100},q2={x:400,y:50,w:200,h:100};videos.geo1.rect=screenRect(q1);videos.geo2.rect=screenRect(q2);
+const geoMove=openContext('6-canvas'),geoTexture=posterTexture(geoMove,new ImageSource(100,100,8));geoMove.gl.clear();geoMove.gl.activeTexture(geoMove.gl.TEXTURE0);geoMove.gl.bindTexture(geoMove.gl.TEXTURE_2D,geoTexture);geoMove.gl.uniformMatrix4fv(geoMove.m,false,matrices.alpha);
+videos.geo1.rect=screenRect(q1,.25,.25);videos.geo2.rect=screenRect(q2,1,0);geoMove.gl.drawArrays();const firstCompletedAt=geoMove.gl.completedAt;
+videos.geo1.visibility=false;videos.geo1.rect=screenRect(q1,100,100);tick();videos.geo1.visibility=true;videos.geo1.rect=screenRect(q1);videos.geo2.rect=screenRect(q2);tick();const firstReport=window.__obedMmFeedProbe.report(),firstContext=firstReport.contexts.find(c=>c.id==='6-canvas'),firstStamp=firstContext.firstDrawAt,geometryFirst=firstReport.frames.filter(f=>f.serial===firstContext.serial).at(-1).riders.map(r=>[r.entryId,r.sourceRectError]);
+geoMove.gl.clear();geoMove.gl.activeTexture(geoMove.gl.TEXTURE0);geoMove.gl.bindTexture(geoMove.gl.TEXTURE_2D,geoTexture);geoMove.gl.uniformMatrix4fv(geoMove.m,false,matrices.alpha);geoMove.gl.drawArrays();const geometrySecond=window.__obedMmFeedProbe.report().frames.filter(f=>f.serial===firstContext.serial).at(-1).riders.map(r=>[r.entryId,r.sourceRectError]);
+geoMove.gl.clear();stageSY=.6;tick();stageSY=.5;const geometrySticky=window.__obedMmFeedProbe.report().frames.filter(f=>f.serial===firstContext.serial).at(-1).riders.map(r=>[r.entryId,r.sourceRectError]);
+location.hash='#22';const unframed=openContext('7-canvas'),unframedTexture=posterTexture(unframed,new ImageSource(100,100,8));unframed.gl.activeTexture(unframed.gl.TEXTURE0);unframed.gl.bindTexture(unframed.gl.TEXTURE_2D,unframedTexture);unframed.gl.uniformMatrix4fv(unframed.m,false,matrices.alpha);unframed.gl.drawArrays();const unframedCompletedAt=unframed.gl.completedAt;
+const thrownGl=makeGl();thrownGl.drawArrays=function(){this.completedAt=performance.now();throw new Error('draw failed')};const thrownCanvas=new Canvas('8-canvas',thrownGl);thrownGl.canvas=thrownCanvas;thrownCanvas.getContext('webgl');try{thrownGl.drawArrays()}catch(e){}
+const finalReport=window.__obedMmFeedProbe.report(),contexts=Object.fromEntries(finalReport.contexts.map(c=>[c.id,c]));finalReport.harnessChecks={geometryFirst,geometrySecond,geometrySticky,framed:{completedAt:firstCompletedAt,firstDrawAt:contexts['6-canvas'].firstDrawAt,firstStamp},unframed:{completedAt:unframedCompletedAt,firstDrawAt:contexts['7-canvas'].firstDrawAt},thrown:{completedAt:thrownGl.completedAt,firstDrawAt:contexts['8-canvas'].firstDrawAt}};
+console.log(JSON.stringify(finalReport));
 """
     completed = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
+    checks = report["harnessChecks"]
+    assert dict(checks["geometryFirst"]) == {"geo-1": 1.0, "geo-2": 2.0}
+    assert dict(checks["geometrySecond"]) == {"geo-1": 0.0, "geo-2": 0.0}
+    assert dict(checks["geometrySticky"]) == {"geo-1": None, "geo-2": None}
+    assert checks["framed"]["firstDrawAt"] > checks["framed"]["completedAt"]
+    assert checks["framed"]["firstDrawAt"] == checks["framed"]["firstStamp"]
+    assert checks["unframed"]["firstDrawAt"] > checks["unframed"]["completedAt"]
+    assert checks["thrown"]["firstDrawAt"] is None
     assert probe.contract.first_errors(probe.contract.mm_feed_report(report), limit=20) == []
     continuous_entries = [
         {"id": f"carry-{name}", "objectId": name, "dstObjectId": f"d{name}", "atScene": 2,
@@ -12723,8 +12780,23 @@ def test_feed_ordinal_tamper_is_limited_to_the_requested_scene() -> None:
 
 
 def test_feed_instrument_is_registered_before_navigation() -> None:
-    facts = {"verdicts": [{"id": "carry-a", "srcObjectId": "a", "dstObjectId": "b", "atScene": 2,
-                           "underArtwork": True, "feed": {"draw": 1}, "feedDraws": {}, "artworkAbove": []}]}
+    pin_src, pin_dst = dict(SRC_RECT), dict(DST_RECT)
+    bridge_src = {"x": 30, "y": 40, "w": 300, "h": 170}
+    bridge_dst = {"x": 300, "y": 200, "w": 600, "h": 340}
+    pin = _MOVIE("pin.mov", "pin", _RECT(**pin_src), _RECT(**pin_dst), src_object_id="pin-a",
+                 dst_object_id="pin-b", under_artwork=True, feed={"draw": 1})
+    bridge = _MOVIE("bridge.mov", "bridge", _RECT(**bridge_src), _RECT(**bridge_dst),
+                    src_object_id="bridge-a", dst_object_id="bridge-b", under_artwork=True, feed={"draw": 2})
+    plan = _plan((_BOUNDARY(0, 1, (pin, bridge)),), {0: 0, 1: 2}, {
+        0: {"pin.mov": [pin_src], "bridge.mov": [bridge_src]},
+        1: {"pin.mov": [pin_dst], "bridge.mov": [bridge_dst]},
+    })
+    facts = {"verdicts": probe.verdict_specs(plan)}
+    for spec, draw in zip(facts["verdicts"], (1, 2), strict=True):
+        spec.update(underArtwork=True, feed={"draw": draw}, feedDraws={}, artworkAbove=[])
+    feed_specs = probe.feed_specs_for(facts)
+    assert [spec["srcRect"] for spec in feed_specs] == [pin_src, bridge_src]
+    assert facts["verdicts"][0]["srcRect"] == pin_dst != feed_specs[0]["srcRect"]
     kwargs = probe.feed_host_kwargs(facts)
     assert kwargs["pre_navigation_scripts"][0].startswith(probe.mm_feed_instrument.INSTRUMENT_JS)
     assert "window.__obedMmFeedProbe.bootstrap(" in kwargs["pre_navigation_scripts"][0]
@@ -12865,7 +12937,7 @@ def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() ->
     expected = {
         "feed-on", "feed-off", "attach-once", "hold-upload-killed", "ordinal", "after-feed",
         "from-only-crossfade", "from-only-single", "overlay-ride", "settle-on-stage",
-        "no-pause", "mm-opacity-off", "no-linger", "interim-delay",
+        "no-pause", "mm-opacity-off", "no-linger", "interim-delay", "startup-moved-decoder",
     }
     assert set(probe.MM_FEED_GATE_EXPECTATIONS) == expected
     text = (REPO / "scripts" / "run_gates.sh").read_text()
@@ -12938,11 +13010,12 @@ def test_feed_control_cli_registers_both_tampers_and_kill_switch() -> None:
     no_linger = probe.parse_args(["--feed-tamper", "no-linger", "--skip-arms", "B,C,V,Voff,attach"])
     killed = probe.parse_args(["--hold-upload-kill-switch", "--mm-feed", "off", "--feed-dwell", "12"])
     variant = probe.parse_args(["--feed-variant", "from-only", "--mm-opacity", "off"])
+    moved = probe.parse_args(["--core-variant", "startup-moved-decoder"])
     assert after.feed_tamper == "after-feed" and after.feed_tamper_scene == 10
     assert no_linger.feed_tamper == "no-linger"
     assert killed.hold_upload_kill_switch is True and killed.mm_feed == "off" and killed.feed_dwell == 12
     assert variant.feed_variant == "from-only" and variant.mm_opacity == "off"
     assert probe.feed_fixture_required(ordinary) is False
-    assert all(probe.feed_fixture_required(args) for args in (after, no_linger, killed, variant))
+    assert all(probe.feed_fixture_required(args) for args in (after, no_linger, killed, variant, moved))
     with pytest.raises(SystemExit):
         probe.parse_args(["--feed-tamper", "no-linger", "--feed-variant", "from-only"])

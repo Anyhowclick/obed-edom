@@ -564,7 +564,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 27 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 29 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"](outdir=gates["tmp"] / "out2").stdout
@@ -1079,7 +1079,7 @@ def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_o
     assert [s for s in starts if s.startswith("carry-cover")] == CC_STEMS
     feed_starts = [s for s in starts if s.startswith("mm-feed-")]
     first_p2 = next(i for i, s in enumerate(starts) if s.startswith("p2"))
-    assert len(feed_starts) == 27
+    assert len(feed_starts) == 29
     assert "mm-feed-D7-no-linger" in feed_starts
     assert "mm-feed-D7-interim-delay" in feed_starts
     assert starts.index(CC_STEMS[0]) == starts.index(PC_STEMS[-1]) + 1
