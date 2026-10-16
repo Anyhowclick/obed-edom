@@ -42,6 +42,16 @@ The owner paused the round on 2026-10-15 after the C6 r3 review. This file super
 | F4 cold start | #295 **merged** into `claude/stage-b-arch` (merge `19cb4eae`, owner) | Deck-load H.264 warm-up: headless Alpha slide-4 entry 212→17 ms; managed OBS first session 282→60 ms. Record: `.agents/reviews/movie-warmup-2026-10-16/acceptance-record.md`. Docs cleanup PR #296 awaits the owner. | Stage B owns three items. (1) A3 is unscorable: `47bc3698` moved `paint_start` to the first decoded row, so the slide-entry poster exposure is unscored in both arms. That falls to F3 `entryColdStart`, or to revisiting that line. (2) 25 MM-FEED/host gates fail at base level in both warm-up arms (at `39b32de9`): D7/D7s feedLive None (`coveredByLaterDraw`; stock pre-move capture `callbackCostP95Ms` ~128 ms), D7 b0to1 noRider False (before `5422f4ec`), and Alpha b5to6..b7to8. (3) On `7746df27`, the Alpha b5to6 and b7to8:wa0121 verdicts flip run to run. Diagnose this before Q7. Also re-check `PRE_DRAW_GRACE_MS` (320 ms) now that the warm-up has landed. |
 | Pre-load qualification truth | PR #294 | **Merged** | Merge main into `claude/stage-b-arch`. |
 
+## After Stage B merges (owner 2026-10-16)
+- **Suite speed-up:** #297 is merged to main (`76452a91`). Its net diff is ported onto Stage B at `6adaa752` and `fcd2b2ef`. When Stage B merges main, expect these files to already match: `run_gates.sh`, `test_run_gates.py`, `conftest.py`. Notes: `.agents/handovers/suite-speedup-stage-b-rebase.md`.
+- **Pass G option A** (suite-speedup plan, `.agents/plans/suite_speedup.plan.md`) lands only after Stage B merges.
+- **Feed-dwell shortening is a Stage B item, low priority, after the merge.**
+  - Apply `FEED_DWELL_S` only before the presses out of the scored carries.
+  - Then either limit the dwell arms' gate expectations to those carries, or prove headless that the non-scored carries pass at `CLICK_DELAY_S`.
+  - D7 attach-once gets the same treatment.
+  - Add an arm-level check that the dwell was applied.
+  - Saves about 35 s of wall time per gate round.
+
 ## Owner decisions this round (2026-10-15)
 - Scope C6, C1, C2, C3, C4-slice, C5, C10-audit approved; plan r3 approved.
 - C4 keeps the report-wide producer-error rule.
