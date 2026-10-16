@@ -6810,7 +6810,7 @@ class TestWrapScorerSparseGap:
             for v in row["videos"]:
                 v["t"] = row["t"]
                 v["currentTime"] -= 20.0
-        result = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True, loop_period_s=LOOP_P, pad_s=30.0)
+        result = probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True, loop_period_s=LOOP_P)
         assert result["wraps"] == 0
         assert result["verdict"] is False and result["maxDropS"] > 19.0
 
@@ -9363,10 +9363,11 @@ class TestChainCarryWindow:
 
 @pytest.mark.parametrize("case", [
     "alpha-cold-start", "d7-decoded-source", "never-decoded", "later-decode-loss",
-    "remount", "chain-clip", "forced-seek", "differing-clocks",
+    "remount", "chain-clip", "forced-seek", "differing-clocks", "prior-decode-loss",
+    "multi-scene-source", "busy-first-decode", "unreadable-ready", "gl-excused-missing", "goto-initial",
 ])
 def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
-    boundary = 9 if case == "differing-clocks" else 2
+    boundary = 9 if case == "differing-clocks" else 3 if case == "multi-scene-source" else 2
     rows = rows_around_boundary(boundary_scene=boundary, n_before=40, n_after=40, dt_ms=20.0, start_time=0.0)
     for row in rows:
         row["scene"] = int(row["scene"])
@@ -9389,6 +9390,7 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
     if case == "alpha-cold-start":
         for row in rows[:15]:
             row["videos"][0]["readyState"] = 1
+            row["videos"][0]["currentTime"] = rows[0]["videos"][0]["currentTime"]
     elif case == "never-decoded":
         for row in rows:
             row["videos"][0]["readyState"] = 1
@@ -9396,9 +9398,71 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
         for row in rows[55:]:
             row["videos"][0]["readyState"] = 1
     elif case == "remount":
-        for row in rows[40:]:
+        for row in rows[20:]:
             row["videos"][0].update(id=2, elId=2)
             row["videos"][0]["footprintOwner"]["elId"] = 2
+    elif case == "prior-decode-loss":
+        prior = []
+        for index in range(5):
+            t = -100.0 + index * 20.0
+            prior.append(sample(
+                t, 0, video(id=1, el_id=1, t=t, scene=0, current_time=4.9 + index * 0.02, rect=dict(SRC_RECT)),
+            ))
+        for row in rows[:40]:
+            row["videos"][0].update(readyState=1, currentTime=5.0)
+        rows = prior + rows
+        _v2(rows)
+        for row in rows:
+            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+            for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
+                pv.update(
+                    elId=decoder["elId"], instance=None, readyState=decoder["readyState"],
+                    currentTime=decoder["currentTime"], paused=decoder["paused"], ended=decoder["ended"], clippedBy=None,
+                )
+    elif case == "multi-scene-source":
+        rows = []
+        for index, scene in enumerate([0] * 5 + [1] * 15 + [2] * 10 + [3] * 30):
+            t = index * 20.0
+            current = 5.0 + t / 1000.0 - (0.5 if index >= 15 else 0.0)
+            rect = dict(DST_RECT if scene >= 3 else SRC_RECT)
+            row = sample(t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=current, rect=rect))
+            row.update(playerState="IdleAtFinalState", busy=False, hash=f"#{scene}", nextSceneId=None)
+            rows.append(row)
+        _v2(rows)
+        for row in rows:
+            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+            for pv, decoder in zip(row["pp"]["videos"], row["videos"]):
+                pv.update(
+                    elId=decoder["elId"], instance=None, currentTime=decoder["currentTime"],
+                    paused=decoder["paused"], ended=decoder["ended"], clippedBy=None,
+                )
+        spec["sourceScene"] = 1
+    elif case == "busy-first-decode":
+        for row in rows[:10]:
+            row["busy"] = True
+    elif case == "unreadable-ready":
+        for row in rows[:10]:
+            row["videos"][0]["readyState"] = None
+    elif case == "gl-excused-missing":
+        rows[55]["videos"] = []
+    elif case == "goto-initial":
+        rows = []
+        phases = (
+            [(1, "IdleAtInitialState", False, 0.0)] * 20
+            + [(1, "Playing", True, index / 20.0) for index in range(21)]
+            + [(1, "IdleAtFinalState", False, 1.0)] * 5
+            + [(2, "IdleAtInitialState", False, 1.0)] * 20
+        )
+        for index, (scene, state, busy, progress) in enumerate(phases):
+            t = index * 20.0
+            rect = {key: SRC_RECT[key] + progress * (DST_RECT[key] - SRC_RECT[key]) for key in SRC_RECT}
+            row = sample(t, scene, video(id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=rect))
+            row.update(playerState=state, busy=busy)
+            rows.append(row)
+        _v2(rows)
+        for row in rows:
+            row["pp"]["stageMap"] = dict(IDENTITY_STAGE_MAP)
+        spec.update(atScene=2, transitionScene=1, sourceScene=0)
     elif case == "chain-clip":
         spec["untilScene"] = 4
         for index in range(10):
@@ -9424,33 +9488,63 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
     }
     arm = probe.score_arm(capture, {"verdicts": [spec]}, {})
     scored = arm[spec["id"]]
-    cold = arm["entryColdStart"].get(1)
+    cold = arm["entryColdStart"].get("1")
     assert set(arm["verdicts"]) == {spec["id"]} and "entryColdStart" not in scored
     if case == "alpha-cold-start":
         assert scored["verdict"] is True
-        assert cold["durationMs"] == 300.0 and cold["rows"] == 15
+        assert cold["durationMs"] is None and cold["rows"] == 15
         assert scored["window"]["start"] == 300.0
         assert scored["window"]["coldStart"] == {
-            "rows": 15, "durationMs": 300.0, "times": [0.0, 20.0, 40.0, 60.0, 80.0],
+            "coldRows": 15, "absentRows": 0, "durationMs": 300.0,
         }
     elif case in ("d7-decoded-source", "differing-clocks"):
         assert scored["verdict"] is True
-        assert cold["durationMs"] == 0.0 and cold["rows"] == 0
+        assert cold["durationMs"] is None and cold["rows"] == 0
         assert "chainClipped" not in scored["window"]
         if case == "differing-clocks":
             assert arm["samples"][0]["scene"] == 8 and arm["samples"][0]["hash"] == "#9"
+            start = next(row for row in arm["samples"] if row["t"] == scored["window"]["start"])
+            assert start["scene"] == 8 and start["playerState"] == "IdleAtFinalState"
     elif case == "never-decoded":
         assert scored["verdict"] is None
-        assert scored["reason"] == "inconclusive: carried decoder never decoded on the settled source"
+        assert scored["reason"] == "inconclusive: movie never decoded"
         assert cold["firstDecodedT"] is None
     elif case == "later-decode-loss":
         assert scored["verdict"] is False and scored["decodeLoss"]
     elif case == "remount":
-        assert scored["verdict"] is not True
+        assert scored["verdict"] is False
+        assert scored["missingSamples"]
+        assert scored["window"]["replacedFrom"] == [1]
     elif case == "chain-clip":
         first_scene_3 = min(row["t"] for row in rows if row["scene"] == 3)
+        assert spec["untilScene"] - 1 > spec["atScene"]
         assert scored["verdict"] is True
         assert scored["window"]["end"] < first_scene_3 and "end" in scored["window"]["chainClipped"]
+    elif case == "prior-decode-loss":
+        assert scored["verdict"] is False, scored
+        assert scored["longestStallS"] >= 0.78 and scored["decodeLoss"]
+    elif case == "multi-scene-source":
+        assert scored["verdict"] is False and scored["maxDropS"] >= 0.48, scored
+        assert scored["window"]["start"] == 100.0
+    elif case == "busy-first-decode":
+        assert scored["verdict"] is True and scored["window"]["start"] == 200.0
+    elif case == "unreadable-ready":
+        scored = probe.score_continuity(rows, ASSET, boundary, SRC_RECT, DST_RECT, True, paint=False, spec=spec)
+        assert scored["verdict"] is None
+        assert scored["reason"] == "inconclusive: a row that could ground the carry window has an unreadable phase"
+    elif case == "gl-excused-missing":
+        row = rows[55]
+        scored = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            gl_interval={"start": row["ts"] - 1.0, "end": row["ts"] + 1.0}, phases=None, spec=spec,
+        )
+        assert scored["verdict"] is True and scored["glExcusedMissing"] > 0
+    elif case == "goto-initial":
+        scored = probe.score_continuity(
+            rows, ASSET, 2, SRC_RECT, DST_RECT, True, transition_scene=1, paint=False, spec=spec,
+        )
+        assert scored["verdict"] is None
+        assert scored["reason"] == "inconclusive: source settled at the transition scene's initial state is not interpreted"
     else:
         phases = probe.paint_instrument.read_phases(rows, {"verdicts": [spec]})
         forced = probe.score_continuity(
@@ -11357,15 +11451,20 @@ class TestFold5IdentityBeforeSourceAndGrounding:
         assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
 
     @pytest.mark.parametrize(("unplaced", "expected"), [
-        (False, True),
+        (False, False),
         (True, None),  # inv R10: an unreadable scene moved the chain clip's start past the missing sample
     ])
-    def test_chain_clip_reports_entry_absence_but_keeps_unplaced_rows_inconclusive(
+    def test_source_range_scores_entry_absence_but_keeps_unplaced_rows_inconclusive(
         self, unplaced: bool, expected: bool | None,
     ) -> None:
         spec = {"asset": ASSET, "atScene": 3, "srcRect": SRC_RECT, "dstRect": DST_RECT, "transitionScene": None,
                 "sourceScene": 1}
-        assert probe.score_carry(_fold5_source_clip_samples(unplaced), spec, True)["verdict"] is expected
+        scored = probe.score_carry(_fold5_source_clip_samples(unplaced), spec, True)
+        assert scored["verdict"] is expected
+        if not unplaced:
+            assert scored["window"]["start"] == 500.0
+            assert scored["missingSamples"][0]["t"] == 500.0
+            assert scored["window"]["coldStart"] == {"coldRows": 0, "absentRows": 0, "durationMs": 0.0}
 
     @pytest.mark.parametrize(("case", "strict", "legacy", "raw"), [
         ("priorNamed", False, False, False),
