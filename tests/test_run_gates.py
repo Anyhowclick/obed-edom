@@ -935,7 +935,8 @@ def test_known_bad_every_non_pass_pass_g_outcome_fails_the_round_and_is_counted(
 
 
 def test_known_bad_one_errored_pass_g_adds_exactly_one_failure_to_the_summary(gates) -> None:
-    """The positive control is the same round with every Pass G run passing."""
+    """R2 (every Pass G run passing) is the positive control; D3's error adds exactly `GATE FAILED: PASSG D3`
+    to its multi-fault round's failure multiset."""
     good, block = _multi_fault_round(gates, "passG-D3", "g-error")
     assert "GATE FAILED: PASSG" not in good.stdout
     assert "[PASSG D3] status=error exit=0" in block and "    stub g-error" in block
@@ -1110,26 +1111,21 @@ INSTRUMENT_BAD_CASES = [
      "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
 ]
 
-
-def _multi_fault_cases() -> list[tuple[str, str, str]]:
-    cases = [
-        *((stem, mode, f"CARRY-COVER {CC_LABELS[CC_STEMS.index(stem)]}")
-          for stem, mode, _ in CARRY_COVER_BAD_CASES),
-        *((stem, mode, failed) for stem, mode, failed, _ in INSTRUMENT_BAD_CASES),
-        ("passG-D3", "g-error", "PASSG D3"),
-    ]
-    return cases
+MULTI_FAULT_FAILURES = {
+    **{(stem, mode): f"CARRY-COVER {CC_LABELS[CC_STEMS.index(stem)]}" for stem, mode, _ in CARRY_COVER_BAD_CASES},
+    **{(stem, mode): failed for stem, mode, failed, _ in INSTRUMENT_BAD_CASES},
+    ("passG-D3", "g-error"): "PASSG D3",
+}
 
 
 def _multi_fault_rounds() -> tuple[dict[str, str], ...]:
     rounds: list[dict[str, str]] = []
     counts: Counter[str] = Counter()
-    for stem, mode, _ in _multi_fault_cases():
+    for stem, mode in MULTI_FAULT_FAILURES:
         slot = counts[stem]
         counts[stem] += 1
         if slot == len(rounds):
             rounds.append({})
-        assert stem not in rounds[slot]
         rounds[slot][stem] = mode
     assert len(rounds) == 7 and sum(map(len, rounds)) == 33
     return tuple(rounds)
@@ -1155,7 +1151,7 @@ def _fault_block(stdout: str, failure: str) -> str:
     end = positions[0]
     start = max(i for i, line in enumerate(lines[:end + 1]) if line.startswith("["))
     block = lines[start:end + 1]
-    assert [line for line in block if line.startswith("    GATE FAILED: ")] == [failed]
+    assert [line for line in block if line.startswith("    GATE FAILED: ")] == [failed], block
     return "\n".join(block)
 
 
@@ -1163,26 +1159,24 @@ def _multi_fault_round(gates, stem: str, mode: str) -> tuple[subprocess.Complete
     slot = MULTI_FAULT_SLOTS[(stem, mode)]
     modes = MULTI_FAULT_ROUNDS[slot]
     good = gates["shared"]("--tier", "full")
+    good_summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", good.stdout, re.M)
+    assert good_summary and int(good_summary.group(1)) == sum(_gate_failed(good.stdout).values()), good.stdout
     bad = gates["shared"](STUB_MODES=json.dumps(modes, sort_keys=True))
     expected = _gate_failed(good.stdout)
     if "host-redD5--core-variantno-pin-hold" in modes:
         baseline = "    GATE FAILED: HOST red D5 --core-variant no-pin-hold"
         expected[baseline] -= 1
-        if expected[baseline] == 0:
-            del expected[baseline]
-    expected.update(f"    GATE FAILED: {failure}" for case_stem, case_mode, failure in _multi_fault_cases()
-                    if modes.get(case_stem) == case_mode)
+    expected.update(f"    GATE FAILED: {MULTI_FAULT_FAILURES[case]}" for case in modes.items())
     actual = _gate_failed(bad.stdout)
     assert actual == expected, bad.stdout
     findings = sum(case_stem.startswith("host-redD5") and case_mode.startswith("red-")
                    for case_stem, case_mode in modes.items())
     summary = re.search(r"^DONE tier=full failed=(\d+) pending=(\d+) findings=(\d+)$", bad.stdout, re.M)
     assert summary, bad.stdout
-    assert tuple(map(int, summary.groups())) == (sum(actual.values()), 0, findings)
+    assert tuple(map(int, summary.groups())) == (sum(actual.values()), 0, findings), bad.stdout
     assert "PENDING REGISTRATION:" not in bad.stdout
     assert bad.returncode == 1
-    failure = next(failure for case_stem, case_mode, failure in _multi_fault_cases()
-                   if (case_stem, case_mode) == (stem, mode))
+    failure = MULTI_FAULT_FAILURES[(stem, mode)]
     return good, _fault_block(bad.stdout, failure)
 
 
@@ -1294,8 +1288,8 @@ def test_known_bad_every_broken_instrument_artifact_fails_exactly_its_own_check(
     """Fail closed: a foreign core sha, an extra red, an unreadable leg, a red run below the registered floor, no
     status; N+1 / N-1 hidden ticks, a set shifted one tick (what a rAF-phase reader sees under `late`), a control that
     never fired, another control's artifact; a host red artifact with no selfCheck. Each is exactly one GATE FAILED
-    among the instrument checks (the default host red stub artifact for D5 no-pin-hold already fails, so it is
-    counted only in its own case)."""
+    among the instrument checks (the default host red stub artifact for D5 no-pin-hold already fails, so a round that
+    injects a D5 fault replaces that failure rather than adding one)."""
     _, block = _multi_fault_round(gates, stem, mode)
     if failed.startswith("HOST") and mode in ("red-noself", "red-nofloor"):
         assert "    observed red: ['b0to1:A:carry'] -> MISMATCH" in block, block
