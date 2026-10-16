@@ -1960,6 +1960,12 @@ def feed_specs_for(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
     ]
 
 
+def counter_layout_for(facts: dict[str, Any] | None) -> dict[str, Any]:
+    second_strip = (facts or {}).get("planSha256") in {D7_PLAN_SHA256, D7S_PLAN_SHA256}
+    offset = binary_counter_movie.SECOND_STRIP_X if second_strip else 0
+    return binary_counter_movie.layout(offset)
+
+
 def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tuple[str, ...]:
     entries = feed_specs_for(facts)
     if not entries:
@@ -1967,7 +1973,7 @@ def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tupl
     config = {
         "entries": entries, "tamper": FEED_CONTROL.get("tamper"), "tamperScene": FEED_CONTROL.get("tamperScene"),
         "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
-        "counterLayout": binary_counter_movie.layout(),
+        "counterLayout": counter_layout_for(facts),
     }
     source = mm_feed_instrument.INSTRUMENT_JS + "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
     return (source,)
@@ -1999,7 +2005,7 @@ def drive_and_sample(
                 "entries": feed_specs, "tamper": FEED_CONTROL.get("tamper"),
                 "tamperScene": FEED_CONTROL.get("tamperScene"),
                 "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
-                "counterLayout": binary_counter_movie.layout(),
+                "counterLayout": counter_layout_for(feed_facts),
             }) + ")"
         )
     transport.evaluate(ENSURE_PLAYING_JS)

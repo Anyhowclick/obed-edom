@@ -41,6 +41,7 @@ def test_movie_matches_the_p2_pattern_container(full_movie):
     info, meta = full_movie["info"], full_movie["meta"]
     assert tuple(meta["size"]) == (1920, 540) and meta["fps"] == 30.0 and meta["codec"] == "h264"
     assert info["frames"] == 1381 and len(full_movie["reads"]) == 1381
+    assert info["sha256"] == "947f8944ba743878133bd0749d3a154c552e0a3cb4482b67ddbe8c23f2bd7203"
     assert imageio_ffmpeg.count_frames_and_secs(info["path"]) == (1381, pytest.approx(46.0333, abs=0.01))
 
 
@@ -75,12 +76,39 @@ def test_strip_bits_layout_and_even_parity():
         movie.strip_bits(1 << movie.DATA_BITS)
 
 
+def test_second_strip_layout_is_the_default_layout_shifted_right():
+    original, shifted = movie.layout(), movie.layout(movie.SECOND_STRIP_X)
+    assert shifted == {
+        **original,
+        "blockRects": [[x + movie.SECOND_STRIP_X, y, w, h] for x, y, w, h in original["blockRects"]],
+        "stripRect": [original["stripRect"][0] + movie.SECOND_STRIP_X, *original["stripRect"][1:]],
+    }
+    assert movie.layout(0) == original
+
+
+def test_second_strip_frame_decodes_the_same_counter_at_both_sites():
+    index = 1380
+    font = movie.ImageFont.load_default(size=movie.DIGITS_SIZE)
+    frame = movie.luma_frame(index, font, second_strip=True)
+    decoded = []
+    for counter_layout in (movie.layout(), movie.layout(movie.SECOND_STRIP_X)):
+        levels = [float(frame[y:y + h, x:x + w].mean()) for x, y, w, h in counter_layout["blockRects"]]
+        decoded.append(movie.decode_counter(levels, counter_layout))
+    assert [row["counter"] for row in decoded] == [index, index]
+    assert {row["reason"] for row in decoded} == {None}
+    default = movie.luma_frame(index, font)
+    shifted = movie.layout(movie.SECOND_STRIP_X)
+    levels = [float(default[y:y + h, x:x + w].mean()) for x, y, w, h in shifted["blockRects"]]
+    assert movie.decode_counter(levels, shifted)["counter"] is None
+
+
 def test_strip_and_digits_stay_clear_of_each_other_and_of_the_slide2_green_slot():
     sx, sy, sw, sh = movie.STRIP_RECT
     dx, dy, dw, dh = movie.DIGITS_RECT
     assert sy + sh <= dy
     assert sx + sw < GREEN_SLOT_SOURCE_X and dx + dw < GREEN_SLOT_SOURCE_X
     assert movie.BLOCK >= 16 and all(x + w <= sx + sw for x, _, w, _ in movie.BLOCK_RECTS)
+    assert sx + sw <= movie.SECOND_STRIP_X and movie.SECOND_STRIP_X + sw <= movie.WIDTH
 
 
 def fake_p2_tree(root: Path) -> None:

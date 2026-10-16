@@ -12,7 +12,7 @@ The fixture builder copies the P2 fixture (never writing under output/fixtures/p
 `Untitled.mov-*.mov` (html-player and html-disposable; html-unmodified keeps the Keynote originals and only its
 index.html is read) for this movie at the matching duration, and writes `fixture.json`.
 
-usage: uv run python scripts/binary_counter_movie.py --movie OUT.mov [--seconds 46.0333]
+usage: uv run python scripts/binary_counter_movie.py --movie OUT.mov [--seconds 46.0333] [--second-strip]
        uv run python scripts/binary_counter_movie.py --build-fixture [DEST]
 """
 
@@ -57,6 +57,7 @@ START, END = (1, 0), (0, 1)
 N_BLOCKS = len(START) + DATA_BITS + 1 + len(END)
 BLOCK_RECTS = tuple((GUTTER + i * (BLOCK + GUTTER), GUTTER, BLOCK, BLOCK) for i in range(N_BLOCKS))
 STRIP_RECT = (0, 0, GUTTER + N_BLOCKS * (BLOCK + GUTTER), BLOCK + 2 * GUTTER)
+SECOND_STRIP_X = 704
 DIGITS_RECT = (40, 120, 600, 260)
 DIGITS_SIZE = 220
 CRF = 8
@@ -66,10 +67,11 @@ MIN_CONTRAST = 128.0
 AMBIGUOUS_RATIO = 0.25
 
 
-def layout() -> dict[str, Any]:
+def layout(x_offset: int = 0) -> dict[str, Any]:
     return {
         "format": COUNTER_FORMAT, "sourceSize": [WIDTH, HEIGHT], "fps": FPS, "block": BLOCK, "gutter": GUTTER,
-        "blockRects": [list(rect) for rect in BLOCK_RECTS], "stripRect": list(STRIP_RECT),
+        "blockRects": [[x + x_offset, y, w, h] for x, y, w, h in BLOCK_RECTS],
+        "stripRect": [STRIP_RECT[0] + x_offset, *STRIP_RECT[1:]],
         "dataBits": DATA_BITS, "start": list(START), "end": list(END), "parity": "even",
         "minContrast": MIN_CONTRAST, "ambiguousRatio": AMBIGUOUS_RATIO,
         "order": "start(W,K), 12 index bits MSB first, even parity, end(K,W)",
@@ -184,14 +186,15 @@ def strip_bits(index: int) -> list[int]:
     return [*START, *data, sum(data) % 2, *END]
 
 
-def luma_frame(index: int, font: ImageFont.FreeTypeFont) -> np.ndarray:
+def luma_frame(index: int, font: ImageFont.FreeTypeFont, *, second_strip: bool = False) -> np.ndarray:
     x = np.arange(WIDTH)
     row = np.where((x + index * GRATING_PX_PER_S // FPS) % GRATING_PERIOD > GRATING_PERIOD // 2, GRATING[1], GRATING[0])
     y = np.broadcast_to(row.astype(np.uint8), (HEIGHT, WIDTH)).copy()
     sx, sy, sw, sh = STRIP_RECT
-    y[sy:sy + sh, sx:sx + sw] = Y_BACKGROUND
-    for bit, (bx, by, bw, bh) in zip(strip_bits(index), BLOCK_RECTS):
-        y[by:by + bh, bx:bx + bw] = Y_WHITE if bit else Y_BLACK
+    for offset in ((0, SECOND_STRIP_X) if second_strip else (0,)):
+        y[sy:sy + sh, sx + offset:sx + sw + offset] = Y_BACKGROUND
+        for bit, (bx, by, bw, bh) in zip(strip_bits(index), BLOCK_RECTS):
+            y[by:by + bh, bx + offset:bx + bw + offset] = Y_WHITE if bit else Y_BLACK
     dx, dy, dw, dh = DIGITS_RECT
     digits = Image.new("L", (dw, dh), 0)
     ImageDraw.Draw(digits).text((dw // 2, dh // 2), str(index), fill=255, font=font, anchor="mm")
@@ -209,7 +212,7 @@ def frame_count(seconds: float, fps: int = FPS) -> int:
     return int(round(seconds * fps))
 
 
-def write_movie(dest: Path, *, seconds: float = SECONDS, fps: int = FPS) -> dict[str, Any]:
+def write_movie(dest: Path, *, seconds: float = SECONDS, fps: int = FPS, second_strip: bool = False) -> dict[str, Any]:
     """H.264 baseline yuv420p MP4 bytes (named like the Keynote export), CRF `CRF`, keyframe every `KEYINT` frames."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".tmp.mp4")
@@ -222,7 +225,7 @@ def write_movie(dest: Path, *, seconds: float = SECONDS, fps: int = FPS) -> dict
     assert proc.stdin is not None
     try:
         for index in range(frames):
-            proc.stdin.write(yuv420p(luma_frame(index, font)))
+            proc.stdin.write(yuv420p(luma_frame(index, font, second_strip=second_strip)))
     finally:
         proc.stdin.close()
     stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
@@ -306,10 +309,13 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--build-fixture", type=Path, nargs="?", const=BINARY_FIXTURE, metavar="DEST",
                        help=f"copy {P2_FIXTURE} to DEST (default {BINARY_FIXTURE}) with binary-counter movies")
     parser.add_argument("--seconds", type=float, default=SECONDS)
+    parser.add_argument("--second-strip", action="store_true", help=f"also draw the counter strip at source x={SECOND_STRIP_X}")
     args = parser.parse_args(argv)
     if args.movie:
-        print(json.dumps(write_movie(args.movie, seconds=args.seconds)))
+        print(json.dumps(write_movie(args.movie, seconds=args.seconds, second_strip=args.second_strip)))
     else:
+        if args.second_strip:
+            parser.error("--second-strip requires --movie")
         manifest = build_fixture(args.build_fixture)
         print("BUILT", args.build_fixture, json.dumps(manifest["movies"]))
     return 0

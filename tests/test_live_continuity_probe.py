@@ -12593,7 +12593,12 @@ def test_feed_ordinal_tamper_is_limited_to_the_requested_scene() -> None:
         probe.live_host_module._continuity_plan_script(runtime, {"width": 1920, "height": 1080})
 
 
-def test_feed_instrument_is_registered_before_navigation() -> None:
+@pytest.mark.parametrize(("plan_sha", "offset"), [
+    (probe.D7_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
+    (probe.D7S_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
+    ("0" * 64, 0),
+])
+def test_feed_instrument_is_registered_before_navigation(plan_sha: str, offset: int) -> None:
     pin_src, pin_dst = dict(SRC_RECT), dict(DST_RECT)
     bridge_src = {"x": 30, "y": 40, "w": 300, "h": 170}
     bridge_dst = {"x": 300, "y": 200, "w": 600, "h": 340}
@@ -12606,6 +12611,7 @@ def test_feed_instrument_is_registered_before_navigation() -> None:
         1: {"pin.mov": [pin_dst], "bridge.mov": [bridge_dst]},
     })
     facts = {"verdicts": probe.verdict_specs(plan)}
+    facts["planSha256"] = plan_sha
     for spec, draw in zip(facts["verdicts"], (1, 2), strict=True):
         spec.update(underArtwork=True, feed={"draw": draw}, feedDraws={}, artworkAbove=[])
     feed_specs = probe.feed_specs_for(facts)
@@ -12613,7 +12619,7 @@ def test_feed_instrument_is_registered_before_navigation() -> None:
     assert facts["verdicts"][0]["srcRect"] == pin_dst != feed_specs[0]["srcRect"]
     kwargs = probe.feed_host_kwargs(facts)
     assert kwargs["pre_navigation_scripts"][0].startswith(probe.mm_feed_instrument.INSTRUMENT_JS)
-    assert json.dumps(probe.binary_counter_movie.layout()) in kwargs["pre_navigation_scripts"][0]
+    assert json.dumps(probe.binary_counter_movie.layout(offset)) in kwargs["pre_navigation_scripts"][0]
     assert "window.__obedMmFeedProbe.bootstrap(" in kwargs["pre_navigation_scripts"][0]
     assert probe.feed_host_kwargs()["pre_navigation_scripts"] == ()
     absent = type("Absent", (), {
@@ -12621,7 +12627,6 @@ def test_feed_instrument_is_registered_before_navigation() -> None:
     })()
     with pytest.raises(RuntimeError, match="not installed before page scripts"):
         probe.drive_and_sample(absent, feed_facts=facts)
-
 
 def test_feed_variant_patches_the_host_binding_and_reports_the_variant_sha(monkeypatch: pytest.MonkeyPatch) -> None:
     original_script = lambda *, continuous, once: f"source:{continuous}:{once}"

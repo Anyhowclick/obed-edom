@@ -82,7 +82,11 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import imageio_ffmpeg
 import pytest
+
+from obed_edom.fixture_paths import fixture
+from obed_edom.live_continuity import _referenced_movies
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "run_gates.sh"
@@ -349,6 +353,21 @@ def _make_gates(root: Path) -> dict[str, object]:
         (export / "index.html").write_text(f"{deck}-html")
     unrepaired = qual_b_source / "q7-fixtures" / "D7-unrepaired" / "html-player"
     shutil.copytree(qual_b_source / "D7-html", unrepaired)
+    alpha_source = fixture("alpha-dsk-textures")
+    manifest = json.loads((alpha_source / "manifest.json").read_text())
+    referenced = _referenced_movies(
+        alpha_source / "html-unmodified", manifest["slides"], resolver=lambda base, relative: base / relative,
+    )
+    alpha_donor = qual_b_source / "q7-fixtures" / "Alpha" / "html-unmodified"
+    alpha_donor.mkdir(parents=True)
+    seed = root / "alpha-donor.mov"
+    subprocess.run([
+        imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+        "color=black:size=16x16:rate=1", "-frames:v", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(seed),
+    ], check=True)
+    for name in sorted({path.name for paths in referenced.values() for path in paths if path is not None}):
+        shutil.copy2(seed, alpha_donor / name)
+    seed.unlink()
     slide_uuid = "EC1B1743-BCCE-459F-9080-E0385E656256"
     slide_path = qual_b_source / "D7-html" / "assets" / slide_uuid / f"{slide_uuid}.json"
     payload = json.loads(slide_path.read_text())
@@ -414,6 +433,7 @@ def _make_gates(root: Path) -> dict[str, object]:
     return {
         "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list,
         "sleeps": sleeps_list, "survivors": survivors, "patched": patched, "tmp": root, "qual_b_source": qual_b_source,
+        "alpha_source": alpha_source, "alpha_donor": alpha_donor,
     }
 
 
@@ -541,6 +561,12 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
     assert set(identities) == {"D7", "D7s", "D7-unrepaired-refusal"}
     assert all(len(row["headerSha256"]) == 64 and row["slideJson"] for row in identities.values())
     assert identities["D7-unrepaired-refusal"]["hits"][0].startswith("slide 3 0/baseLayer/layers/4/layers/0/layers/0:")
+    restored = list((gates["out"] / "alpha-dsk-repaired").rglob("*.mov")) + list(
+        (gates["out"] / "alpha-dsk-repaired").rglob("*.mp4")
+    )
+    assert len(restored) == 11 and "Alpha movies restored 5" in done.stdout
+    assert not list((gates["alpha_source"] / "html-unmodified").rglob("*.mov"))
+    assert not list((gates["alpha_source"] / "html-unmodified").rglob("*.mp4"))
 
     slide_path = (
         gates["qual_b_source"]
@@ -574,6 +600,25 @@ def test_missing_qual_b_source_is_refused_only_when_feed_arms_are_requested(gate
     dev = gates["run"]("--tier", "dev", outdir=gates["tmp"] / "dev-out")
     assert dev.returncode != 2
     assert "QUAL_B_SOURCE" not in dev.stderr
+
+
+@pytest.mark.parametrize("failure", ["missing", "unreadable", "dir"])
+def test_alpha_movie_staging_refuses_before_timed_runs(gates, failure: str) -> None:
+    if failure == "dir":
+        shutil.rmtree(gates["alpha_donor"])
+        expected = "Alpha complete export donor is missing at"
+    else:
+        donor = next(gates["alpha_donor"].iterdir())
+    if failure == "missing":
+        donor.unlink()
+        expected = "is missing needed movie file name(s)"
+    elif failure == "unreadable":
+        donor.write_bytes(b"not a movie")
+        expected = "has unreadable or mixed movie assets:"
+    done = gates["run"](outdir=gates["tmp"] / f"alpha-{failure}")
+    assert done.returncode == 2 and expected in done.stderr
+    assert gates["events"]() == ["prewarm html-unmodified", "prewarm html-unmodified"]
+    assert "Alpha texture repair FAILED; no run launched" in done.stdout
 
 
 def test_a_run_that_writes_no_status_fails_closed_even_with_a_passing_artifact(gates) -> None:

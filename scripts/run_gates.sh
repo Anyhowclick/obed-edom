@@ -397,18 +397,43 @@ identities["D7-unrepaired-refusal"]={"exportRoot":str(control_root.resolve()),"h
      for slide in control_slides]}
 (out/"feed-fixture-identities.json").write_text(json.dumps(identities,indent=2)+"\n")
 PYEOF
-  $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
+  $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" "$QUAL_B_SOURCE/q7-fixtures/Alpha/html-unmodified" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
 import json,shutil,sys
 from pathlib import Path
 from obed_edom import preview_textures
-source,dest=Path(sys.argv[1]),Path(sys.argv[2])
+from obed_edom.live_continuity import _referenced_movies,codec_report
+source,dest,complete=map(Path,sys.argv[1:])
+if not complete.is_dir():
+    raise SystemExit(f"Alpha complete export donor is missing at {complete}")
 manifest=json.loads((source/"manifest.json").read_text())
 shutil.copytree(source/"html-unmodified",dest)
+resolver=lambda base,relative:base/relative
+referenced=_referenced_movies(dest,manifest["slides"],resolver=resolver)
+if not referenced:
+    raise SystemExit("Alpha fixture references no movies")
+missing=sorted({path for paths in referenced.values() for path in paths if path is not None and not path.is_file()})
+outside=[path for path in missing if not path.resolve().is_relative_to(dest.resolve())]
+if outside:
+    raise SystemExit(f"Alpha fixture references missing movie(s) outside {dest}: {', '.join(map(str,outside))}")
+donors={}
+for path in sorted(complete.rglob("*")):
+    if path.is_file(): donors.setdefault(path.name,path)
+absent=sorted({path.name for path in missing if path.name not in donors})
+if absent:
+    raise SystemExit(f"Alpha complete export donor {complete} is missing needed movie file name(s): {', '.join(absent)}")
+for path in missing:
+    path.parent.mkdir(parents=True,exist_ok=True)
+    relative=complete/path.relative_to(dest)
+    shutil.copy2(relative if relative.is_file() else donors[path.name],path)
+print(f"Alpha movies restored {len({path.name for path in missing})}")
 record=preview_textures.repair_textures(dest,manifest["slides"],player_digest=manifest["playerDigest"],log=print)
 if not record.get("repaired"):
     raise SystemExit("Alpha repair changed no textures; the registered fixture is not the unrepaired input")
 if preview_textures._detect(preview_textures._load(dest,manifest["slides"]),preview_textures._Renderer()):
     raise SystemExit("Alpha repair left detector hits")
+unreadable=[entry["asset"] for entry in codec_report(dest,manifest["slides"],resolver=resolver) if entry["codec"] is None]
+if unreadable:
+    raise SystemExit(f"Alpha repaired fixture has unreadable or mixed movie assets: {', '.join(unreadable)}")
 print("Alpha repaired fixture",dest)
 PYEOF
 fi
