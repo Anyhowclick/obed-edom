@@ -177,16 +177,11 @@ Run focused affected tests first as needed. Diagnose failures before editing exp
 
 Only measured failure to meet 1 px, or positive completion times beyond 320 ms, can require an owner threshold/product decision. Neither is pre-authorized. Missing measurements cannot establish a pass. The guarantee covers collection points, not unobserved mutations between callbacks; context completion is not compositor presentation. No other design approval is pending.
 
-## r3 changes
+## Review log
 
-r1 findings were folded in r2; N3 completes D3, and N2 corrects the L4 overshoot.
+The plan, by Codex GPT-6 Astra high, had three critiques from Opus 5.5 high:
+- r1 NOT READY: 1 blocker (the fold included hidden samples), 3 majors (1 px feasibility, over-built gate scoping, oversized validation matrix), 4 mediums, 6 lows. All folded into r2.
+- r2 NOT READY: 3 mediums (a contract inference that would void a report after one thrown draw, refusing v1 outright, no environment setup), 3 lows. All folded into r3.
+- r3 READY: 1 low (inline `UV_PROJECT_ENVIRONMENT`), folded by the coordinator.
 
-All six r2 findings were verified against code and folded; none refuted.
-
-- **N1:** Removed the recorded-draw/finite-timestamp contract inference; Test 4 now rejects `firstDrawAt < createdAt` and permits null after a thrown draw. The scorer still grants no exemption for null/out-of-order completion. Frame counts increment before the original call (`scripts/mm_feed_instrument.py:264,273`), and producer failure affects every under-artwork carry (`scripts/live_continuity_probe.py:4355-4373`).
-- **N2:** Preserved v1/v2 branching and fixture versions; require both new keys in either version and test deletion. This avoids unrelated v2 hand-back requirements (`scripts/live_evidence_contract.py:688-733,901-911,947-952`; v1 fixtures: `tests/test_live_continuity_probe.py:12295,12524`, `tests/test_live_evidence_contract.py:347`).
-- **N3:** Added a heavy 3.12 all-extras/all-groups sync plus dashboard `npm ci` before Step 0, kept Python environments in scratch, and added `-rs`/skip-count reporting for both suites. Verified optional test/IWA dependencies and dashboard TypeScript requirements (`pyproject.toml:32-49`; `dashboard/package.json:9-12,29`); fixture skips are explicit (`tests/test_live_continuity_probe.py:3462-3472`).
-- **L-a:** Moved the two permanent authored-source probe additions into Step 0 and removed the scratch-wrapper instructions; continuity `srcRect` remains unchanged, and extra fields are ignored by `_fields` (`scripts/live_continuity_probe.py:1565-1575,1930-1940`; `scripts/live_evidence_contract.py:115-120`).
-- **L-b:** Qualified departure-early-hide's exemption by timing bounds while retaining True and zero exempted visible samples: the variant hides immediately, but the exemption still checks grace (`scripts/continuity_core_variants.py:103-112`; `scripts/mm_feed_instrument.py:621-626`).
-- **r3 low (coordinator fold):** `UV_PROJECT_ENVIRONMENT` set inline on every 3.12 command; shell state does not persist across agent Bash calls.
-- **L-c:** Corrected the suite-command citation to `.agents/skills/obed-edom/SKILL.md:43-50` (dashboard commands at 43–46; xdist at 50).
+Implementation and code review are recorded in `.agents/reviews/stage-b/predraw-geometry/gate-record-2026-10-16.md`.
