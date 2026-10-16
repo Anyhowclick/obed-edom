@@ -9366,6 +9366,8 @@ class TestChainCarryWindow:
     "decoded-then-lost-entering-source", "mid-source-replacement", "hidden-premounted-successor",
     "entry-hidden-decoded", "multi-scene-source", "chain-clip", "forced-seek",
     "gl-excused-missing", "differing-clocks", "schema2-visible-undecoded", "union-start",
+    "prior-zero-rect-first-destination-decode", "pin-busy-first-decode",
+    "alpha-zero-rect-cold-start", "hidden-prior-decode-loss", "gl-absent-decoder",
 ])
 def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
     boundary = 9 if case == "differing-clocks" else 3 if case == "multi-scene-source" else 2
@@ -9382,6 +9384,39 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
         for row in rows[:15]:
             row["videos"][0]["readyState"] = 1
             row["videos"][0]["currentTime"] = rows[0]["videos"][0]["currentTime"]
+    elif case == "alpha-zero-rect-cold-start":
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for row in rows[:15]:
+            row["videos"][0].update(readyState=1, rect=dict(zero))
+    elif case == "prior-zero-rect-first-destination-decode":
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        prior = sample(-20.0, 0, video(
+            id=1, el_id=1, t=-20.0, scene=0, current_time=4.98, rect=zero,
+        ))
+        for row in rows[:40]:
+            row["videos"][0]["readyState"] = 1
+        rows = [prior, *rows]
+    elif case == "pin-busy-first-decode":
+        for row in rows[:39]:
+            row["videos"][0]["readyState"] = 1
+        rows[39]["busy"] = True
+    elif case == "hidden-prior-decode-loss":
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        prior = sample(-20.0, 0, video(
+            id=1, el_id=1, t=-20.0, scene=0, current_time=4.98, rect=zero,
+        ))
+        for row in rows[:20]:
+            row["videos"][0]["readyState"] = 1
+        rows = [prior, *rows]
+    elif case == "gl-absent-decoder":
+        rows = []
+        zero = {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        for index, scene in enumerate([0] * 10 + [1] * 40 + [2] * 40):
+            t = index * 20.0
+            videos = [video(
+                id=1, el_id=1, t=t, scene=scene, current_time=5 + t / 1000, rect=zero,
+            )] if scene == 0 else []
+            rows.append(sample(t, scene, *videos))
     elif case == "never-decoded":
         for row in rows:
             row["videos"][0]["readyState"] = 1
@@ -9461,6 +9496,8 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
                 elId=decoder["elId"], instance=None, readyState=decoder["readyState"],
                 currentTime=decoder["currentTime"], paused=decoder["paused"], ended=decoder["ended"], clippedBy=None,
             )
+            if pv["rect"]["w"] == 0 or pv["rect"]["h"] == 0:
+                pv["visibleRect"] = None
     if case == "entry-hidden-decoded":
         for row in rows[:10]:
             row["pp"]["videos"][0]["opacity"] = 0.0
@@ -9490,6 +9527,27 @@ def test_c3_score_arm_uses_one_decoder_grounded_carry_window(case: str) -> None:
         assert scored["window"]["coldStart"] == {
             "rows": 15, "durationMs": 300.0, "firstSeenT": 0.0,
         }
+    elif case == "alpha-zero-rect-cold-start":
+        assert scored["verdict"] is False
+        assert scored["window"]["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
+    elif case == "prior-zero-rect-first-destination-decode":
+        assert scored["verdict"] is None
+        assert scored["reason"] == "inconclusive: carried decoder never decoded before the crossing"
+    elif case == "pin-busy-first-decode":
+        assert scored["verdict"] is None
+        assert scored["reason"] == "inconclusive: carried decoder never decoded on a settled source row before the crossing"
+    elif case == "hidden-prior-decode-loss":
+        assert scored["verdict"] is False and scored["decodeLoss"]
+        assert scored["window"]["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
+    elif case == "gl-absent-decoder":
+        gl_interval = {"start": rows[25]["ts"] - 1.0, "end": rows[55]["ts"] + 1.0}
+        scored = probe.score_continuity(
+            rows, ASSET, boundary, SRC_RECT, DST_RECT, True,
+            gl_interval=gl_interval, phases=None, spec=spec,
+        )
+        assert scored["verdict"] is False
+        assert scored["reason"] == "no decoder id spans the boundary within the window"
+        assert scored["paint"]["status"] == "fail"
     elif case in ("d7-decoded-source", "differing-clocks"):
         assert scored["verdict"] is True
         assert cold["durationMs"] is None and cold["rows"] == 0
@@ -11442,6 +11500,19 @@ class TestFold5IdentityBeforeSourceAndGrounding:
             samples[0]["busy"] = None
         assert score_moving_boundary(samples)["verdict"] is expected
         assert (probe.forced_window(samples, 8, 7, -2000.0) is None) is (expected is None)
+
+    @pytest.mark.parametrize(("case", "expected"), [
+        ("dark", False),
+        ("darkBusyUnreadable", None),  # inv R2: busy None moved paintStart past the dark frames
+    ])
+    def test_paint_grounding_validates_the_source_settle_state(self, case: str, expected: bool | None) -> None:
+        samples = _v2(rows_around_boundary(n_before=250))
+        for row in samples[10:30]:
+            row["pp"]["videos"][0]["opacity"] = 0.0
+        if case == "darkBusyUnreadable":
+            for row in samples[:31]:
+                row["busy"] = None
+        assert probe.score_continuity(samples, ASSET, 2.0, SRC_RECT, DST_RECT, True)["verdict"] is expected
 
     @pytest.mark.parametrize(("unplaced", "expected"), [
         (False, False),

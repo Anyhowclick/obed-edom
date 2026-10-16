@@ -234,9 +234,6 @@ def window_bounds(phases: Phases, window: CarryWindow, element_id: Any) -> tuple
             ]
 
         decoded = decoded_in_scene(source)
-        fallback = _finite(window.get("sourceSceneFallback"))
-        if not decoded and fallback is not None and fallback != source:
-            decoded = decoded_in_scene(fallback)
         paint_start = min(decoded) if decoded else start
         start = min(start, max([paint_start, *floors]))
     asset = window.get("asset")
@@ -249,7 +246,6 @@ def window_bounds(phases: Phases, window: CarryWindow, element_id: Any) -> tuple
         and observation.get("asset") == asset
         and _finite(observation.get("t")) is not None
         and observation["t"] < start
-        and _visible_observation(observation)
         and _decoded_observation(observation)
         for mount in (phases.get("mounts") or {}).values()
         for observation in mount.get("observations") or []
@@ -395,7 +391,6 @@ def carry_window(
         "crossing": crossing,
         "groundedStart": grounded_start,
         "sourceScene": (transition if transition is not None else boundary) - 1.0 if boundary is not None else None,
-        "sourceSceneFallback": _finite(spec.get("sourceScene")),
         "asset": canonical_asset_name(spec.get("asset")),
         "forcedSeek": forced,
         "glInterval": dict(gl_interval) if valid_gl else None,
