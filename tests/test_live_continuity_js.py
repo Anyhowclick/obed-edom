@@ -4016,7 +4016,7 @@ a.__inStage = false;
 detach(a);
 a.parentElement = null;
 const beforeDraw = {{opacity: a.style.opacity, paused: a.paused, once,
-    rect: {{left: a.style.left, top: a.style.top, width: a.style.width, height: a.style.height}},
+  rect: {{left: a.style.left, top: a.style.top, width: a.style.width, height: a.style.height}},
   parent: a.parentNode === sourceRoot ? 'source-root' : a.parentNode === bodyEl ? 'body' : 'other',
   order: sourceRoot.kids.map((node) => node.id || node.__obedInstance)}};
 {before_first}
@@ -4104,11 +4104,12 @@ def test_stand_down_at_the_first_callback_hides_the_decoder_at_callback_end():
 
 
 def test_startup_moved_decoder_restores_source_placement_after_the_first_draw(monkeypatch):
-    import continuity_core_variants as variants
+    repo = Path(__file__).resolve().parent.parent
+    if str(repo / "scripts") not in sys.path:
+        sys.path.insert(0, str(repo / "scripts"))
+    from continuity_core_variants import variant_core
 
-    from obed_edom import live_continuity_js
-
-    monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variants.variant_core("startup-moved-decoder"))
+    monkeypatch.setattr(live_continuity_js, "PRESERVE_CORE_JS", variant_core("startup-moved-decoder"))
     result = _departure_hide("continuous")
     assert result["beforeDraw"]["parent"] == "body"
     assert result["beforeDraw"]["opacity"] == "1"
