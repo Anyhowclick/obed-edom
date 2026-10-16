@@ -2732,6 +2732,25 @@ def _referenced_movies(
     return found
 
 
+def first_h264_movie(
+    export_root: Path,
+    slides: list[dict[str, Any]],
+    *,
+    resolver: Callable[[Path, str], Path] = safe_export_file,
+    probe: Callable[[Path], str | None] = movie_codec,
+) -> tuple[str, Path] | None:
+    for asset, paths in _referenced_movies(export_root, slides, resolver=resolver).items():
+        for path in paths:
+            if path is None:
+                continue
+            try:
+                if codec_family(probe(path)) == "h264":
+                    return asset, path
+            except Exception:
+                continue
+    return None
+
+
 def codec_report(
     export_root: Path,
     slides: list[dict[str, Any]],

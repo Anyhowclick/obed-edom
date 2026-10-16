@@ -26,7 +26,7 @@ import time
 import urllib.request
 from collections.abc import Sequence
 from concurrent.futures import Future
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,7 +37,7 @@ from websockets.sync.client import connect
 
 from .devtools_port import DEVTOOLS_ACTIVE_PORT, ForeignDevToolsEndpoint, verify_devtools_owner, wait_devtools_active_port
 from .html_preview import preview_root, safe_export_file
-from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_plan, plan_signature
+from .live_continuity import ContinuityPlan, Unsupported, codec_report, derive_plan, first_h264_movie, plan_signature
 from .live_continuity_js import CONTINUITY_VERSION, PRESERVE_CORE_JS, js_sha256
 from .live_gl_replay_js import GL_REPLAY_VERSION, gl_replay_script
 from .live_gl_replay_js import js_sha256 as gl_replay_js_sha256
@@ -73,6 +73,7 @@ ADVANCE_ENV = "OBED_LIVE_ADVANCE"
 CONTINUITY_ENV = "OBED_LIVE_CONTINUITY"
 GL_REPLAY_ENV = "OBED_LIVE_GL_REPLAY"
 MM_FEED_ENV = "OBED_LIVE_MM_FEED"
+MOVIE_WARMUP_ENV = "OBED_LIVE_MOVIE_WARMUP"
 GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 GOTO_AUTOPLAY_DEFERRED_NOTE = "Movies idle until next advance"
 _UNSET = object()
@@ -103,7 +104,8 @@ _LIVE_SNAPSHOT_EXPR = (
     "(()=>{var s=window.__obedLive?window.__obedLive.snapshot():null;if(!s||typeof s!=='object')return s;"
     "var o={};Object.keys(s).forEach(function(k){o[k]=s[k]});try{var a=window.__OBED_MM_FEED__,e=a&&a.entries;"
     "if(e&&typeof e==='object'){var t={};Object.keys(e).forEach(function(k){var v=e[k];if(v&&typeof v==='object')"
-    "t[k]={mode:v.mode,state:v.state,reason:v.reason,hold:v.hold}});o.__obedMmFeedEntries=t}}catch(x){}return o})()"
+    "t[k]={mode:v.mode,state:v.state,reason:v.reason,hold:v.hold}});o.__obedMmFeedEntries=t}}catch(x){}"
+    "try{var w=window.__obedMovieWarmup;if(w&&typeof w==='object')o.__obedMovieWarmup={state:w.state,readyMs:w.readyMs}}catch(x){}return o})()"
 )
 
 
@@ -209,6 +211,24 @@ def _continuity_core_script() -> str:
 
 def _continuity_scripts(plan: dict[str, Any], canvas: dict[str, int]) -> str:
     return _continuity_plan_script(plan, canvas) + _continuity_core_script()
+
+
+def _movie_warmup_script(url: str) -> str:
+    payload = json.dumps(url).replace("</", "<\\/")
+    return (
+        '<script id="obed-movie-warmup">(function(){try{var remove,load,start,video,timer,done=false,finish,ready,failed;'
+        'finish=function(state){if(done)return;done=true;clearTimeout(timer);if(video){'
+        'video.removeEventListener("loadeddata",ready);video.removeEventListener("error",failed);'
+        'try{remove.call(video,"src")}catch(e){}try{load.call(video)}catch(e){}video=null}'
+        'window.__obedMovieWarmup={state:state,readyMs:state==="ready"?performance.now()-start:null}};'
+        'ready=function(){finish("ready")};failed=function(){finish("error")};'
+        'window.__obedMovieWarmup={state:"loading",readyMs:null};remove=Element.prototype.removeAttribute;'
+        'load=HTMLMediaElement.prototype.load;start=performance.now();video=document.createElement("video");'
+        'video.muted=video.defaultMuted=true;video.preload="auto";video.addEventListener("loadeddata",ready);'
+        'video.addEventListener("error",failed);timer=setTimeout(function(){finish("timeout")},5000);'
+        f'video.src={payload};load.call(video)'
+        '}catch(e){try{if(finish)finish("error")}catch(x){}}})();</script>\n'
+    )
 
 
 def _mm_feed_renderer(version: Any) -> str | None:
@@ -455,9 +475,10 @@ def choose_display(display_id: int | None, displays: list[OutputDisplay] | None 
 
 
 class _AssetServer:
-    def __init__(self, root: Path, patched_player: bytes, resolver: Callable[[Path, str], Path] = safe_export_file, *, alpha: bool = False, continuity_script: str = "") -> None:
+    def __init__(self, root: Path, patched_player: bytes, resolver: Callable[[Path, str], Path] = safe_export_file, *, alpha: bool = False, continuity_script: str = "", movie_warmup_script: str = "") -> None:
         self.root, self.patched_player, self.resolver, self.alpha = root, patched_player, resolver, alpha
         self.continuity_script = continuity_script
+        self.movie_warmup_script = movie_warmup_script
         self.httpd: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
         self._probe_lock = threading.Lock()
@@ -639,7 +660,7 @@ class _AssetServer:
         source = source[: head.end()] + style + source[head.end() :]
         body = re.search(r"<body[^>]*>", source, flags=re.IGNORECASE)
         assert body is not None
-        body_inject = overlay + self.continuity_script + fit_script
+        body_inject = overlay + self.movie_warmup_script + self.continuity_script + fit_script
         return (source[: body.end()] + body_inject + source[body.end() :]).encode()
 
     def stop(self) -> None:
@@ -1278,6 +1299,8 @@ class LiveOutputHost:
         self._gl_replay_script = ""
         self._codec_report: list[dict[str, Any]] = []
         self._codec_warnings: list[str] = []
+        self._movie_warmup_preference = "auto"
+        self._movie_warmup_logged = False
         self._placement_token = ""
         self._placement_frame: str | None = None
         self._placement_origin: str | None = None
@@ -1330,6 +1353,29 @@ class LiveOutputHost:
             )
         ]
         return report, warnings
+
+    def _resolve_movie_warmup(self) -> str:
+        info: dict[str, Any] = {
+            "preference": self._movie_warmup_preference, "asset": None, "url": None, "reason": None,
+        }
+        script = ""
+        try:
+            if self._movie_warmup_preference == "off":
+                info["reason"] = "off"
+            else:
+                selected = first_h264_movie(self.export_root, self.slides, resolver=self.resolver)
+                if selected is None:
+                    info["reason"] = "no-h264"
+                else:
+                    asset, path = selected
+                    url = quote(path.resolve().relative_to(self.export_root.resolve()).as_posix(), safe="/")
+                    info.update(asset=asset, url=url)
+                    script = _movie_warmup_script(url)
+        except Exception:
+            info["reason"] = "error"
+        if self._logger is not None:
+            self._logger.log("movieWarmup", **info)
+        return script
 
     def _resolve_continuity_static(self) -> tuple[str, str | None, dict[str, Any] | None]:
         """Resolve continuity mode from the export alone, before the browser starts.
@@ -1622,6 +1668,7 @@ class LiveOutputHost:
             raise LiveHostError("Program player has been stopped.")
         if self._transport:
             return self.observe()
+        self._movie_warmup_logged = False
         self._advance_mode = os.environ.get(ADVANCE_ENV, "key").strip().lower()
         if self._advance_mode not in ("key", "click"):
             raise LiveHostError("OBED_LIVE_ADVANCE must be key or click.")
@@ -1646,6 +1693,10 @@ class LiveOutputHost:
             if env_mm_feed not in ("", "off", "auto"):
                 raise LiveHostError("OBED_LIVE_MM_FEED must be off or auto.")
             self._mm_feed_preference = env_mm_feed or "auto"
+        env_movie_warmup = os.environ.get(MOVIE_WARMUP_ENV, "").strip().lower()
+        if env_movie_warmup not in ("", "off", "auto"):
+            raise LiveHostError("OBED_LIVE_MOVIE_WARMUP must be off or auto.")
+        self._movie_warmup_preference = env_movie_warmup or "auto"
         self._goto_autoplay_mode = "off" if os.environ.get(GOTO_AUTOPLAY_ENV, "").strip().lower() == "off" else "on"
         self._log_path = _new_log_path()
         self._logger = _SessionLogger(self._log_path)
@@ -1663,6 +1714,7 @@ class LiveOutputHost:
             self._validate_export()
             self._expected_scene_count = self._authored_scene_count()
             self._codec_report, self._codec_warnings = self._resolve_codecs()
+            movie_warmup_script = self._resolve_movie_warmup()
             self._logger.log("codecs", report=self._codec_report, warnings=self._codec_warnings)
             self._continuity_mode, self._continuity_reason, self._continuity_runtime_plan = self._resolve_continuity_static()
             player = self.resolver(self.export_root, "assets/player/main.js").read_bytes()
@@ -1693,7 +1745,7 @@ class LiveOutputHost:
             )
             self._server = self.server_factory(
                 self.export_root, patched, self.resolver, alpha=bool(self._attach_endpoint),
-                continuity_script=continuity_script,
+                continuity_script=continuity_script, movie_warmup_script=movie_warmup_script,
             )
             url = self._server.start()
             self._install_placement_channel(version, url)
@@ -2801,6 +2853,16 @@ class LiveOutputHost:
             value = transport.evaluate(_LIVE_SNAPSHOT_EXPR)
         if not isinstance(value, dict): raise LiveHostError("Recognised player observation is unavailable.")
         self._refresh_poster_holds(value.get("__obedMmFeedEntries"))
+        warmup = value.get("__obedMovieWarmup")
+        if not self._movie_warmup_logged and isinstance(warmup, dict):
+            state, ready_ms = warmup.get("state"), warmup.get("readyMs")
+            numeric_ready = (
+                isinstance(ready_ms, (int, float)) and not isinstance(ready_ms, bool)
+                and math.isfinite(ready_ms) and ready_ms >= 0
+            )
+            if (state == "ready" and numeric_ready) or (state in {"error", "timeout"} and ready_ms is None):
+                self._logger.log("movieWarmup", state=state, readyMs=ready_ms)
+                self._movie_warmup_logged = True
         revision = value.get("revision")
         self._runtime_revision = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
         self._can_advance = bool(value.get("canAdvance"))

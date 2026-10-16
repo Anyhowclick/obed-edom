@@ -261,6 +261,11 @@ plan's signature: equal to a gate deck's means the same plan the gates measured.
 Set `OBED_LIVE_CONTINUITY=off` before starting the dashboard server to disable it
 outright.
 
+At deck load, live output also performs one invisible, silent H.264 movie warm-up,
+independent of continuity, then releases the decoder. Set
+`OBED_LIVE_MOVIE_WARMUP=off` to disable it. A residual first-start delay of about
+1–3 frames remains.
+
 **Scaled stage**: footprints are derived in authored-canvas pixels and mapped
 through the player's own `#stage` scale each frame, so continuity qualifies
 whenever the stage is the authored size under a uniform scale — a 2560x1440
