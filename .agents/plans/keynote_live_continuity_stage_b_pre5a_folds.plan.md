@@ -1,4 +1,4 @@
-# Stage B pre-5a folds: open-issue fixes before the pixel round (plan r3)
+# Stage B pre-5a folds: open-issue fixes before the pixel round (plan r4, final)
 
 Base: `claude/stage-b-c4c5` @ `6639d4f0` (C2-integration phases 1–3). Evidence and root causes:
 handover `stage-b-c2-integration-2026-10-17.md` ("Pre-5a integration round, NON-PIXEL part", "Root causes of the three
@@ -10,6 +10,9 @@ Where the critics disagreed, the resolution is stated inline ("Coordinator:").
 r3: critique r2 by Fable (`pre5a-folds-critique-fable-r2.md`; 1 blocker, 2 majors: the product `getError` stand-down,
 the F6a read collision, the drain/record contradiction) folded by the coordinator. The phase-3 streams are already
 landed on c4c5 (`6639d4f0`), so every fold's base is c4c5.
+r4 (final; plan critiques capped at 3 rounds): critique r3 by Fable (`pre5a-folds-critique-fable-r3.md`; no blocker,
+2 majors: `Verdict.OPEN` erased by validity precedence and uncountable by `tally`; RGBA scratch copy from an
+`alpha:false` drawing buffer errors) folded, plus its two `mark()` mediums. Remaining r3 lows are implementer notes.
 
 ## Owner decisions (2026-10-17, ~22:45)
 - **D-A.** Cost reduction option **(A)**: keep verifying every GL frame; restructure the reads. The `> 8` ms gate stays.
@@ -108,14 +111,20 @@ current requirements (incl. the continuous-mode explicit N/A at `gate_checks.py:
   only its target, so it carries no floor.
 - Each OPEN row prints `OPEN: <carry> holdFrame unseparated on moving footage (owner D-hold) sep f/m/l=… best=… target=…`
   (the counter-deck follow-up's evidence). OPEN stays disqualifying on its own: add `Verdict.OPEN` to `gate_checks.py`'s
-  verdict set (`:206-232`); the judge returns `_result(Verdict.OPEN, lines, candidate=Verdict.MATCH)` with `ok=False`
-  when any row is OPEN and there are no problems; `run_gates.sh` prints `DONE … open=N`; the §7 row reads
-  "MATCH (OPEN n)". It can therefore never pass when cadence is later resolved.
+  verdict set with `_RESULTS[Verdict.OPEN] = (4, "open")`; when any row is OPEN and there are no problems the judge
+  returns `_result(Verdict.OPEN, lines)` (candidate OPEN, NOT MATCH), so the class survives `_with_precedence`
+  (`gate_checks.py:263-284`, which keeps only `candidate.candidate` under an INVALID wrap) and `main` prints
+  `candidate: OPEN` under the INVALID line. `run_gates.sh`: `OPEN=0` beside `FAIL`/`PENDING`; `tally` (`:234`) gains
+  `4) OPEN=$((OPEN+1)); echo "    OPEN ITEMS: $2";;`; `DONE … failed=$FAIL pending=$PENDING open=$OPEN findings=…`;
+  the round exit treats `OPEN > 0` like `FAIL > 0`. §7 rows for feed-off 2/5/12s, attach-once and after-feed: candidate
+  `OPEN (n rows)`, final INVALID. It can therefore never pass when cadence is later resolved. Only `check_mm_feed`
+  tallies feed arms; no other consumer changes.
 - Red-first tests: saved feed-off-2s → MATCH with 3 OPEN lines; ambiguous-first + proven-False-last → MISMATCH;
   ambiguous-first + unreadable-last → MISMATCH; poster within margin of a read → MISMATCH; missing read / reordered
   phases → MISMATCH; other reason → MISMATCH; holdFrame False → MISMATCH; all-None arm → MISMATCH (floor); D7 attach-once
-  unaffected; non-target after-feed row unaffected; an
-  arm with OPEN rows returns `Verdict.OPEN`, `ok=False`.
+  unaffected; non-target after-feed row unaffected; saved
+  feed-off-2s → verdict OPEN, exit 4, candidate OPEN, 3 OPEN lines; wrapped under not-ok validity → INVALID with
+  `candidate: OPEN`; `tally 4` increments OPEN, not FAIL.
 
 ### F5. Sampler duplicate timestamp — DEFERRED (see D-ts)
 Recorded follow-up design (both critics): handle a duplicate logical frame atomically BEFORE `frameSeq++`/`rafTicks++`/
@@ -141,12 +150,17 @@ error-free by construction.** The product core polls `getError()` at the end of 
 active feed on any error (`src/obed_edom/live_mm_feed_js.py:467-480`, from its draw wrapper `:583-588`). The core wraps
 the context after the instrument, so instrument calls inside `finalizePixels` precede that poll. An instrument error
 would stand the product down (a null misread as a product regression); an instrument `getError()` would drain a real
-product fault (a false pass). Therefore: scratch textures are (re)allocated to `drawingBufferWidth × drawingBufferHeight`
-whenever either changes; copy rects are clamped to the drawing buffer AND the scratch; `checkFramebufferStatus` (which
+product fault (a false pass). Therefore: the scratch internal format follows `gl.getContextAttributes()` (no error): `RGB` when
+`alpha` is false, `RGBA` when true (an RGBA destination from an RGB drawing buffer is `INVALID_OPERATION` in
+`copyTexSubImage2D`); scratch-FBO `readPixels` stays `RGBA/UNSIGNED_BYTE`. Before any allocation: `isContextLost()` is
+false and both dimensions ≤ `getParameter(MAX_TEXTURE_SIZE)` (also for the F6b video texture), else today's path.
+Scratch textures are allocated once per context and reallocated only when `drawingBufferWidth × drawingBufferHeight`
+changes (the one accepted residual: `OUT_OF_MEMORY` on allocation); copy rects are clamped to the drawing buffer AND the scratch; `checkFramebufferStatus` (which
 generates no error) gates every FBO read, incomplete → today's path; the instrument's `texImage2D(video)` runs only when
 `readyState >= HAVE_CURRENT_DATA && videoWidth > 0`, inside try/catch, else today's 2D path. Record fallbacks (not
 errors) as evidence. The harness fake GL throws on every invalid-state call and asserts zero throws across the fixture
-run, and counts `getError` calls and asserts the instrument made none.
+run, and counts `getError` calls and asserts the instrument made none. The fake models the copyTexSubImage2D component rule
+and `MAX_TEXTURE_SIZE`, and the fixture runs once with `alpha:false`.
 
 **Step 0 (no GL-state risk; run first, one quiet D7 + Alpha pair):** `willReadFrequently: true` on the ring/reference
 2D canvas (`:230`; the calibration canvas already uses it at `:245`). Measure per-hook costs and the GL-frame split with the
@@ -180,7 +194,7 @@ upload `decoderForEntry(e)` with `texImage2D(video)` into an instrument-owned NP
 0.3–0.7 ms figure is for the product's upload): measure it in step 0, and count the extra upload bandwidth (two
 video-sized uploads per GL frame on top of the product's) as a risk. Orientation: with flip false, texture row 0 is the
 video's top row, so `PATCH_UV` windows map with `iy = round(uv[1]·(h−1))` scaled to the texture height; the
-asymmetric-pattern test covers it explicitly. and read its nine `PATCH_UV` windows plus counter centres back on the SAME end-of-frame sync via a second
+asymmetric-pattern test covers it explicitly. Read its nine `PATCH_UV` windows plus counter centres back on the SAME end-of-frame sync via a second
 instrument FBO, area-averaging in JS to the existing 27-vector at the existing sample dimensions/orientation. No shader
 pass (avoids program/buffer/attrib/viewport/blend state). Guard against a second upload of the same decoder in the frame
 (serial/ordinal/presentedFrames mismatch → reference null, today's unreadable path). Incomplete FBO → today's 2D
@@ -203,10 +217,13 @@ previous-frame bytes (keep the incomplete-frame behaviour at `:411-415`).
 **`frame.gl` row (D-dil; name follows the dotted hook grammar):** the whole-frame union of instrument time for each
 distinct recorder timeline key on which an actual product draw in a PLANNED feed context is observed, marked by an
 explicit recorder call at that draw boundary before the native draw (not `enter('feed.draw')`, which also covers wrap
-and upload work). New recorder API: `__obedCost.mark('frame.gl')` sets a per-frame flag; `flushFrame` appends flagged
+and upload work). New recorder API: `__obedCost.mark('frame.gl')` first calls `advance(now())`, then sets the per-frame flag and
+`frameTouched` (so a mark on the unframed path, with no open span, lands on the current key and a zero-cost GL frame
+is still flushed); `install('frame.gl')` follows `frame.total`'s semantics; `flushFrame` appends flagged
 frames to a second store; `read('frame.gl', offset, n)` pages it; `mark` returns false when stopped or uninstalled,
 and the instrument counts rejected marks in `hookHealth`. The unframed draw path (`mm_feed_instrument.py:335`) marks
-too. Reconciliation: every distinct `producer.frames[].frameTimestamp` must be among the marked keys (both are
+too. Reconciliation: the recorder stores and pages the marked frame KEYS as well as their totals, and every distinct
+`producer.frames[].frameTimestamp` must be among the marked keys (both are
 `document.timeline.currentTime`, so equality is exact), else the row is `installed=False, count=0` (unproven). Multiple entries/draws/contexts on one key count once; failed/unframed draws count. Canonical grammar:
 applicable+installed+zero → `{applicable:true, installed:true, count:0, p95:null, max:null, overBudget:0}`; inapplicable
 → `{applicable:false, installed:false, count:0, p95:null, max:null, overBudget:0}`; applicability from feed
