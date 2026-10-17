@@ -87,6 +87,8 @@ trashing any): `stage-b-coord` (merges), `funny-pasteur-751a72` (coordinator, `c
   - Saves about 35 s of wall time per round.
 
 ## Owner decisions (2026-10-15/16/17)
+- 2026-10-17: the gate's attach-once arm (`--headless=new`, forced 1920×1080) is judged as **headless Chrome** for run
+  validity; `qualified Chrome attach` stays reserved for real-display attach (Q7), settled with Q1 at gate 5a.
 - 2026-10-17: positives that hide the decoder in every pre-draw frame (10 entries: Alpha b6to7/b7to8 feed-on and feed-off-2s;
   D7/D7s b1to2/b2to3; 15–32 ms before the first GL draw; C4-F r1 report) — **measure pixels first**: no `departureExposure`
   registration for them until a round captures what is painted across hide → first draw. Last decoder frame → True;
