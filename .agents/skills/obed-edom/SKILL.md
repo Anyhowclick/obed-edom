@@ -823,10 +823,12 @@ for the parked `iwa-surgical-write-generator` feature.
   `ALPHA_HOLD_MARGIN = 6`, `COUNTER_HOLD_MARGIN = 1`. Paused-element trials matched the last rVFC target 38/40 times
   and were one frame newer 2/40, so the zero-tolerance exact-hold gate remains owner-gated.
 * **Stage B gate inputs.** With feed arms enabled, `run_gates.sh` reads `QUAL_B_SOURCE` (default
-  `~/Desktop/Convert wall to 16x9 CGs/Continuity`) and requires `D7-html` and `D7s-html`. After the H.264 prewarm and
-  before the load/settle gate, it copies both exports into the gate output, derives each runtime plan, and refuses the
-  run unless the signatures match `D7_PLAN_SHA256` and `D7S_PLAN_SHA256` beside `ALPHA_DSK_PLAN_SHA256` in
-  `live_continuity_probe.py`. Keep these source exports outside the main `output/`; the main real-export censuses scan it.
+  `~/Desktop/Convert wall to 16x9 CGs/Continuity/strip2`) and requires `D7-html` and `D7s-html` from the strip2
+  two-strip exports. After the H.264 prewarm and before the load/settle gate, it copies both exports into the gate
+  output, derives each runtime plan, and refuses the run unless the signatures match `D7_PLAN_SHA256` and
+  `D7S_PLAN_SHA256` and every referenced counter movie matches the `D7_COUNTER_MDAT_SHA256` mdat-payload pin beside
+  `ALPHA_DSK_PLAN_SHA256` in `live_continuity_probe.py`. Keep these source exports outside the main `output/`; the
+  main real-export censuses scan it.
 
 ## Alpha Keynote managed OBS (Keyer output)
 

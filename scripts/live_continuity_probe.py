@@ -202,6 +202,10 @@ P2_OFF_PLAN_SHA256 = "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a
 ALPHA_DSK_PLAN_SHA256 = "c9e546551300e44ff1765147def49257916f14f1c139fcee704d9accad7411d6"
 D7_PLAN_SHA256 = "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
 D7S_PLAN_SHA256 = "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
+D7_COUNTER_MDAT_SHA256 = {
+    "counter-a.mov": "71659a979a15ee609da711f5bfeddc61ff2fc420fae8dafed11aca820791a218",
+    "counter-b.mov": "b37ffd93027cfd3e692818e0f52ce109a0febec5a6a3aae16bb84207b450db39",
+}
 # The pinned P2 runtime plans (off, gl-replay on; p2-loop off, on): the only decks whose status
 # is P2's legacy slot table. Every other deck is scored by `generated_status`.
 P2_PLAN_SHA256 = frozenset({
@@ -1962,6 +1966,12 @@ def feed_specs_for(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
     ]
 
 
+def counter_layout_for(facts: dict[str, Any] | None) -> dict[str, Any]:
+    second_strip = (facts or {}).get("planSha256") in {D7_PLAN_SHA256, D7S_PLAN_SHA256}
+    offset = binary_counter_movie.SECOND_STRIP_X if second_strip else 0
+    return binary_counter_movie.layout(offset)
+
+
 def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tuple[str, ...]:
     entries = feed_specs_for(facts)
     if not entries:
@@ -1969,7 +1979,7 @@ def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tupl
     config = {
         "entries": entries, "tamper": FEED_CONTROL.get("tamper"), "tamperScene": FEED_CONTROL.get("tamperScene"),
         "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
-        "counterLayout": binary_counter_movie.layout(),
+        "counterLayout": counter_layout_for(facts),
     }
     source = mm_feed_instrument.INSTRUMENT_JS + "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
     return (source,)
@@ -2001,7 +2011,7 @@ def drive_and_sample(
                 "entries": feed_specs, "tamper": FEED_CONTROL.get("tamper"),
                 "tamperScene": FEED_CONTROL.get("tamperScene"),
                 "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
-                "counterLayout": binary_counter_movie.layout(),
+                "counterLayout": counter_layout_for(feed_facts),
             }) + ")"
         )
     transport.evaluate(ENSURE_PLAYING_JS)

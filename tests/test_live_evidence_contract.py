@@ -577,6 +577,11 @@ def test_feed_verdict_contract_checks_applicable_nested_producer_generation() ->
     record["feed"].pop("canvasLingerMs")
     problems = [problem.split(" at ")[0] for problem in contract.feed_verdict_record(record)]
     assert "feedVerdict.canvasLingerMs" in problems and "feedVerdict.feed.canvasLingerMs" in problems
+    record = _feed_verdict_record()
+    record["feed"]["crossfade"] = "yes"
+    assert "feedVerdict.feed.crossfade" in [
+        problem.split(" at ")[0] for problem in contract.feed_verdict_record(record)
+    ]
 
 
 def test_feed_verdict_contract_requires_handback_duration_source() -> None:

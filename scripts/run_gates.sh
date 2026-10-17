@@ -340,33 +340,62 @@ settle_deadline=$((EPOCHREALTIME + GATE_SETTLE_S))
 Q=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("qual-decks"))')
 ALPHA_SOURCE=$($PY -c 'from obed_edom.fixture_paths import fixture; print(fixture("alpha-dsk-textures"))')
 ALPHA_GATE=$O/alpha-dsk-repaired
-QUAL_B_SOURCE=${QUAL_B_SOURCE:-"$HOME/Desktop/Convert wall to 16x9 CGs/Continuity"}
+QUAL_B_SOURCE=${QUAL_B_SOURCE:-"$HOME/Desktop/Convert wall to 16x9 CGs/Continuity/strip2"}
 if (( ${#MM_FEED_ARMS} )); then
   [[ -d $QUAL_B_SOURCE/D7-html && -d $QUAL_B_SOURCE/D7s-html ]] || {
     echo "D7/D7s qualification exports are missing under QUAL_B_SOURCE=$QUAL_B_SOURCE; no run launched" >&2; exit 2; }
   $PY - "$QUAL_B_SOURCE" "$O" "$G/scripts/live_continuity_probe.py" <<'PYEOF' || { echo "D7/D7s qualification export staging FAILED; no run launched"; exit 2; }
-import ast,hashlib,json,shutil,sys
+import ast,hashlib,json,shutil,struct,sys
 from pathlib import Path
 from obed_edom import preview_textures
-from obed_edom.live_continuity import Unsupported,derive_plan,plan_signature
+from obed_edom.live_continuity import Unsupported,_referenced_movies,derive_plan,plan_signature
 source,out,probe_source=map(Path,sys.argv[1:])
-names={"D7_PLAN_SHA256","D7S_PLAN_SHA256"}
+names={"D7_PLAN_SHA256","D7S_PLAN_SHA256","D7_COUNTER_MDAT_SHA256"}
 pins={}
 identities={}
 for node in ast.parse(probe_source.read_text()).body:
     if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id in names:
         pins[node.targets[0].id]=ast.literal_eval(node.value)
+def mdat_sha(path):
+    data=path.read_bytes()
+    offset=0
+    payloads=[]
+    while offset<len(data):
+        size,kind=struct.unpack_from(">I4s",data,offset)
+        head=8
+        if size==1: size=struct.unpack_from(">Q",data,offset+8)[0]; head=16
+        elif size==0: size=len(data)-offset
+        if size<head or offset+size>len(data): raise ValueError("invalid top-level atom size")
+        if kind==b"mdat": payloads.append(data[offset+head:offset+size])
+        offset+=size
+    if len(payloads)!=1: raise ValueError(f"{len(payloads)} top-level mdat atoms, expected exactly 1")
+    return hashlib.sha256(payloads[0]).hexdigest()
 for deck,pin_name in (("D7","D7_PLAN_SHA256"),("D7s","D7S_PLAN_SHA256")):
     dest=out/f"{deck}-html"
     shutil.copytree(source/f"{deck}-html",dest)
     header=json.loads((dest/"assets/header.json").read_text())
     slides=[{"originalOrdinal":i+1,"playerIndex":i,"exportedUuid":uuid,"skipped":False}
             for i,uuid in enumerate(header["slideList"])]
+    referenced=_referenced_movies(dest,slides,resolver=lambda base,relative:base/relative)
+    counter_shas={}
+    for key in sorted(referenced):
+        wanted=pins["D7_COUNTER_MDAT_SHA256"].get(key)
+        for movie in referenced[key]:
+            relative=movie.relative_to(dest).as_posix() if movie is not None else key
+            if movie is None or not movie.is_file():
+                raise SystemExit(f"{deck} referenced counter movie {relative} is missing; no run launched")
+            try: actual=mdat_sha(movie)
+            except (ValueError,struct.error) as exc:
+                raise SystemExit(f"{deck} counter movie {relative} refused: {exc}; no run launched") from exc
+            if actual!=wanted:
+                raise SystemExit(f"{deck} counter movie {relative} mdat payload sha256 {actual} does not match pinned {wanted} (QUAL_B_SOURCE must hold the strip2 two-strip exports); no run launched")
+            counter_shas[relative]=actual
     hits=preview_textures.json_hits(dest,slides)
     if hits:
         raise SystemExit(f"{deck} feed fixture refused: {'; '.join(hits)}")
     identities[deck]={"exportRoot":str(dest.resolve()),
         "headerSha256":hashlib.sha256((dest/"assets/header.json").read_bytes()).hexdigest(),
+        "counterMdatSha256":dict(sorted(counter_shas.items())),
         "slideJson":[{"originalOrdinal":slide["originalOrdinal"],"exportedUuid":slide["exportedUuid"],
           "sha256":hashlib.sha256((dest/"assets"/slide["exportedUuid"]/(slide["exportedUuid"]+".json")).read_bytes()).hexdigest()}
          for slide in slides]}
@@ -397,18 +426,43 @@ identities["D7-unrepaired-refusal"]={"exportRoot":str(control_root.resolve()),"h
      for slide in control_slides]}
 (out/"feed-fixture-identities.json").write_text(json.dumps(identities,indent=2)+"\n")
 PYEOF
-  $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
+  $PY - "$ALPHA_SOURCE" "$ALPHA_GATE" "$QUAL_B_SOURCE/q7-fixtures/Alpha/html-unmodified" <<'PYEOF' || { echo "Alpha texture repair FAILED; no run launched"; exit 2; }
 import json,shutil,sys
 from pathlib import Path
 from obed_edom import preview_textures
-source,dest=Path(sys.argv[1]),Path(sys.argv[2])
+from obed_edom.live_continuity import _referenced_movies,codec_report
+source,dest,complete=map(Path,sys.argv[1:])
+if not complete.is_dir():
+    raise SystemExit(f"Alpha complete export donor is missing at {complete}")
 manifest=json.loads((source/"manifest.json").read_text())
 shutil.copytree(source/"html-unmodified",dest)
+resolver=lambda base,relative:base/relative
+referenced=_referenced_movies(dest,manifest["slides"],resolver=resolver)
+if not referenced:
+    raise SystemExit("Alpha fixture references no movies")
+missing=sorted({path for paths in referenced.values() for path in paths if path is not None and not path.is_file()})
+outside=[path for path in missing if not path.resolve().is_relative_to(dest.resolve())]
+if outside:
+    raise SystemExit(f"Alpha fixture references missing movie(s) outside {dest}: {', '.join(map(str,outside))}")
+donors={}
+for path in sorted(complete.rglob("*")):
+    if path.is_file(): donors.setdefault(path.name,path)
+absent=sorted({path.name for path in missing if path.name not in donors})
+if absent:
+    raise SystemExit(f"Alpha complete export donor {complete} is missing needed movie file name(s): {', '.join(absent)}")
+for path in missing:
+    path.parent.mkdir(parents=True,exist_ok=True)
+    relative=complete/path.relative_to(dest)
+    shutil.copy2(relative if relative.is_file() else donors[path.name],path)
+print(f"Alpha movies restored {len({path.name for path in missing})}")
 record=preview_textures.repair_textures(dest,manifest["slides"],player_digest=manifest["playerDigest"],log=print)
 if not record.get("repaired"):
     raise SystemExit("Alpha repair changed no textures; the registered fixture is not the unrepaired input")
 if preview_textures._detect(preview_textures._load(dest,manifest["slides"]),preview_textures._Renderer()):
     raise SystemExit("Alpha repair left detector hits")
+unreadable=[entry["asset"] for entry in codec_report(dest,manifest["slides"],resolver=resolver) if entry["codec"] is None]
+if unreadable:
+    raise SystemExit(f"Alpha repaired fixture has unreadable or mixed movie assets: {', '.join(unreadable)}")
 print("Alpha repaired fixture",dest)
 PYEOF
 fi

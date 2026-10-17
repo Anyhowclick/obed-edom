@@ -1073,6 +1073,8 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
         if not isinstance(record.get("reads"), list):
             yield f"feedVerdict.{key}.reads:list at {path}"
     feed = value.get("feed")
+    if isinstance(feed, dict) and "crossfade" in feed and not isinstance(feed["crossfade"], bool):
+        yield f"feedVerdict.feed.crossfade at {path}"
     for index, read in enumerate(feed.get("reads") or [] if isinstance(feed, dict) else []):
         where = f"{path}.feed.reads[{index}]"
         if not isinstance(read, dict):

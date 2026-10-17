@@ -12283,15 +12283,29 @@ def _hold_frame(mode: str = "departure") -> dict[str, Any]:
     return record
 
 
-@pytest.mark.parametrize(("mutate", "expected"), [
-    (lambda r: None, True),
-    (lambda r: r["reads"][1].update(dVideo=12.0), False),
-    (lambda r: r["reads"][1].update(dSep=2.0), None),
+@pytest.mark.parametrize(("mutate", "expected", "checks"), [
+    (lambda r: None, True, None),
+    (lambda r: r["reads"][1].update(dVideo=12.0), False, None),
+    (lambda r: r["reads"][1].update(dSep=2.0), None, None),
+    (lambda r: (r.update(crossfade=True), r["reads"][1].update(
+        kind="counter", counter=None, referenceCounter=7, counterReason="ambiguous",
+    )), False, [True, False, True]),
+    (lambda r: (r.update(crossfade=True), r["reads"][1].update(
+        kind="counter", counter=None, referenceCounter=7, counterReason="marker",
+    )), None, None),
+    (lambda r: r["reads"][1].update(
+        kind="counter", counter=None, referenceCounter=7, counterReason="ambiguous",
+    ), None, None),
 ])
-def test_feed_live_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
+def test_feed_live_pass_fail_inconclusive(
+    mutate: Any, expected: bool | None, checks: list[bool] | None,
+) -> None:
     record = _feed_live()
     mutate(record)
-    assert probe.score_feed_live(record)["verdict"] is expected
+    verdict = probe.score_feed_live(record)
+    assert verdict["verdict"] is expected
+    if checks is not None:
+        assert [check["ok"] for check in verdict["checks"]] == checks
 
 
 def test_feed_live_needs_two_decoder_reads_and_distinguishes_a_frozen_decoder() -> None:
@@ -12756,6 +12770,11 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     arm = probe.score_arm(capture, {"verdicts": [spec]}, {})
     record = arm["feedEvidence"]["verdicts"][entry["id"]]
     scored = arm[entry["id"]]["underArtwork"]
+    assert record["feed"]["crossfade"] is False
+    assert probe.mm_feed_instrument.verdict_records(
+        report, [{**entry, "feed": {**entry["feed"], "to": {"upload": 2, "size": [640, 360]}}}],
+        continuous_expected=True,
+    )[entry["id"]]["feed"]["crossfade"] is True
     assert scored["verdict"] is True
     assert all(scored[name]["verdict"] is not None for name in (
         "feedLive", "noRiderAboveCanvas", "labelsOverFeed", "artworkAbove",
@@ -12911,7 +12930,12 @@ def test_feed_ordinal_tamper_is_limited_to_the_requested_scene() -> None:
         probe.live_host_module._continuity_plan_script(runtime, {"width": 1920, "height": 1080})
 
 
-def test_feed_instrument_is_registered_before_navigation() -> None:
+@pytest.mark.parametrize(("plan_sha", "offset"), [
+    (probe.D7_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
+    (probe.D7S_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
+    ("0" * 64, 0),
+])
+def test_feed_instrument_is_registered_before_navigation(plan_sha: str, offset: int) -> None:
     pin_src, pin_dst = dict(SRC_RECT), dict(DST_RECT)
     bridge_src = {"x": 30, "y": 40, "w": 300, "h": 170}
     bridge_dst = {"x": 300, "y": 200, "w": 600, "h": 340}
@@ -12924,6 +12948,7 @@ def test_feed_instrument_is_registered_before_navigation() -> None:
         1: {"pin.mov": [pin_dst], "bridge.mov": [bridge_dst]},
     })
     facts = {"verdicts": probe.verdict_specs(plan)}
+    facts["planSha256"] = plan_sha
     for spec, draw in zip(facts["verdicts"], (1, 2), strict=True):
         spec.update(underArtwork=True, feed={"draw": draw}, feedDraws={}, artworkAbove=[])
     feed_specs = probe.feed_specs_for(facts)
@@ -12931,7 +12956,7 @@ def test_feed_instrument_is_registered_before_navigation() -> None:
     assert facts["verdicts"][0]["srcRect"] == pin_dst != feed_specs[0]["srcRect"]
     kwargs = probe.feed_host_kwargs(facts)
     assert kwargs["pre_navigation_scripts"][0].startswith(probe.mm_feed_instrument.INSTRUMENT_JS)
-    assert json.dumps(probe.binary_counter_movie.layout()) in kwargs["pre_navigation_scripts"][0]
+    assert json.dumps(probe.binary_counter_movie.layout(offset)) in kwargs["pre_navigation_scripts"][0]
     assert "window.__obedMmFeedProbe.bootstrap(" in kwargs["pre_navigation_scripts"][0]
     assert probe.feed_host_kwargs()["pre_navigation_scripts"] == ()
     absent = type("Absent", (), {

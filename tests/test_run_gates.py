@@ -82,7 +82,11 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import imageio_ffmpeg
 import pytest
+
+from obed_edom.fixture_paths import fixture
+from obed_edom.live_continuity import _referenced_movies
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "run_gates.sh"
@@ -138,6 +142,7 @@ finally: marker.unlink(missing_ok=True)
 PROBE_STUB = _STUB_COMMON + r'''
 D7_PLAN_SHA256 = "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
 D7S_PLAN_SHA256 = "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
+D7_COUNTER_MDAT_SHA256 = {"counter-a.mov": "__COUNTER_A_MDAT_SHA256__", "counter-b.mov": "__COUNTER_B_MDAT_SHA256__"}
 artifact = Path(arg("--artifact"))
 stem = artifact.stem
 event(f"probe {stem} viewport={arg('--viewport')} skip={arg('--skip-arms')} start")
@@ -327,7 +332,6 @@ exec /bin/sleep "$1"
 """
 
 
-
 def _make_gates(root: Path) -> dict[str, object]:
     root.mkdir(parents=True, exist_ok=True)
     g = root / "gate"
@@ -335,7 +339,6 @@ def _make_gates(root: Path) -> dict[str, object]:
     (g / "src").symlink_to(REPO / "src")
     (g / "scripts" / "continuity_core_variants.py").symlink_to(REPO / "scripts" / "continuity_core_variants.py")
     (g / "scripts" / "paint_instrument.py").symlink_to(REPO / "scripts" / "paint_instrument.py")
-    (g / "scripts" / "live_continuity_probe.py").write_text(PROBE_STUB)
     (g / "scripts" / "p2_recovery_html_adversarial.py").write_text(P2_STUB)
     (g / "scripts" / "p2_recovery_html_dissolve_live.py").write_text(PREWARM_STUB)
     out = root / "out"
@@ -347,8 +350,61 @@ def _make_gates(root: Path) -> dict[str, object]:
         export = qual_b_source / f"{deck}-html"
         shutil.copytree(REPO / "tests" / "fixtures" / "live_continuity" / "qual_decks" / deck, export)
         (export / "index.html").write_text(f"{deck}-html")
+    def atom(kind: bytes, payload: bytes) -> bytes:
+        return (len(payload) + 8).to_bytes(4, "big") + kind + payload
+    counter_payloads = {"counter-a.mov": b"counter-a", "counter-b.mov": b"counter-b"}
+    counter_movie_bytes = {
+        "counter-a.mov": atom(b"ftyp", b"isom-a") + atom(b"mdat", counter_payloads["counter-a.mov"])
+        + atom(b"moov", b"movie-a"),
+        "counter-b.mov": atom(b"ftyp", b"isom-b") + (1).to_bytes(4, "big") + b"mdat"
+        + (16 + len(counter_payloads["counter-b.mov"])).to_bytes(8, "big") + counter_payloads["counter-b.mov"]
+        + atom(b"moov", b"movie-b"),
+    }
+    counter_mdat_shas = {name: hashlib.sha256(payload).hexdigest() for name, payload in counter_payloads.items()}
+    counter_movies = {}
+    for deck in ("D7", "D7s"):
+        export = qual_b_source / f"{deck}-html"
+        slide_uuids = json.loads((export / "assets/header.json").read_text())["slideList"]
+        slides = [{"originalOrdinal": i + 1, "playerIndex": i, "exportedUuid": uuid, "skipped": False}
+                  for i, uuid in enumerate(slide_uuids)]
+        referenced = _referenced_movies(export, slides, resolver=lambda base, relative: base / relative)
+        assert set(referenced) == set(counter_payloads)
+        for name, paths in referenced.items():
+            assert paths and all(path is not None for path in paths)
+            for movie in paths:
+                movie.parent.mkdir(parents=True, exist_ok=True)
+                movie.write_bytes(counter_movie_bytes[name])
+            counter_movies[(deck, name)] = paths
+    probe_stub = PROBE_STUB
+    for name, sha in counter_mdat_shas.items():
+        probe_stub = probe_stub.replace(f"__{name.removesuffix('.mov').upper().replace('-', '_')}_MDAT_SHA256__", sha)
+    (g / "scripts" / "live_continuity_probe.py").write_text(probe_stub)
     unrepaired = qual_b_source / "q7-fixtures" / "D7-unrepaired" / "html-player"
     shutil.copytree(qual_b_source / "D7-html", unrepaired)
+    alpha_source = fixture("alpha-dsk-textures")
+    manifest = json.loads((alpha_source / "manifest.json").read_text())
+    referenced = _referenced_movies(
+        alpha_source / "html-unmodified", manifest["slides"], resolver=lambda base, relative: base / relative,
+    )
+    alpha_donor = qual_b_source / "q7-fixtures" / "Alpha" / "html-unmodified"
+    alpha_donor.mkdir(parents=True)
+    seed = root / "alpha-donor.mov"
+    subprocess.run([
+        imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+        "color=black:size=16x16:rate=1", "-frames:v", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(seed),
+    ], check=True)
+    for name in sorted({path.name for paths in referenced.values() for path in paths if path is not None}):
+        shutil.copy2(seed, alpha_donor / name)
+    alpha_relative = min(path for paths in referenced.values() for path in paths if path is not None).relative_to(
+        alpha_source / "html-unmodified"
+    )
+    alpha_relative_donor = alpha_donor / alpha_relative
+    alpha_relative_donor.parent.mkdir(parents=True)
+    shutil.copy2(seed, alpha_relative_donor)
+    with alpha_relative_donor.open("ab") as donor:
+        donor.write(b"\x01")
+    alpha_relative_bytes = alpha_relative_donor.read_bytes()
+    seed.unlink()
     slide_uuid = "EC1B1743-BCCE-459F-9080-E0385E656256"
     slide_path = qual_b_source / "D7-html" / "assets" / slide_uuid / f"{slide_uuid}.json"
     payload = json.loads(slide_path.read_text())
@@ -414,6 +470,9 @@ def _make_gates(root: Path) -> dict[str, object]:
     return {
         "g": g, "out": out, "marker": marker, "run": run, "start": start, "events": events_list,
         "sleeps": sleeps_list, "survivors": survivors, "patched": patched, "tmp": root, "qual_b_source": qual_b_source,
+        "alpha_source": alpha_source, "alpha_donor": alpha_donor, "alpha_relative": alpha_relative,
+        "alpha_relative_bytes": alpha_relative_bytes, "counter_mdat_shas": counter_mdat_shas,
+        "counter_movie_bytes": counter_movie_bytes, "counter_movies": counter_movies,
     }
 
 
@@ -540,7 +599,40 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
     identities = json.loads((gates["out"] / "feed-fixture-identities.json").read_text())
     assert set(identities) == {"D7", "D7s", "D7-unrepaired-refusal"}
     assert all(len(row["headerSha256"]) == 64 and row["slideJson"] for row in identities.values())
+    assert all(set(identities[deck]["counterMdatSha256"].values()) == set(gates["counter_mdat_shas"].values()) for deck in ("D7", "D7s"))
     assert identities["D7-unrepaired-refusal"]["hits"][0].startswith("slide 3 0/baseLayer/layers/4/layers/0/layers/0:")
+    restored = list((gates["out"] / "alpha-dsk-repaired").rglob("*.mov")) + list(
+        (gates["out"] / "alpha-dsk-repaired").rglob("*.mp4")
+    )
+    assert len(restored) == 11 and "Alpha movies restored 5" in done.stdout
+    assert (gates["out"] / "alpha-dsk-repaired" / gates["alpha_relative"]).read_bytes() == gates[
+        "alpha_relative_bytes"
+    ]
+    assert not list((gates["alpha_source"] / "html-unmodified").rglob("*.mov"))
+    assert not list((gates["alpha_source"] / "html-unmodified").rglob("*.mp4"))
+
+    counter_a = gates["counter_movies"][("D7s", "counter-a.mov")][0]
+    counter_a.write_bytes(gates["counter_movie_bytes"]["counter-b.mov"])
+    before = len(gates["events"]())
+    counter_mismatch = gates["run"](outdir=gates["tmp"] / "counter-mismatch")
+    relative = counter_a.relative_to(gates["qual_b_source"] / "D7s-html").as_posix()
+    assert counter_mismatch.returncode == 2 and (
+        f"D7s counter movie {relative} mdat payload sha256 {gates['counter_mdat_shas']['counter-b.mov']} "
+        f"does not match pinned {gates['counter_mdat_shas']['counter-a.mov']} "
+        "(QUAL_B_SOURCE must hold the strip2 two-strip exports); no run launched"
+    ) in counter_mismatch.stderr
+    assert gates["events"]()[before:] == ["prewarm html-unmodified", "prewarm html-unmodified"]
+    counter_a.write_bytes(gates["counter_movie_bytes"]["counter-a.mov"])
+
+    counter_b = gates["counter_movies"][("D7s", "counter-b.mov")][0]
+    counter_b.unlink()
+    before = len(gates["events"]())
+    counter_missing = gates["run"](outdir=gates["tmp"] / "counter-missing")
+    relative = counter_b.relative_to(gates["qual_b_source"] / "D7s-html").as_posix()
+    assert counter_missing.returncode == 2
+    assert f"D7s referenced counter movie {relative} is missing; no run launched" in counter_missing.stderr
+    assert gates["events"]()[before:] == ["prewarm html-unmodified", "prewarm html-unmodified"]
+    counter_b.write_bytes(gates["counter_movie_bytes"]["counter-b.mov"])
 
     slide_path = (
         gates["qual_b_source"]
@@ -574,6 +666,24 @@ def test_missing_qual_b_source_is_refused_only_when_feed_arms_are_requested(gate
     dev = gates["run"]("--tier", "dev", outdir=gates["tmp"] / "dev-out")
     assert dev.returncode != 2
     assert "QUAL_B_SOURCE" not in dev.stderr
+
+
+@pytest.mark.parametrize("failure", ["missing", "unreadable", "dir"])
+def test_alpha_movie_staging_refuses_before_timed_runs(gates, failure: str) -> None:
+    donor = next(p for p in sorted(gates["alpha_donor"].iterdir()) if p.is_file() and p.name != gates["alpha_relative"].name)
+    if failure == "dir":
+        shutil.rmtree(gates["alpha_donor"])
+        expected = "Alpha complete export donor is missing at"
+    elif failure == "missing":
+        donor.unlink()
+        expected = "is missing needed movie file name(s)"
+    else:
+        donor.write_bytes(b"not a movie")
+        expected = "has unreadable or mixed movie assets:"
+    done = gates["run"](outdir=gates["tmp"] / f"alpha-{failure}")
+    assert done.returncode == 2 and expected in done.stderr
+    assert gates["events"]() == ["prewarm html-unmodified", "prewarm html-unmodified"]
+    assert "Alpha texture repair FAILED; no run launched" in done.stdout
 
 
 def test_a_run_that_writes_no_status_fails_closed_even_with_a_passing_artifact(gates) -> None:

@@ -776,7 +776,8 @@ def _visit_record(
               "canvasLingerMs": canvas_linger}
     feed = {
         **common, "complete": frames_complete and uploads_complete and claims_complete,
-        "mode": mode, "reads": feed_reads, "presentedFrames": presented,
+        "mode": mode, "crossfade": isinstance(planned.get("to"), dict),
+        "reads": feed_reads, "presentedFrames": presented,
         "framesFed": len(move_uploads), "continuousCoverage": mode == "continuous" and bool(wanted_frame_ns)
         and wanted_frame_ns <= fed_frame_ns,
         "maxInterFeedGapMs": max(gaps, default=0.0),
@@ -940,10 +941,16 @@ def score_feed_live(record: Any, *, continuous_expected: bool = True, alpha_floo
         if read.get("patchInside") is not True or read.get("coveredByLaterDraw") is not False:
             return finish(None, "a feed patch is outside the leaf or covered by a later draw", reads=reads)
         kind = read.get("kind")
+        extra: dict[str, Any] = {}
         if kind == "counter":
-            if not _finite(read.get("counter")) or not _finite(read.get("referenceCounter")):
+            counter, reference = read.get("counter"), read.get("referenceCounter")
+            if _finite(counter) and _finite(reference):
+                ok = abs(counter - reference) <= 1
+            elif record.get("crossfade") is True and read.get("counterReason") == "ambiguous" and _finite(reference):
+                ok = False
+                extra = {"counterReason": "ambiguous"}
+            else:
                 return finish(None, "a counter read is undecodable", reads=reads)
-            ok = abs(read["counter"] - read["referenceCounter"]) <= 1
         elif kind == "alpha":
             if not _finite(read.get("dVideo")) or not _finite(read.get("dPoster")) or not _finite(read.get("dSep")):
                 return finish(None, "an Alpha distance is unreadable", reads=reads)
@@ -954,7 +961,7 @@ def score_feed_live(record: Any, *, continuous_expected: bool = True, alpha_floo
                 ok = read["dVideo"] <= read["dPoster"] / 2
         else:
             return finish(None, f"unknown feed read kind {kind!r}")
-        checks.append({"progress": read["progress"], "ok": ok})
+        checks.append({"progress": read["progress"], "ok": ok, **extra})
     if not all(row["ok"] for row in checks):
         return finish(False, "a sampled GL patch did not match the live decoder", checks=checks)
     if ambiguous:
