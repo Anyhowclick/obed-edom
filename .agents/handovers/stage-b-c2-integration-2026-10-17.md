@@ -28,14 +28,14 @@
 | Stream | Worktree / branch | Sol session | Status at pause |
 |---|---|---|---|
 | **V-c** pure scorer (`paint_instrument.py` + tests) | `stage-b-vc` / `claude/stage-b-vc` | `01a148e7-92be-7a30-aa53-fa71e2ffb64a` | r1 and r2 folded and r2 READY. Hide-before-start alignment done (188 passed). Needs a round-3 review. |
-| **F-c** pixel contracts + discovery-only tamper (`live_evidence_contract.py`, `mm_feed_instrument.py`, tests) | `stage-b-fc` / `claude/stage-b-fc` | `01a148e7-934c-7f22-b282-d912fda3a940` | r1 folded; r2 NOT READY (G1 tamper ordering, G2). Fold r2 was STILL RUNNING at pause; check `.cache/sol/codex-last-r2.md`. Then round 3. |
-| **P-c** discovery capture (`live_continuity_probe.py` + tests) | `stage-b-pc` / `claude/stage-b-pc` | `01a148e7-91c8-7033-9f70-bf9bc69bc5de` | r1 folded; r2 NOT READY (R1 hideMs rule, R2 poster reference). Fold r2 was STILL RUNNING at pause; check `.cache/sol/codex-last-r2.md`. Then round 3. |
+| **F-c** pixel contracts + discovery-only tamper (`live_evidence_contract.py`, `mm_feed_instrument.py`, tests) | `stage-b-fc` / `claude/stage-b-fc` | `01a148e7-934c-7f22-b282-d912fda3a940` | r1 and r2 folded (r2 fold completed after the pause: departure-keyed tamper, `frameN < firstDrawFrameIndex`, judged rejection of `oneFramePoster`; 313 passed on Node 16.0.0). Needs a round-3 review. |
+| **P-c** discovery capture (`live_continuity_probe.py` + tests) | `stage-b-pc` / `claude/stage-b-pc` | `01a148e7-91c8-7033-9f70-bf9bc69bc5de` | r1 and r2 folded (r2 fold completed after the pause: amended `hideMs` rule, poster reference from the export; 1967 passed, 1 skipped = the real-scorer test pending co-landing). Needs a round-3 review. |
 
 - **Where things are kept.** Each stream worktree holds `.cache/sol/` (git-ignored, persistent): `brief.md`, `fold-*.md`, `report.md`, the codex logs and the test logs. The coordinator's fold texts are in `funny-pasteur-751a72/.cache/reviews/`.
 - **Reviewer findings are not saved as files.** The Opus reviewer agents and their context end with the session. Their findings survive as the fold files (exact fix wording) plus each stream's updated `report.md`. A new session spawns fresh reviewers and points them at the brief, the fold files and the report.
 
 **Next steps, in order**
-1. Confirm that the F-c and P-c r2 folds finished: `codex-last-r2.md` exists and contains no "ERROR: You've hit your usage limit". If a fold was cut off, resume with `codex exec resume <session> -m gpt-5.6-sol ...` and tell it to inspect the partial diff and complete the fold.
+1. Both r2 folds completed after the pause (confirmed: no usage-limit errors). All three streams are ready for round 3.
 2. **Round-3 reviews** (Opus 5.5 high; the LAST all-severity round), for P-c, F-c and V-c. Each must cross-check the others' REAL code. These must hold:
    - P-c records → V-c `score_departure_pixels` → F-c `departure_pixels`/discovery envelope;
    - the null scores True, the one-rAF red scores False, the hide-before-start exposure scores False, and the threshold derivation succeeds on a null/red pair.
