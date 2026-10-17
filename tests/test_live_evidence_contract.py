@@ -299,7 +299,11 @@ global.document = {
   documentElement: {appendChild: function(){}},
 };
 global.location = {hash: '#2'};
-global.ResizeObserver = function(){ this.observe = function(){}; };
+var resizeObserverDisconnects = 0;
+global.ResizeObserver = function(){
+  this.observe = function(){};
+  this.disconnect = function(){ resizeObserverDisconnects += 1; };
+};
 global.WeakRef = function(v){ this.deref = function(){ return v; }; };
 global.Element = function(){};
 Element.prototype.checkVisibility = function(){ return true; };
@@ -313,7 +317,11 @@ snapshotFails = true;
 step(50);
 var p = window.__obedContinuityProbe__;
 p.stop();
-console.log(JSON.stringify({rows: p.drain(100), meta: JSON.parse(JSON.stringify(p.meta))}));
+console.log(JSON.stringify({
+  rows: p.drain(100),
+  meta: JSON.parse(JSON.stringify(p.meta)),
+  resizeObserverDisconnects: resizeObserverDisconnects,
+}));
 """
 
 
@@ -323,6 +331,7 @@ def test_producer_js_meets_the_contract() -> None:
 
     sampled = _node(SAMPLER_HARNESS.replace("__SAMPLER__", probe.SAMPLER_JS))
     rows, schema = sampled["rows"], sampled["meta"]["schema"]
+    assert sampled["resizeObserverDisconnects"] == 1
     assert len(rows) == 3 and rows[0]["videos"][0]["elId"] is None and "playerState" not in rows[2]
     assert [row["nextSceneId"] for row in rows] == [3, 3, None]
     assert contract.first_errors(contract.sample_rows(rows, schema=schema), limit=20) == []
@@ -906,25 +915,6 @@ def _holder(*, visible: bool = False, attach: bool = False) -> dict[str, Any]:
     return holder
 
 
-def _artifact_validity(holders: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    statuses = [holder["runValidity"]["ok"] for holder in holders.values()]
-    validities = {name: copy.deepcopy(holder["runValidity"]) for name, holder in holders.items()}
-    host_kind = next(iter(validities.values()))["policy"]["hostKind"]
-    builds = [validity["measured"]["environment"]["chromeBuild"] for validity in validities.values()]
-    chrome_build = builds[0] if builds and all(build == builds[0] for build in builds) else None
-    return {
-        "ok": False if False in statuses else True if all(status is True for status in statuses) else None,
-        "reasons": [
-            f"{name}: {reason}"
-            for name, holder in holders.items()
-            for reason in holder["runValidity"]["reasons"]
-        ],
-        "policy": {"hostKind": host_kind},
-        "measured": {"environment": {"chromeBuild": chrome_build}},
-        "holders": validities,
-    }
-
-
 def test_phase_2_holder_contract_accepts_actual_validity_sampler_attach_and_visible_shapes() -> None:
     ordinary = _holder()
     assert list(contract.run_validity(ordinary["runValidity"])) == []
@@ -939,12 +929,12 @@ def test_phase_2_holder_contract_accepts_actual_validity_sampler_attach_and_visi
     assert list(contract.visible_scope(visible["scope"])) == []
     assert list(contract.validity_holder(visible)) == []
 
-    aggregate = _artifact_validity({"arm.A": ordinary, "visible.V": visible})
+    aggregate = probe.artifact_run_validity({"arm.A": ordinary, "visible.V": visible})
     assert list(contract.artifact_run_validity(aggregate)) == []
 
 
 def test_artifact_validity_accepts_unusable_holder_as_unknown() -> None:
-    aggregate = _artifact_validity({"arm.A": _holder()})
+    aggregate = probe.artifact_run_validity({"arm.A": _holder()})
     aggregate["holders"]["arm.missing"] = None
     aggregate["ok"] = None
     aggregate["reasons"].append("arm.missing: runValidity is missing or malformed")
@@ -1028,7 +1018,7 @@ def test_phase_2_artifact_validity_rejects_aggregate_mutants(
     mutate: Callable[[dict[str, Any]], Any], clause: str,
 ) -> None:
     ordinary = _holder()
-    aggregate = _artifact_validity({"arm.A": ordinary, "arm.B": _holder()})
+    aggregate = probe.artifact_run_validity({"arm.A": ordinary, "arm.B": _holder()})
     if clause == "artifactRunValidity.reasons":
         aggregate["holders"]["arm.A"]["reasons"] = ["cost"]
         aggregate["reasons"] = ["arm.A: cost"]

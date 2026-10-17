@@ -13437,16 +13437,58 @@ def test_score_arm_discards_stale_validity_even_on_malformed_samples(monkeypatch
     assert seen["row"]["hostKind"] == probe.HOST_HEADLESS_CHROME and seen["gl"] == []
 
 
-def test_artifact_validity_failure_precedes_unknown_and_requires_every_holder() -> None:
-    holders = {
-        "green": {"hostKind": probe.HOST_HEADLESS_CHROME, "runValidity": {"ok": True, "reasons": []}},
-        "unknown": {"hostKind": probe.HOST_HEADLESS_CHROME},
+def _publication_holder(*, ok: bool | None = None, reasons: list[str] | None = None,
+                        attach: bool = False) -> dict[str, Any]:
+    recording = {
+        "version": 1,
+        "stopped": True,
+        "errors": [],
+        "hooks": {
+            hook: {"installed": True, "count": 1, "chunks": [[1.0]]}
+            for hook in probe.REQUIRED_HOOKS if hook != "frame.total"
+        },
+        "frames": {"count": 1, "chunks": [[2.0]]},
     }
-    assert probe.artifact_run_validity(holders)["ok"] is None
-    holders["red"] = {
+    observation = {
+        "at": 1.0,
+        "loadAverage": [0.1, 0.2, 0.3],
+        "uptime": "up 1 day",
+        "chromeCounts": {"owned": 1, "foreign": 0},
+    }
+    environment = {
+        "qualificationIdentity": probe.HOST_HEADLESS_CHROME,
+        "gitHead": "a" * 40,
+        "browserVersion": {"product": "HeadlessChrome/155.0.8059.80"},
+        "observations": {name: copy.deepcopy(observation) for name in ("before", "during", "after")},
+    }
+    if attach:
+        environment["attach"] = {
+            "launchArguments": ["--headless=new"],
+            "deviceMetricsResponse": {},
+            "viewportReadback": {"innerWidth": 1920, "innerHeight": 1080, "devicePixelRatio": 1},
+        }
+    holder = {
         "hostKind": probe.HOST_HEADLESS_CHROME,
-        "runValidity": {"ok": False, "reasons": ["cost"]},
+        "scope": {"kind": "visible", "pass": "V"},
+        "instrumentCost": probe.paint_instrument.summarize_instrument_cost(
+            recording, probe.instrument_applicability("visible"),
+        ),
+        "environment": environment,
     }
+    holder["runValidity"] = probe.capture_run_validity(holder)
+    if ok is not None:
+        holder["runValidity"]["ok"] = ok
+    if reasons is not None:
+        holder["runValidity"]["reasons"] = reasons
+    return holder
+
+
+def test_artifact_validity_failure_precedes_unknown_and_requires_every_holder() -> None:
+    unknown = _publication_holder()
+    unknown.pop("runValidity")
+    holders = {"green": _publication_holder(ok=True), "unknown": unknown}
+    assert probe.artifact_run_validity(holders)["ok"] is None
+    holders["red"] = _publication_holder(ok=False, reasons=["cost"])
     aggregate = probe.artifact_run_validity(holders)
     assert aggregate["ok"] is False and "red: cost" in aggregate["reasons"]
     result = {"runValidity": {"ok": True}}
@@ -13496,6 +13538,18 @@ def test_artifact_validity_mixed_builds_never_publish_a_build() -> None:
     aggregate = probe.artifact_run_validity(holders)
     assert aggregate["measured"] == {"environment": {"chromeBuild": None}}
     assert aggregate["policy"] == {"hostKind": probe.HOST_HEADLESS_CHROME}
+
+
+def test_real_publication_invalidates_a_holder_with_a_malformed_cost_row() -> None:
+    holder = _publication_holder()
+    holder["instrumentCost"]["frame.total"]["count"] = -1
+
+    result: dict[str, Any] = {}
+    probe.publish_artifact_run_validity(result, {"visible.V": holder})
+
+    assert holder["runValidity"]["ok"] is None
+    assert result["runValidity"]["ok"] is None
+    assert holder["contractErrors"]
 
 
 def test_publish_validates_every_holder_and_invalidates_a_contract_error(
@@ -13576,12 +13630,12 @@ def test_publish_rejects_an_invalid_aggregate_contract(monkeypatch: pytest.Monke
 
 
 def test_every_artifact_family_enumerates_all_required_validity_holders() -> None:
-    holder = {"hostKind": probe.HOST_HEADLESS_CHROME, "runValidity": {"ok": True, "reasons": []}}
+    holder = _publication_holder(ok=True)
     leg = copy.deepcopy(holder)
     destination = {**copy.deepcopy(holder), "advanceCarry": leg}
     families = {
         "full": ({
-            "arms": {"A": copy.deepcopy(holder)}, "attach": copy.deepcopy(holder),
+            "arms": {"A": copy.deepcopy(holder)}, "attach": _publication_holder(ok=True, attach=True),
             "visible": {name: copy.deepcopy(holder) for name in ("V", "Voff", "Vgl")},
             "skippedArms": ["B", "C"], "glReplay": {"requested": "auto"},
         }, {"arms.A", "attach", "visible.V", "visible.Voff", "visible.Vgl"}),

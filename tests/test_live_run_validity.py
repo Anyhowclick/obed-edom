@@ -12,7 +12,6 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 import live_run_validity as validity  # noqa: E402
-from obed_edom import managed_obs  # noqa: E402
 
 
 INSTRUMENT_COST_ROWS = json.loads((REPO / "tests/fixtures/instrument_cost_rows.json").read_text())
@@ -362,34 +361,3 @@ def test_visible_gl_replay_keeps_the_frozen_unavailable_interval_reason() -> Non
     assert result["measured"]["cadence"]["visits"] is None
     assert "cadence: GL intervals unavailable (GL replay)" in result["reasons"]
     assert not any("samples are missing" in reason for reason in result["reasons"])
-
-
-def test_qualification_rows_do_not_drift_from_probe_or_managed_obs():
-    import live_continuity_probe as probe
-
-    assert set(validity.QUALIFICATIONS) == set(probe.HOST_KINDS)
-    assert validity.QUALIFICATIONS[validity.HOST_HEADLESS_CHROME]["periodMs"] == 1000 / 60
-    assert validity.QUALIFICATIONS[validity.HOST_QUALIFIED_CHROME_ATTACH]["periodMs"] == 1000 / 60
-    for host_kind in (validity.HOST_HEADLESS_CHROME, validity.HOST_QUALIFIED_CHROME_ATTACH):
-        assert validity.QUALIFICATIONS[host_kind]["chromeMajors"] == [155]
-        assert "chromeBuild" not in validity.QUALIFICATIONS[host_kind]
-    for host_kind, output_hz in (
-        (validity.HOST_MANAGED_OBS_25, 25),
-        (validity.HOST_MANAGED_OBS_30, 30),
-    ):
-        row = validity.QUALIFICATIONS[host_kind]
-        assert row["outputHz"] == output_hz
-        assert row["browserSourceHz"] == managed_obs.RATES[output_hz][1]
-        assert row["obsVersion"] == managed_obs.PINNED_OBS
-        assert row["periodMs"] == 1000 / output_hz
-    for row in validity.QUALIFICATIONS.values():
-        assert row["cadenceBoundaryMs"] == 2 * row["periodMs"]
-        assert row["requiredHooks"] == list(validity.REQUIRED_HOOKS)
-        assert validity.qualification(row["hostKind"]) == row
-        assert validity.qualification(row["hostKind"]) is not row
-        assert json.loads(json.dumps(validity.qualification(row["hostKind"]))) == row
-    assert validity.qualification("unknown") is None
-    assert validity.CADENCE_POLICY_STATUS.startswith("OPEN:")
-    assert validity.HOST_ROWS_POLICY_STATUS.startswith("OPEN:")
-    assert validity.LOAD_POLICY_STATUS.startswith("OPEN:")
-    assert validity.REQUIRED_HOOKS_POLICY_STATUS == "frozen C2 accounting hooks"

@@ -13,6 +13,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "src"))
 
 import gate_checks as checks  # noqa: E402
+import live_continuity_probe as probe  # noqa: E402
 from continuity_core_variants import variant_sha  # noqa: E402
 from obed_edom.live_continuity_js import js_sha256  # noqa: E402
 from obed_edom.p2_verdict import build_continuity_plan  # noqa: E402
@@ -22,21 +23,19 @@ HOST = checks.live_run_validity.HOST_HEADLESS_CHROME
 CHROME_BUILD = "155.0.8059.80"
 
 
-def aggregate_run_validity(
-    *, ok: bool | None = True, reasons: list[str] | None = None,
-    host_kind: str = HOST, chrome_build: str | None = CHROME_BUILD,
-    holders: dict | None = None,
-) -> dict:
+def validity_holder(chrome_build: str | None = CHROME_BUILD) -> dict:
     return {
-        "ok": ok,
-        "reasons": list(reasons or []),
-        "policy": {"hostKind": host_kind},
-        "measured": {"environment": {"chromeBuild": chrome_build}},
-        "holders": dict(holders or {}),
+        "hostKind": HOST,
+        "runValidity": {
+            "ok": True,
+            "reasons": [],
+            "policy": {"hostKind": HOST},
+            "measured": {"environment": {"chromeBuild": chrome_build}},
+        },
     }
 
 
-VALID = aggregate_run_validity()
+VALID = probe.artifact_run_validity({"test": validity_holder()})
 TARGET_ID, TARGET_SCENE = checks.ALPHA_ORDINAL_TARGET
 OTHER_ID = "b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry"
 RETIRE_ID = "b8to9:vid-20250608-wa0125.mp4#1->end:retire"
@@ -660,7 +659,7 @@ def test_today_shaped_record_without_run_validity_is_invalid() -> None:
 
 def test_judge_reads_policy_host_kind_from_the_frozen_aggregate_shape() -> None:
     record = feed_record()
-    record["runValidity"] = aggregate_run_validity(host_kind=HOST)
+    record["runValidity"] = probe.artifact_run_validity({"test": validity_holder()})
 
     result = checks.judge(record, "check_mm_feed", "feed-on-1920", HOST, rc=0)
 
@@ -669,8 +668,8 @@ def test_judge_reads_policy_host_kind_from_the_frozen_aggregate_shape() -> None:
 
 def test_round_chrome_build_keeps_a_homogeneous_build_and_skips_validity_na() -> None:
     result = checks.round_chrome_build([
-        ("host.json", {"runValidity": aggregate_run_validity()}),
-        ("pass-g.json", {"runValidity": aggregate_run_validity()}),
+        ("host.json", {"runValidity": probe.artifact_run_validity({"test": validity_holder()})}),
+        ("pass-g.json", {"runValidity": probe.artifact_run_validity({"test": validity_holder()})}),
         ("p2.report.json", {"kind": "p2-adversarial"}),
     ], validity_na=frozenset({"p2.report.json"}))
 
@@ -686,7 +685,7 @@ def test_round_chrome_build_keeps_a_homogeneous_build_and_skips_validity_na() ->
 
 def test_round_chrome_build_exempts_unreadable_registered_p2_reports() -> None:
     result = checks.round_chrome_build([
-        ("host.json", {"runValidity": aggregate_run_validity()}),
+        ("host.json", {"runValidity": probe.artifact_run_validity({"test": validity_holder()})}),
         ("p2.report.json", {"_loadError": "not found"}),
     ], validity_na=frozenset({"p2.report.json"}))
 
@@ -700,7 +699,7 @@ def test_round_chrome_build_exempts_unreadable_registered_p2_reports() -> None:
 
 def test_round_chrome_build_rejects_unregistered_unreadable_artifacts() -> None:
     result = checks.round_chrome_build([
-        ("host.json", {"runValidity": aggregate_run_validity()}),
+        ("host.json", {"runValidity": probe.artifact_run_validity({"test": validity_holder()})}),
         ("ordinary.json", {"_loadError": "not found"}),
     ])
 
@@ -713,7 +712,7 @@ def test_round_chrome_build_rejects_unregistered_unreadable_artifacts() -> None:
 
 def test_round_chrome_build_rejects_absent_validity_without_explicit_na() -> None:
     result = checks.round_chrome_build([
-        ("host.json", {"runValidity": aggregate_run_validity()}),
+        ("host.json", {"runValidity": probe.artifact_run_validity({"test": validity_holder()})}),
         ("ordinary.json", {}),
     ])
 
@@ -739,12 +738,15 @@ def test_round_chrome_build_rejects_zero_recorded_builds() -> None:
 
 def test_round_chrome_build_prints_distinct_holder_builds_when_aggregate_build_is_none() -> None:
     holders = {
-        "arms.A": {"measured": {"environment": {"chromeBuild": "155.0.8059.80"}}},
-        "arms.B": {"measured": {"environment": {"chromeBuild": "155.0.8059.81"}}},
-        "arms.C": {"measured": {"environment": {"chromeBuild": "155.0.8059.80"}}},
-        "arms.D": {"measured": {"environment": {"chromeBuild": None}}},
+        name: validity_holder(build)
+        for name, build in (
+            ("arms.A", "155.0.8059.80"),
+            ("arms.B", "155.0.8059.81"),
+            ("arms.C", "155.0.8059.80"),
+            ("arms.D", None),
+        )
     }
-    validity = aggregate_run_validity(chrome_build=None, holders=holders)
+    validity = probe.artifact_run_validity(holders)
 
     result = checks.round_chrome_build([("mixed-holders.json", {"runValidity": validity})])
 
@@ -773,11 +775,11 @@ def test_round_chrome_build_rejects_mixed_exact_builds() -> None:
 
 
 @pytest.mark.parametrize(
-    ("environment", "holder_suffix"),
-    [
-        ({}, "; holders.*.measured.environment.chromeBuild=[]"),
-        ({"chromeBuild": ""}, ""),
-    ],
+        ("environment", "holder_suffix"),
+        [
+            ({}, "; holders.*.measured.environment.chromeBuild=['155.0.8059.80']"),
+            ({"chromeBuild": ""}, ""),
+        ],
 )
 def test_round_chrome_build_rejects_a_missing_build_on_a_validity_artifact(
     environment: dict, holder_suffix: str,

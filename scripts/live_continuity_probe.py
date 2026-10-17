@@ -2055,14 +2055,10 @@ def _invalidate_holder_validity(holder: dict[str, Any], errors: Sequence[str]) -
 
 
 def _validity_holder_contract_errors(holder: Any, path: str, *, attach: bool) -> list[str]:
-    if not hasattr(contract, "validity_holder"):
-        return []
     return contract.first_errors(contract.validity_holder(holder, path, attach=attach))
 
 
 def _artifact_validity_contract_errors(value: Any) -> list[str]:
-    if not hasattr(contract, "artifact_run_validity"):
-        return []
     return contract.first_errors(contract.artifact_run_validity(value, "runValidity"))
 
 
