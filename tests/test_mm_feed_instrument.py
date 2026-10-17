@@ -45,12 +45,83 @@ console.log(JSON.stringify(input.cases.map(row=>window.__obedMmFeedProbe.decodeC
     assert result == python == expected
 
 
+def _cost_probe(
+    instrument: str, *, recorder: bool = True, callbacks: int = 1,
+    recorder_failure: str | None = None,
+) -> dict:
+    return _node(f"""
+global.window=global;global.location={{hash:'#1'}};let step=1,now=0,raf=[];
+global.performance={{now:()=>{{now+=step;return now}}}};
+global.requestAnimationFrame=fn=>(raf.push(fn),raf.length);global.cancelAnimationFrame=()=>{{}};
+class Media{{pause(){{}} play(){{return Promise.resolve()}}}}
+class Video extends Media{{constructor(){{super();this.__obedInstance='A';this.__obedElId=1;this.currentTime=0;this.paused=false;this.readyState=4;this.videoWidth=320;this.videoHeight=180;this.isConnected=true;this.callbacks=[];this.next=0}}addEventListener(){{}}removeEventListener(){{}}requestVideoFrameCallback(fn){{this.callbacks.push(fn);return ++this.next}}cancelVideoFrameCallback(){{}}getBoundingClientRect(){{return {{x:0,y:0,left:0,top:0,right:10,bottom:10,width:10,height:10}}}}checkVisibility(){{return true}}}}
+class Canvas{{getContext(){{return null}}}}global.HTMLMediaElement=Media;global.HTMLVideoElement=Video;global.HTMLCanvasElement=Canvas;
+global.getComputedStyle=()=>({{opacity:'1',display:'block',visibility:'visible'}});
+global.document={{timeline:{{currentTime:0}},getElementById:()=>null,createElement:()=>new Canvas(),head:null,documentElement:null}};
+const video=new Video(),stack=[],hooks={{}},recorderFailure={json.dumps(recorder_failure)};
+if({json.dumps(recorder)})global.__obedCost={{install(h){{if(recorderFailure==='install')return false;if(!hooks[h])hooks[h]={{count:0,chunks:[]}};return true}},enter(h){{if(recorderFailure==='enter')return false;stack.push(h);return true}},leave(h){{if(recorderFailure==='leave')return false;if(stack.pop()!==h)return false;hooks[h].count++;hooks[h].chunks.push(step);return true}},stop(){{return true}},read(h,o,n){{if(typeof h==='string')return (hooks[h]&&hooks[h].chunks||[]).slice(o||0,(o||0)+(n||1e9));return {{version:1,stopped:false,errors:[],hooks,frames:{{count:0,chunks:[]}}}}}}}};
+global.__OBED_P2_PRESERVE__={{feed:{{decoderFor:id=>id==='A'?video:null}}}};
+global.__OBED_CONTINUITY__={{boundaries:[{{atScene:2,src:{{objectId:'A'}},dst:{{objectId:'A2'}},feed:{{draw:1,from:{{upload:1,size:[320,180]}},to:null}}}}]}};
+eval({json.dumps(instrument)});
+global.__obedMmFeedProbe.bootstrap({{entries:[{{id:'entry-A',atScene:2,objectId:'A',dstObjectId:'A2',feed:{{draw:1,from:{{upload:1,size:[320,180]}},to:null}},draws:{{drawCount:1,draws:[]}},artwork:[]}}]}});
+location.hash='#9';
+for(let i=0;i<{callbacks};i++){{step=i<51?100:1;const callback=video.callbacks.shift();if(!callback)throw new Error('missing callback '+i);callback(now,{{presentedFrames:i+1,mediaTime:(i+1)/30}})}}
+const report=global.__obedMmFeedProbe.report();console.log(JSON.stringify({{health:report.hookHealth,p95:report.callbackCostP95Ms}}));
+""")
+
+
+def test_feed_cost_accounting_is_optional_balanced_and_whole_capture() -> None:
+    absent = _cost_probe(feed.INSTRUMENT_JS, recorder=False)
+    assert absent["health"]["accountingComplete"] is False
+    assert all(not row["installed"] for row in absent["health"]["hooks"].values())
+
+    observed = _cost_probe(feed.INSTRUMENT_JS, callbacks=1001)
+    assert observed["health"]["accountingComplete"] is True
+    assert observed["health"]["hooks"]["feed.rvfc"]["callbackCount"] == 1001
+    assert observed["p95"] == 100
+
+    for failure in ("install", "enter", "leave"):
+        rejected = _cost_probe(feed.INSTRUMENT_JS, recorder_failure=failure)
+        assert rejected["health"]["accountingComplete"] is False
+        assert rejected["health"]["errors"]
+    assert all(
+        not row["installed"]
+        for row in _cost_probe(feed.INSTRUMENT_JS, recorder_failure="install")["health"]["hooks"].values()
+    )
+    enter_rejected = _cost_probe(feed.INSTRUMENT_JS, recorder_failure="enter")["health"]["hooks"]["feed.rvfc"]
+    assert enter_rejected["callbackCount"] == 1 and enter_rejected["enterCount"] == 0
+    leave_rejected = _cost_probe(feed.INSTRUMENT_JS, recorder_failure="leave")["health"]["hooks"]["feed.rvfc"]
+    assert leave_rejected["enterCount"] == 1 and leave_rejected["leaveCount"] == 0
+
+    unbalanced = feed.INSTRUMENT_JS.replace(
+        "costLeave('feed.rvfc',entered);S.rvfcCosts.push",
+        "S.rvfcCosts.push",
+        1,
+    )
+    assert _cost_probe(unbalanced)["health"]["accountingComplete"] is False
+
+    truncated = feed.INSTRUMENT_JS.replace(
+        "S.rvfcCosts.push(performance.now()-costStart)",
+        "S.rvfcCosts.push(performance.now()-costStart);if(S.rvfcCosts.length>1000)S.rvfcCosts.shift()",
+        1,
+    )
+    assert _cost_probe(truncated, callbacks=1001)["p95"] < 20
+
+
 def test_realistic_fake_gl_sampling_lifecycle_and_shutdown() -> None:
     instrument = json.dumps(feed.INSTRUMENT_JS)
     counter_layout = json.dumps(binary.layout())
     script = r"""
-const layout=LAYOUT;let clock=0,raf=[],cancelled=[],removed=0,videoCancelled=0,draws=0,reads=0,failedCaptureDraws=0,glReads=0,presentDraws=[],contextOptions=[],captureSizes=[],glReadRects=[];
+const layout=LAYOUT;let clock=0,raf=[],cancelled=[],removed=0,videoCancelled=0,draws=0,reads=0,failedCaptureDraws=0,glReads=0,presentDraws=[],contextOptions=[],captureSizes=[],glReadRects=[],nativeCostViolations=0;
 global.window=global; global.location={hash:'#1'}; global.performance={now:()=>++clock};
+const costState={stopped:false,errors:[],stack:[],hooks:{},frames:[],sameHookNesting:0};
+global.__obedCost={
+  install(hook){if(costState.stopped||typeof hook!=='string'||!hook)return false;if(!costState.hooks[hook])costState.hooks[hook]={installed:true,count:0,chunks:[]};return true},
+  enter(hook){if(costState.stopped)return false;const row=costState.hooks[hook];if(!row||!row.installed)return false;if(costState.stack.some(span=>span.hook===hook))costState.sameHookNesting++;costState.stack.push({hook,start:clock,nested:0});return true},
+  leave(hook){const end=clock,span=costState.stack[costState.stack.length-1];if(costState.stopped||!span||span.hook!==hook)return false;costState.stack.pop();const total=end-span.start,row=costState.hooks[hook];row.count++;row.chunks.push(Math.max(0,total-span.nested));if(costState.stack.length)costState.stack[costState.stack.length-1].nested+=total;return true},
+  stop(){if(costState.stopped)return true;if(costState.stack.length)costState.errors.push('unclosed spans');costState.stack.length=0;costState.stopped=true;return true},
+  read(hook,offset,n){if(typeof hook==='string'){const row=costState.hooks[hook];return row?row.chunks.slice(offset||0,(offset||0)+(n||row.chunks.length)):[]}return {version:1,stopped:costState.stopped,errors:costState.errors.slice(),hooks:costState.hooks,frames:{count:costState.frames.length,chunks:costState.frames.slice()}}}
+};
 global.requestAnimationFrame=(fn)=>(raf.push(fn),raf.length);
 global.cancelAnimationFrame=id=>cancelled.push(id);
 class Media {pause(){this.paused=true} play(){this.paused=false;return Promise.resolve()}}
@@ -122,8 +193,8 @@ function paintSource(source,rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;
 function paintLabel(rect){for(let y=0;y<rect.h;y++)for(let x=0;x<rect.w;x++){const i=((rect.y+y)*1920+rect.x+x)*4;pixels[i]=pixels[i+1]=pixels[i+2]=Math.round(pixels[i]*.39);pixels[i+3]=255}}
 function makeGl(){active=100;flipY=false;bound={};sources=new WeakMap();matrix=null;drawNo=0;pixels=new Uint8ClampedArray(1920*540*4);return {canvas:null,TEXTURE0:100,TEXTURE_2D:2,UNPACK_FLIP_Y_WEBGL:3,UNPACK_PREMULTIPLY_ALPHA_WEBGL:4,RGBA:5,UNSIGNED_BYTE:6,drawingBufferWidth:1920,drawingBufferHeight:540,
  activeTexture(u){active=u},bindTexture(t,texture){bound[active]=texture},pixelStorei(p,v){if(p===3)flipY=!!v},useProgram(){},getUniformLocation(p,n){return n==='MVPMatrix'?matrixLoc:mixLoc},uniform1f(){},uniformMatrix4fv(l,t,v){matrix=Array.from(v)},
- clear(){drawNo=0;pixels.fill(0)},drawElements(){this.drawArrays()},drawArrays(){drawNo++;const sizes=this.layerSizes||[[100,100],[100,100],[1920,540],[20,20]],r=rectFor(matrix,sizes[drawNo-1]);if(drawNo===4)paintLabel(r);else paintSource(sources.get(bound[active]),r);this.completedAt=performance.now()},
- texImage2D(){const source=arguments[5],s0=source.drawSource||source;sources.set(bound[active],Object.create(s0,{__obedPresentedFrames:{value:s0.__obedPresentedFrames},flipY:{value:flipY}}))},readPixels(x,y,w,h,f,t,a){if(failPatch&&w<20){failPatch=false;throw new Error('read failed')}glReads++;glReadRects.push([this.canvas&&this.canvas.id,w,h]);for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const src=((y+yy)*1920+x+xx)*4,dst=(yy*w+xx)*4;a.set(pixels.slice(src,src+4),dst)}}}}
+ clear(){if(costState.stack.length)nativeCostViolations++;drawNo=0;pixels.fill(0)},drawElements(){this.drawArrays()},drawArrays(){if(costState.stack.length)nativeCostViolations++;drawNo++;const sizes=this.layerSizes||[[100,100],[100,100],[1920,540],[20,20]],r=rectFor(matrix,sizes[drawNo-1]);if(drawNo===4)paintLabel(r);else paintSource(sources.get(bound[active]),r);this.completedAt=performance.now()},
+ texImage2D(){if(costState.stack.length)nativeCostViolations++;const source=arguments[5],s0=source.drawSource||source;sources.set(bound[active],Object.create(s0,{__obedPresentedFrames:{value:s0.__obedPresentedFrames},flipY:{value:flipY}}))},readPixels(x,y,w,h,f,t,a){if(failPatch&&w<20){failPatch=false;throw new Error('read failed')}glReads++;glReadRects.push([this.canvas&&this.canvas.id,w,h]);for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){const src=((y+yy)*1920+x+xx)*4,dst=(yy*w+xx)*4;a.set(pixels.slice(src,src+4),dst)}}}}
 const gl=makeGl();
 const originalDraw=gl.drawArrays,originalUpload=gl.texImage2D,canvas=new Canvas('0-canvas',gl,true);gl.canvas=canvas;canvas.getContext('webgl');
 const textures={alpha:{},broken:{},counter:{}},posters={alpha:new ImageSource(100,100,8),broken:new ImageSource(100,100,8),counter:new ImageSource(1920,540,8)};
@@ -168,10 +239,10 @@ location.hash='#29';tick();for(const frame of [121,122,123])present(videos.count
 location.hash='#32';const transientMove=openContext('16-canvas');location.hash='#33';tick();transientMove.canvas.isConnected=false;tick();videos.alpha.__obedInstance='alpha-end';runChain(34,131,'17-canvas','alpha-end','alpha-n4');
 location.hash='#36';tick();delete decoders.early;seam.claim('early');decoders.early=videos.early;location.hash='#37';tick();const earlyMove=openContext('19-canvas'),earlyTexture=posterTexture(earlyMove,new ImageSource(100,100,8));location.hash='#38';for(let n=0;n<3;n++){present(videos.early,141+n);earlyMove.gl.clear();earlyMove.gl.activeTexture(earlyMove.gl.TEXTURE0);earlyMove.gl.bindTexture(earlyMove.gl.TEXTURE_2D,earlyTexture);earlyMove.gl.texImage2D(0,0,0,0,0,videos.early);earlyMove.gl.uniformMatrix4fv(earlyMove.m,false,matrices.alpha);earlyMove.gl.drawArrays();tick()}
 const queued=Object.values(videos).flatMap(v=>v.callbacks.map(row=>row[1])),instrumentGetContext=Canvas.prototype.getContext,productGl={},productGetContext=function(){return instrumentGetContext.apply(this,arguments)};Canvas.prototype.getContext=productGetContext;for(const name of ['texImage2D','activeTexture','bindTexture','pixelStorei','useProgram','getUniformLocation','uniform1f','uniformMatrix4fv','clear','drawArrays','drawElements']){const owned=gl[name];productGl[name]=function(){return owned.apply(gl,arguments)};gl[name]=productGl[name]}
-const finalReport=window.__obedMmFeedProbe.report(),drawsAtReport=draws,readsAtReport=reads,glAtReport=glReads,contexts=Object.fromEntries(finalReport.contexts.map(c=>[c.id,c])),firstContext=contexts['6-canvas'],geoFrames=finalReport.frames.filter(f=>f.serial===firstContext.serial),stickyContext=contexts['9-canvas'],stickyFrames=finalReport.frames.filter(f=>f.serial===stickyContext.serial),stickyFrame=stickyFrames[stickyFrames.length-1],geometryFirst=geoFrames[0].riders.map(r=>[r.entryId,r.sourceRectError]),geometryAfterDraw=geoFrames.find(f=>f.riders.length&&f.riders.every(r=>r.sourceRectError===0)).riders.map(r=>[r.entryId,r.sourceRectError]),geometrySticky=stickyFrame.riders.map(r=>[r.entryId,r.sourceRectError]);
+const finalReport=window.__obedMmFeedProbe.report();window.__obedCost.stop();const costReport=window.__obedCost.read(),drawsAtReport=draws,readsAtReport=reads,glAtReport=glReads,contexts=Object.fromEntries(finalReport.contexts.map(c=>[c.id,c])),firstContext=contexts['6-canvas'],geoFrames=finalReport.frames.filter(f=>f.serial===firstContext.serial),stickyContext=contexts['9-canvas'],stickyFrames=finalReport.frames.filter(f=>f.serial===stickyContext.serial),stickyFrame=stickyFrames[stickyFrames.length-1],geometryFirst=geoFrames[0].riders.map(r=>[r.entryId,r.sourceRectError]),geometryAfterDraw=geoFrames.find(f=>f.riders.length&&f.riders.every(r=>r.sourceRectError===0)).riders.map(r=>[r.entryId,r.sourceRectError]),geometrySticky=stickyFrame.riders.map(r=>[r.entryId,r.sourceRectError]);
 for(const callback of queued)callback(clock,{presentedFrames:999,mediaTime:33.3});while(raf.length)tick();canvas.getContext('webgl');gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,textures.alpha);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,false);gl.useProgram(program);const postLoc=gl.getUniformLocation(program,'MVPMatrix');gl.uniform1f(mixLoc,1);gl.uniformMatrix4fv(postLoc,false,matrices.alpha);gl.texImage2D(0,0,0,0,0,posters.alpha);gl.clear();gl.drawArrays();gl.drawElements();videos.alpha.pause();videos.alpha.play();window.__OBED_MM_FEED__.once('alpha');seam.claim('alpha');seam.onStandDown('alpha','late');
 const descriptorAfter=Object.getOwnPropertyDescriptor(window,'__OBED_CONTINUITY__');
-const harnessChecks={probeVersion:window.__obedMmFeedProbe.version,geometryFirst,geometryAfterDraw,geometrySticky,rollover:[rolloverHigh.counter,rolloverZero.counter],framed:{completedAt:firstCompletedAt,firstDrawAt:contexts['6-canvas'].firstDrawAt},unframed:{completedAt:unframedCompletedAt,firstDrawAt:contexts['7-canvas'].firstDrawAt},thrown:{completedAt:thrownGl.completedAt,firstDrawAt:contexts['8-canvas'].firstDrawAt},unplanned:{count:finalReport.unplannedContextCount,contexts:['13-canvas','16-canvas'].filter(id=>contexts[id]),frames:finalReport.frames.filter(f=>f.atScene===null).length,uploads:finalReport.uploads.filter(row=>row.atScene===null).length},draws,reads,failedCaptureDraws,glReads,presentDraws,contextOptions,captureSizes,glReadRects,callbacksRemaining:Object.values(videos).reduce((n,v)=>n+v.callbacks.length,0),videoCancelled,post:{draws:draws-drawsAtReport,reads:reads-readsAtReport,glReads:glReads-glAtReport},frozen:Object.isFrozen(finalReport)&&Object.isFrozen(finalReport.frames[0].rows[0])&&window.__obedMmFeedProbe.report()===finalReport,removed,cancelled:cancelled.length,restored:{getContext:Canvas.prototype.getContext===productGetContext,pause:Media.prototype.pause===originalPause,play:Media.prototype.play===originalPlay,once:window.__OBED_MM_FEED__.once===originalOnce,decoderFor:seam.decoderFor===originalDecoderFor,claim:seam.claim===originalClaim,stand:seam.onStandDown===originalStand,draw:gl.drawArrays===productGl.drawArrays,upload:gl.texImage2D===productGl.texImage2D,draw2:holdMove.gl.drawArrays===originalDraw2,descriptor:descriptorAfter.value===continuityDescriptor.value&&descriptorAfter.writable===continuityDescriptor.writable&&descriptorAfter.configurable===continuityDescriptor.configurable}};
+const harnessChecks={probeVersion:window.__obedMmFeedProbe.version,geometryFirst,geometryAfterDraw,geometrySticky,rollover:[rolloverHigh.counter,rolloverZero.counter],framed:{completedAt:firstCompletedAt,firstDrawAt:contexts['6-canvas'].firstDrawAt},unframed:{completedAt:unframedCompletedAt,firstDrawAt:contexts['7-canvas'].firstDrawAt},thrown:{completedAt:thrownGl.completedAt,firstDrawAt:contexts['8-canvas'].firstDrawAt},unplanned:{count:finalReport.unplannedContextCount,contexts:['13-canvas','16-canvas'].filter(id=>contexts[id]),frames:finalReport.frames.filter(f=>f.atScene===null).length,uploads:finalReport.uploads.filter(row=>row.atScene===null).length},draws,reads,failedCaptureDraws,glReads,presentDraws,contextOptions,captureSizes,glReadRects,costReport,sameHookNesting:costState.sameHookNesting,nativeCostViolations,callbacksRemaining:Object.values(videos).reduce((n,v)=>n+v.callbacks.length,0),videoCancelled,post:{draws:draws-drawsAtReport,reads:reads-readsAtReport,glReads:glReads-glAtReport},frozen:Object.isFrozen(finalReport)&&Object.isFrozen(finalReport.frames[0].rows[0])&&window.__obedMmFeedProbe.report()===finalReport,removed,cancelled:cancelled.length,restored:{getContext:Canvas.prototype.getContext===productGetContext,pause:Media.prototype.pause===originalPause,play:Media.prototype.play===originalPlay,once:window.__OBED_MM_FEED__.once===originalOnce,decoderFor:seam.decoderFor===originalDecoderFor,claim:seam.claim===originalClaim,stand:seam.onStandDown===originalStand,draw:gl.drawArrays===productGl.drawArrays,upload:gl.texImage2D===productGl.texImage2D,draw2:holdMove.gl.drawArrays===originalDraw2,descriptor:descriptorAfter.value===continuityDescriptor.value&&descriptorAfter.writable===continuityDescriptor.writable&&descriptorAfter.configurable===continuityDescriptor.configurable}};
 console.log(JSON.stringify({report:finalReport,harnessChecks}));
 """
     script = script.replace("LAYOUT", counter_layout)
@@ -189,6 +260,20 @@ console.log(JSON.stringify({report:finalReport,harnessChecks}));
     assert checks["unplanned"] == {"count": 3, "contexts": [], "frames": 0, "uploads": 0}
     assert checks["rollover"] == [4095, 0]
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    assert report["hookHealth"]["accountingComplete"] is True, json.dumps(report["hookHealth"], sort_keys=True)
+    assert checks["costReport"]["stopped"] is True and checks["costReport"]["errors"] == []
+    assert checks["sameHookNesting"] == 0
+    assert checks["nativeCostViolations"] == 0
+    assert {
+        hook: report["hookHealth"]["hooks"][hook]["enterCount"]
+        for hook in ("feed.raf", "feed.draw")
+    } == {"feed.raf": 1274, "feed.draw": 336}
+    for hook in contract.FEED_COST_HOOKS:
+        health = report["hookHealth"]["hooks"][hook]
+        recorded = checks["costReport"]["hooks"][hook]
+        assert health["installed"] is True
+        assert health["callbackCount"] == health["enterCount"] == health["leaveCount"] == recorded["count"]
+        assert len(recorded["chunks"]) == recorded["count"]
     continuous_entries = [
         {"id": f"carry-{name}", "objectId": name, "dstObjectId": f"d{name}", "atScene": 2,
          "feed": {"draw": draw, "from": {"upload": draw, "size": size}, "to": None}}

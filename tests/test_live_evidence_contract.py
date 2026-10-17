@@ -480,13 +480,24 @@ def _strict_setup(report: dict[str, Any]) -> dict[str, Any]:
 
 def _v3_setup(report: dict[str, Any]) -> dict[str, Any]:
     report = _strict_setup(report)
-    report.update(version=3, unplannedContextCount=0)
+    report.update(version=3, unplannedContextCount=0, hookHealth=_feed_hook_health())
     report["contexts"][0]["evidenceComplete"] = True
     decoder = {"instance": "movie-a", "elId": 7, "visible": True, "opacityProduct": 1.0,
                "rect": {"x": 0, "y": 0, "w": 10, "h": 10}}
     report["claims"][0].update(generation=1, visit=1, source="claim", decoder=decoder)
     report["departures"][0].update(source="pause", decoder=decoder)
     return report
+
+
+def _feed_hook_health() -> dict[str, Any]:
+    return {
+        "version": 1, "bootstrapCalls": 1, "configureCalls": 1, "installAttempts": 2,
+        "accountingComplete": True, "errors": [],
+        "hooks": {
+            hook: {"installed": True, "callbackCount": 0, "enterCount": 0, "leaveCount": 0, "active": 0}
+            for hook in contract.FEED_COST_HOOKS
+        },
+    }
 
 
 def _strict(mutate: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], Any]:
@@ -571,6 +582,13 @@ def test_mm_feed_contract_accepts_null_draw_and_source_geometry_values() -> None
 def test_v3_mm_feed_contract_counts_unplanned_contexts_and_removes_v2_exemption() -> None:
     report = _v3_setup(_mm_feed_report())
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    report["instrumentVariant"] = "calibration-red"
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    report["instrumentVariant"] = "production"
+    assert "mmFeed.instrumentVariant" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(report)
+    ]
+    report.pop("instrumentVariant")
     report["contexts"][0].update(atScene=None, entryIds=[])
     report["frames"][0].update(atScene=None, rows=[], labels=[], riders=[], labelExpected=[])
     problems = [problem.split(" at ")[0] for problem in contract.mm_feed_report(report)]
@@ -581,6 +599,207 @@ def test_v3_mm_feed_contract_counts_unplanned_contexts_and_removes_v2_exemption(
     assert "mmFeed.unplannedContextCount" in [
         problem.split(" at ")[0] for problem in contract.mm_feed_report(report)
     ]
+
+
+def test_feed_hook_health_contract_rejects_false_complete_and_uninstalled_accounting_mutants() -> None:
+    health = _feed_hook_health()
+    assert list(contract.feed_hook_health(health)) == []
+    health["hooks"]["feed.rvfc"].update(callbackCount=2, enterCount=1, leaveCount=1)
+    health["accountingComplete"] = False
+    assert list(contract.feed_hook_health(health)) == []
+    health["accountingComplete"] = True
+    assert "feedHookHealth.accountingComplete" in [
+        problem.split(" at ")[0] for problem in contract.feed_hook_health(health)
+    ]
+    health = _feed_hook_health()
+    health["hooks"]["feed.draw"].update(installed=False, enterCount=1, leaveCount=1)
+    assert "feedHookHealth.hook:uninstalled accounting" in [
+        problem.split(" at ")[0] for problem in contract.feed_hook_health(health)
+    ]
+
+
+_EMBEDDED_INSTRUMENT_COST_ROWS = json.loads(r"""
+[
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":true},
+  {"row":{"applicable":true,"installed":true,"count":2,"p95":1.5,"max":2.0,"overBudget":2},"wellFormed":true},
+  {"row":{"applicable":true,"installed":true,"count":0,"p95":null,"max":null,"overBudget":0},"wellFormed":true},
+  {"row":{"applicable":false,"installed":false,"count":0,"p95":null,"max":null,"overBudget":0},"wellFormed":true},
+  {"row":{"applicable":true,"installed":false,"count":0,"p95":null,"max":null,"overBudget":0},"wellFormed":true},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":0,"extra":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0},"wellFormed":false},
+  {"row":{"applicable":1,"installed":true,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":1,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":true,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":-1,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":true},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":-1},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":0,"p95":0,"max":null,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":0,"p95":null,"max":0.0,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":0,"p95":null,"max":null,"overBudget":1},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":null,"max":1,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":1,"max":null,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":-1,"max":1,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":-1,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":2,"max":1,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":1e400,"max":1e400,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":2},"wellFormed":false},
+  {"row":{"applicable":false,"installed":true,"count":0,"p95":null,"max":null,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":false,"installed":false,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
+  {"row":{"applicable":true,"installed":false,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":false}
+]
+""")
+
+
+def _instrument_cost_rows() -> list[dict[str, Any]]:
+    shared = REPO / "tests/fixtures/instrument_cost_rows.json"
+    return json.loads(shared.read_text()) if shared.exists() else _EMBEDDED_INSTRUMENT_COST_ROWS
+
+
+def test_instrument_cost_contract_matches_the_canonical_hook_row_grammar() -> None:
+    base = {
+        hook: {"applicable": False, "installed": False, "count": 0,
+               "p95": None, "max": None, "overBudget": 0}
+        for hook in contract.INSTRUMENT_COST_HOOKS
+    }
+    base["frame.total"] = {
+        "applicable": True, "installed": True, "count": 1,
+        "p95": 1.5, "max": 2.0, "overBudget": 0,
+    }
+    for case in _instrument_cost_rows():
+        costs = copy.deepcopy(base)
+        costs["feed.rvfc"] = case["row"]
+        assert (not list(contract.instrument_cost(costs))) is case["wellFormed"], case
+    costs = copy.deepcopy(base)
+    costs["frame.total"] = {
+        "applicable": False, "installed": False, "count": 0,
+        "p95": None, "max": None, "overBudget": 0,
+    }
+    assert "instrumentCost.frame.total:applicable" in [
+        problem.split(" at ")[0] for problem in contract.instrument_cost(costs)
+    ]
+
+
+def _green_under_artwork_common() -> tuple[dict[str, Any], ...]:
+    rider = mm_feed_instrument.score_no_rider_above_canvas({
+        "complete": True, "coverage": True,
+        "riders": [{"visible": False, "opacityProduct": 0.0, "intersectsCanvas": True}],
+    })
+    artwork = mm_feed_instrument.score_artwork_above({
+        "complete": True, "reads": [{"artworkAbove": True}],
+    })
+    departure = mm_feed_instrument.score_departure_exposure({
+        "complete": True, "entryId": "carry-a", "serial": 1, "atScene": 2,
+        "visit": 1, "generation": 1, "decoder": {"instance": "movie-a", "elId": 7},
+        "context": {"serial": 1, "id": "0-canvas"},
+        "start": {"t": 1.0, "source": "context", "decoderVisible": True},
+        "firstDraw": {"t": 2.0, "frameN": 1}, "ordering": True,
+        "intervalCoverage": True, "posterExposure": False, "preDrawVisibility": [True],
+        "hiddenWholePreDraw": False,
+        "riders": [{"visible": False, "opacityProduct": 0.0, "intersectsCanvas": True}],
+    })
+    dom = {
+        "connected": True, "inStage": True, "onBody": False, "shown": True,
+        "opacityProduct": 1.0, "canvasCount": 1, "afterCanvas": True,
+        "sameStackingContext": True,
+    }
+    handback = mm_feed_instrument.score_handback_continuity({
+        "complete": True, "frameMappingComplete": True,
+        "lastUpload": {"mediaTime": 1.0, "frameIndex": 0},
+        "closed": {"frameIndex": 1, "dom": dom},
+        "presented": [{"mediaTime": value, "dom": dom} for value in (1 + 1 / 30, 1 + 2 / 30, 1.1)],
+        "sourceFrameDurationS": 1 / 30, "durationSource": "fps", "adjacentFrames": True,
+        "canvasLingerMs": 1.0,
+    })
+    assert all(row["verdict"] is True for row in (rider, artwork, departure, handback))
+    return rider, artwork, departure, handback
+
+
+def _resume_record(source_advance: float = 2) -> dict[str, Any]:
+    frame_duration = 1 / 30
+    return {
+        "complete": True, "mode": "departure", "mediaOverflow": 0,
+        "holdPauseMissing": False, "clockReadable": True, "clockStill": True,
+        "pauseTime": 1.0, "settleTime": 2.0, "pauseCurrentTime": 2.0,
+        "settleCurrentTime": 2.0, "pauseFrame": 65, "firstAfterFrame": 67,
+        "pauseMediaTime": 65 * frame_duration,
+        "firstAfterMediaTime": (66 + source_advance) * frame_duration,
+        "frameDurationS": frame_duration, "clockToleranceS": frame_duration * .49,
+        "seeked": False, "resumedFromZero": False, "successfulFeed": True,
+        "lastUploadedFrame": 66, "lastUploadedMediaTime": 66 * frame_duration,
+        "departurePauseBeforeMove": True,
+    }
+
+
+def test_under_artwork_contract_accepts_real_green_outputs_and_rejects_shape_mutants() -> None:
+    rider, artwork, departure, handback = _green_under_artwork_common()
+    feed_live = mm_feed_instrument.score_feed_live({
+        "complete": True, "mode": "continuous", "usableContext": True,
+        "boundTextures": True, "continuousCoverage": True, "maxInterFeedGapMs": 10.0,
+        "presentedFrames": [1, 2], "interval": {"start": 1.0, "end": 2.0},
+        "reads": [{"progress": progress, "patchInside": True, "coveredByLaterDraw": False,
+                   "kind": "alpha", "dVideo": 1.0, "dPoster": 20.0, "dSep": 20.0}
+                  for progress in mm_feed_instrument.READ_PROGRESS],
+    })
+    labels = mm_feed_instrument.score_labels_over_feed({
+        "complete": True, "coverage": True, "labels": [], "expected": 0,
+    })
+    continuous = {
+        "verdict": mm_feed_instrument.combine(feed_live, rider, labels, artwork, handback),
+        "reason": None, "mode": "continuous", "interval": {"start": 1.0, "end": 2.0},
+        "noRiderAboveCanvas": rider, "artworkAbove": artwork,
+        "departureExposure": departure, "feedLive": feed_live, "labelsOverFeed": labels,
+        "holdFrame": {"verdict": None, "notApplicable": True},
+        "handbackContinuity": handback,
+    }
+    assert labels == {"verdict": True, "labels": [], "notApplicable": True}
+    assert list(contract.under_artwork_result(continuous)) == []
+    malformed = copy.deepcopy(continuous)
+    malformed["reason"] = ""
+    assert "underArtwork.reason" in [
+        problem.split(" at ")[0] for problem in contract.under_artwork_result(malformed)
+    ]
+    malformed = copy.deepcopy(continuous)
+    malformed["holdFrame"] = {"verdict": None}
+    assert "underArtwork.holdFrame:notApplicable" in [
+        problem.split(" at ")[0] for problem in contract.under_artwork_result(malformed)
+    ]
+    hold_record = {
+        "complete": True, "usableContext": True, "boundTextures": True, "mode": "departure",
+        "mediaOverflow": 0, "successfulFeed": True, "lastUploadedFrame": 66,
+        "interval": {"start": 1.0, "end": 2.0},
+        "reads": [{"phase": phase, "kind": "counter", "bestFrame": 66, "matchMargin": 2.0}
+                  for phase in ("first", "middle", "last")],
+    }
+    hold = mm_feed_instrument.score_hold_frame(hold_record)
+    poster = mm_feed_instrument.score_poster_hold(_resume_record())
+    resume = mm_feed_instrument.score_resume(_resume_record())
+    held = {
+        "verdict": mm_feed_instrument.combine(hold, poster, resume, rider, artwork, handback),
+        "reason": None, "mode": "departure", "interval": {"start": 1.0, "end": 2.0},
+        "noRiderAboveCanvas": rider, "artworkAbove": artwork,
+        "departureExposure": departure, "holdFrame": hold, "posterHold": poster,
+        "resume": resume, "handbackContinuity": handback,
+    }
+    assert list(contract.under_artwork_result(held)) == []
+    malformed = copy.deepcopy(held)
+    malformed["resume"]["report"] = "REPORT"
+    assert "underArtwork.resume.report" in [
+        problem.split(" at ")[0] for problem in contract.under_artwork_result(malformed)
+    ]
+    malformed = copy.deepcopy(held)
+    malformed["resume"].update(report=True, dropSize=2)
+    assert "underArtwork.resume.reportSemantics" in [
+        problem.split(" at ")[0] for problem in contract.under_artwork_result(malformed)
+    ]
+    held["resume"] = mm_feed_instrument.score_resume(_resume_record(0))
+    assert list(contract.under_artwork_result(held)) == []
+    missing = _resume_record()
+    missing.pop("firstAfterMediaTime")
+    held["resume"] = mm_feed_instrument.score_resume(missing)
+    assert list(contract.under_artwork_result(held)) == []
+    assert list(contract.under_artwork_result({
+        "verdict": None, "reason": "inconclusive: producer rejected the report",
+    })) == []
 
 
 def test_v3_feed_verdict_contract_requires_departure_but_resume_only_for_hold() -> None:
