@@ -105,7 +105,14 @@
       "    MISMATCH: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold False != True",
       "    MISMATCH: b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed",
       "    MISMATCH: b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.holdFrame missing or malformed",
-      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed"
+      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.resume missing or malformed",
+      "    REPORT: asset=untitled-h264.mov scene=4 visibleUndecodedDurationMs=16.7",
+      "    REPORT: asset=untitled-h264.mov scene=6 visibleUndecodedDurationMs=17.0",
+      "    REPORT: asset=untitled-h264.mov scene=8 visibleUndecodedDurationMs=16.1",
+      "    REPORT: asset=vid-20250608-wa0125.mp4 scene=8 visibleUndecodedDurationMs=16.1",
+      "    REPORT: asset=vid-20250608-wa0121.mp4 scene=12 visibleUndecodedDurationMs=28.6",
+      "    REPORT: asset=full_report_card_wall_dsk.001.01.h264.mov scene=16 visibleUndecodedDurationMs=31.8"
     ],
     "arm": "after-feed",
     "gateKind": "check_mm_feed",
@@ -189,7 +196,13 @@
       "    MISMATCH: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold missing or malformed",
       "    MISMATCH: b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold missing or malformed",
       "    MISMATCH: b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.posterHold missing or malformed",
-      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold missing or malformed"
+      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold missing or malformed",
+      "    REPORT: asset=untitled-h264.mov scene=4 visibleUndecodedDurationMs=17.2",
+      "    REPORT: asset=untitled-h264.mov scene=6 visibleUndecodedDurationMs=33.9",
+      "    REPORT: asset=untitled-h264.mov scene=8 visibleUndecodedDurationMs=17.8",
+      "    REPORT: asset=vid-20250608-wa0125.mp4 scene=8 visibleUndecodedDurationMs=17.8",
+      "    REPORT: asset=vid-20250608-wa0121.mp4 scene=12 visibleUndecodedDurationMs=13.4",
+      "    REPORT: asset=full_report_card_wall_dsk.001.01.h264.mov scene=16 visibleUndecodedDurationMs=31.4"
     ],
     "arm": "no-pause",
     "gateKind": "check_mm_feed",
@@ -210,7 +223,14 @@
       "    MISMATCH: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != False",
       "    MISMATCH: b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed",
       "    MISMATCH: b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.holdFrame missing or malformed",
-      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed"
+      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.resume missing or malformed",
+      "    REPORT: asset=untitled-h264.mov scene=4 visibleUndecodedDurationMs=16.3",
+      "    REPORT: asset=untitled-h264.mov scene=6 visibleUndecodedDurationMs=15.4",
+      "    REPORT: asset=untitled-h264.mov scene=8 visibleUndecodedDurationMs=16.7",
+      "    REPORT: asset=vid-20250608-wa0125.mp4 scene=8 visibleUndecodedDurationMs=34.1",
+      "    REPORT: asset=vid-20250608-wa0121.mp4 scene=12 visibleUndecodedDurationMs=27.6",
+      "    REPORT: asset=full_report_card_wall_dsk.001.01.h264.mov scene=16 visibleUndecodedDurationMs=33.4"
     ],
     "arm": "ordinal",
     "gateKind": "check_mm_feed",
@@ -245,6 +265,12 @@
   },
   "mm-feed-D7-attach-once.json": {
     "added": [
+      "    MISMATCH: b0to1:counter-a.mov#1->counter-a.mov#1:carry.resume missing or malformed",
+      "    MISMATCH: b0to1:counter-b.mov#1->counter-b.mov#1:carry.resume missing or malformed",
+      "    MISMATCH: b1to2:counter-a.mov#1->counter-a.mov#1:carry.resume missing or malformed",
+      "    MISMATCH: b1to2:counter-b.mov#1->counter-b.mov#1:carry.resume missing or malformed",
+      "    MISMATCH: b2to3:counter-a.mov#1->counter-a.mov#1:carry.resume missing or malformed",
+      "    MISMATCH: b2to3:counter-b.mov#1->counter-b.mov#1:carry.resume missing or malformed",
       "    REPORT: asset=counter-a.mov scene=0 visibleUndecodedDurationMs=0.0",
       "    REPORT: asset=counter-b.mov scene=0 visibleUndecodedDurationMs=0.0"
     ],
@@ -256,7 +282,7 @@
     "rc": 0,
     "removed": [],
     "runtimeFields": {},
-    "verdict": "MATCH"
+    "verdict": "MISMATCH"
   },
   "mm-feed-D7-feed-on-1920.json": {
     "added": [
@@ -265,7 +291,9 @@
       "    MISMATCH: b1to2:counter-a.mov#1->counter-a.mov#1:carry.holdFrame missing or malformed",
       "    MISMATCH: b1to2:counter-b.mov#1->counter-b.mov#1:carry.holdFrame missing or malformed",
       "    MISMATCH: b2to3:counter-a.mov#1->counter-a.mov#1:carry.holdFrame missing or malformed",
-      "    MISMATCH: b2to3:counter-b.mov#1->counter-b.mov#1:carry.holdFrame missing or malformed"
+      "    MISMATCH: b2to3:counter-b.mov#1->counter-b.mov#1:carry.holdFrame missing or malformed",
+      "    REPORT: asset=counter-a.mov scene=0 visibleUndecodedDurationMs=0.0",
+      "    REPORT: asset=counter-b.mov scene=0 visibleUndecodedDurationMs=0.0"
     ],
     "arm": "feed-on-1920",
     "gateKind": "check_mm_feed",
