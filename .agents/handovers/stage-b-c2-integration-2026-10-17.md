@@ -13,8 +13,38 @@
 
 | Branch | SHA | State |
 |---|---|---|
-| `claude/stage-b-arch` | `207d7838` (+ this handover) | Integration target. Untouched by C2-int code. |
-| `claude/stage-b-c4c5` | `0ec8d143`, pushed | Integration branch: C4-F + C5-G + phase 1 + phase 2. Targeted tests 3366 passed outside the sandbox on Node 16.0.0. |
+| `claude/stage-b-arch` | `207d7838` (+ handovers) | Integration target. Untouched by C2-int code. |
+| `claude/stage-b-c4c5` | `6639d4f0`, pushed | Integration branch: C4-F + C5-G + phases 1–3. Full suites run (below). |
+
+**Update 2026-10-17 evening (resumed session, same worktree):**
+- **Phase 3 LANDED on c4c5:** P-c `77341530`, F-c `ab5a789b`, V-c `c01aec98`; merges `3bc6ef50`/`a3f1eaa8`/`6639d4f0`. The hard `score_departure_pixels` import was done inside P-c's fold, so no separate fixup commit. The merged tree is byte-identical to the reviewed integration tree. Targeted files: 2473 passed.
+- **Reviews:** r3 (Opus 5.5 high) folded all severities; r4 found no blocker/major on any stream, so the loop is closed. Reviews and folds are in `.cache/reviews/{pc,fc,vc,fcvc}-review-r{3,4}.md` and `{pc,fc}-fold-r3.md` / `vc-fold-r4.md` (V-c's round-3 fold).
+- **New coordinator decisions (reversible):**
+  - V-c derivation re-scores reds with `exposedFrames` recounted under the derived `redMin`, so threshold-free calibration captures derive. This supersedes the r2 red-count case.
+  - The tamper is keyed on feed config `oneFramePosterEntryId`. P-c sets it for red runs and errors the entry unless `oneFramePoster.fired` holds with a matching `entryId` and `contextSerial`.
+  - Frame `t` is stored unrounded.
+  - Poster reference = SOURCE slide's poster at the pre-draw ROI (srcRect), not dstRect. The key name `references.poster.dstRect` is kept and holds the rendered screen rect. No silent resize; the persistent null is pinned at the candidate ROI.
+  - P-c now runs F-c's discovery contracts per entry and records an `arm` object.
+- **r4 ignored (recorded):**
+  - the poster is resized to the ROI at the same aspect without provenance (fail-safe → None);
+  - the tamper `rafTimestamp` is not checked against `[hideMs, firstDrawMs]` (fail-safe: derivation → None);
+  - a theoretical `press_ms` read race;
+  - judged contamination only reaches `contractErrors`;
+  - some untested branches;
+  - three cosmetic F-c/V-c lows.
+- **Full suites on c4c5 `6639d4f0`** (outside the sandbox, so the `pgrep` tests ran). Logs are in `stage-b-c4c5/.cache/suites/`.
+
+  | Suite | Result |
+  |---|---|
+  | 3.13 | 11713 passed, 3 failed |
+  | 3.10 floor | 11714 passed, 2 failed |
+  | UI | 331 passed |
+  | maps | 542 passed |
+  | perf | 2 passed |
+
+  - Both interpreters fail the two real-export census tests (`test_mm_opacity_census_mirror…`, `test_handback_census_mirror…`). They reproduce on `0ec8d143` and are caused by a new export at main `output/source-decks/F2-html` (written 11:55 today by another session). It was not moved: the owner decides.
+  - The third 3.13 failure, `test_run_gates::test_known_bad_the_dev_tier…`, was an xdist-load timeout: it passes alone in 24 s.
+- **Next:** step 5 (pre-5a integration round), then a merge only on the owner's go.
 
 **Phases**
 - **Phase 1 LANDED on c4c5:**
