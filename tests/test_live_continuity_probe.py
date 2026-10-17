@@ -4731,6 +4731,10 @@ class TestAttachChrome:
         def force_exact_viewport(port: int, w: int, h: int, proc: Any) -> Any:
             assert proc is state["proc"]
             events.append(f"viewport {port} {w}x{h}")
+            proc._obed_attach_provenance = {
+                "deviceMetricsResponse": {"id": 1, "result": {}},
+                "viewportReadback": {"innerWidth": 1920, "innerHeight": 1080, "devicePixelRatio": 1},
+            }
             return self.Hold(events, close_error=state["close_error"])
 
         monkeypatch.setattr(probe, "launch_attach_chrome", launch)
@@ -4749,7 +4753,15 @@ class TestAttachChrome:
             "launch attach-chrome-profile stale=False", "port read", "cdp 9555 /devtools/browser/b", f"viewport 9555 {w}x{h}",
             "body on 9555", "hold closed", "chrome terminated",
         ]
-        assert record == {"chromePid": 4321, "chromeExitCode": 0}
+        assert record == {
+            "environmentProvenance": {
+                "launchArguments": probe.attach_chrome_arguments(fake["profile"]),
+                "deviceMetricsResponse": {"id": 1, "result": {}},
+                "viewportReadback": {"innerWidth": 1920, "innerHeight": 1080, "devicePixelRatio": 1},
+            },
+            "chromePid": 4321,
+            "chromeExitCode": 0,
+        }
 
     def test_a_failing_override_close_still_terminates_chrome(self, fake: dict[str, Any]) -> None:
         fake["close_error"] = RuntimeError("close failed")
@@ -4883,7 +4895,13 @@ class TestWaitForCdpPollsTheOwnedChrome:
                 pytest.fail("the block must not run")
         assert clock.sleeps == []
         assert asked == []
-        assert record == {"chromePid": 4321, "chromeExitCode": 9}
+        assert record == {
+            "environmentProvenance": {
+                "launchArguments": probe.attach_chrome_arguments(tmp_path / "attach-chrome-profile"),
+            },
+            "chromePid": 4321,
+            "chromeExitCode": 9,
+        }
 
     def test_chrome_dying_mid_loop_fails_fast_not_at_the_timeout(self, monkeypatch: pytest.MonkeyPatch, clock: FakeTime) -> None:
         chrome = FakeChromeProcess(code=0)
@@ -4956,12 +4974,18 @@ class TestForceExactViewportPollsTheOwnedChrome:
         def __init__(self) -> None:
             self.sent: list[str] = []
             self.closed = 0
+            self.answers = [
+                {"id": 1, "result": {}},
+                {"id": 2, "result": {"result": {"value": {
+                    "innerWidth": 1920, "innerHeight": 1080, "devicePixelRatio": 1,
+                }}}},
+            ]
 
         def send(self, data: str) -> None:
             self.sent.append(data)
 
         def recv(self, timeout: float | None = None) -> str:
-            return '{"id": 1, "result": {}}'
+            return json.dumps(self.answers.pop(0))
 
         def close(self) -> None:
             self.closed += 1
@@ -4983,8 +5007,14 @@ class TestForceExactViewportPollsTheOwnedChrome:
         assert ws.sent == [] and ws.closed == 1
 
     def test_positive_control_a_live_chrome_gets_the_override_and_the_session_is_held(self, ws: Any) -> None:
-        assert probe.force_exact_viewport(51234, 1920, 1080, FakeChromeProcess()) is ws
-        assert [json.loads(m)["method"] for m in ws.sent] == ["Emulation.setDeviceMetricsOverride"]
+        chrome = FakeChromeProcess()
+        assert probe.force_exact_viewport(51234, 1920, 1080, chrome) is ws
+        assert [json.loads(m)["method"] for m in ws.sent] == [
+            "Emulation.setDeviceMetricsOverride", "Runtime.evaluate",
+        ]
+        assert chrome._obed_attach_provenance["viewportReadback"] == {
+            "innerWidth": 1920, "innerHeight": 1080, "devicePixelRatio": 1,
+        }
         assert ws.closed == 0
 
 
@@ -8325,7 +8355,7 @@ class TestArmInterface:
 
     @pytest.mark.parametrize(("caller", "continuous_expected", "host_kind"), [
         pytest.param("launch", True, probe.HOST_HEADLESS_CHROME, id="launch"),
-        pytest.param("attach", False, probe.HOST_QUALIFIED_CHROME_ATTACH, id="attach"),
+        pytest.param("attach", False, probe.HOST_HEADLESS_CHROME, id="attach"),
     ])
     def test_host_callers_select_flag_on_facts_and_delegate_to_the_same_interface(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caller: str,
@@ -10199,7 +10229,7 @@ class TestCarryCoverSync:
     def test_the_sampler_paints_the_bar_the_scorer_reads_and_reads_each_tick_twice(self) -> None:
         js = probe.CARRY_COVER_SAMPLER_JS
         assert f"var BITS = {probe.CARRY_COVER_SYNC_BITS}, CELL = {probe.CARRY_COVER_SYNC_CELL_PX};" in js
-        assert "pre: read()" in js and "setTimeout(function(){ row.vids = read();" in js
+        assert "pre: read()" in js and "var delayedCost = enterCost();" in js and "row.vids = read();" in js
         assert probe.CARRY_COVER_SYNC_RECT == {"x": 0.0, "y": 0.0, "w": 96.0, "h": 4.0}
 
 
@@ -10815,7 +10845,9 @@ class TestCarryPaintWiring:
         call = calls[0]
         assert (call["element_id"], call["asset"], call["end"]) == (1, ASSET, scored["window"]["end"])
         assert (call["iou_min"], call["rect_tolerance"]) == (probe.INSTANCE_IOU_MIN, probe.RECT_TOLERANCE_PX)
-        assert (call["max_gap_frames"], call["min_fps"]) == (probe.CARRY_COVER_MAX_GAP_FRAMES, probe.CARRY_COVER_MIN_FPS)
+        assert (call["max_gap_frames"], call["min_fps"]) == (
+            probe.CARRY_COVER_MAX_GAP_FRAMES, probe.PAINT_SCORER_MIN_FPS,
+        )
         move = samples[25]
         assert call["slot_of"](samples[0]) == SRC_RECT and call["slot_of"](samples[-1]) == DST_RECT
         assert call["slot_of"](move) == move["pp"]["videos"][0]["rect"] != SRC_RECT
@@ -12681,17 +12713,20 @@ def test_gl_interval_exempts_only_the_hidden_move_rows() -> None:
     )["verdict"] is False
 
 
-def test_gl_outer_settled_cadence_is_report_only_when_every_browser_frame_is_read(
+def test_gl_outer_settled_cadence_is_not_a_paint_verdict_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rows = [{"t": float(t), "ts": float(t), "seq": i} for i, t in enumerate((0, 100, 200, 300), start=1)]
     unreadable: list[dict[str, Any]] = []
 
     def slow_settled(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        cadence_gates = kwargs["min_fps"] == probe.CARRY_COVER_MIN_FPS
+        reasons = ["coverage: cadence 100.0 ms is slower than 20 fps"] if cadence_gates else []
+        status = "inconclusive" if cadence_gates or unreadable else "ok"
         return {
-            "status": "inconclusive", "verdict": None,
-            "reasons": ["coverage: cadence 100.0 ms is slower than 20 fps"],
-            "coverage": {"ok": False, "reasons": ["cadence"], "seqGaps": 0},
+            "status": status, "verdict": True if status == "ok" else None,
+            "reasons": reasons,
+            "coverage": {"ok": not cadence_gates, "reasons": ["cadence"] if cadence_gates else [], "seqGaps": 0},
             "frames": 2, "unobserved": [], "unreadable": list(unreadable), "unpaintedFrames": 0,
             "partialFrames": 0, "doubleFrames": 0, "substituteFrames": 0,
         }
@@ -12706,7 +12741,7 @@ def test_gl_outer_settled_cadence_is_report_only_when_every_browser_frame_is_rea
         transition_scene=7, rect_tolerance=2.0, wrap_times=(), carry_window_data=carry,
     )
     assert scored["verdict"] is True
-    assert all(row["settledCadenceReportOnly"] for row in scored["segments"])
+    assert all(row["reasons"] == [] and "settledCadenceReportOnly" not in row for row in scored["segments"])
     unreadable.append({"seq": 2})
     scored = probe.carry_paint_outside_gl(
         rows, 1, ASSET, {"start": 0.0, "end": 300.0}, 8, SRC_RECT, DST_RECT,
@@ -13292,3 +13327,455 @@ def test_feed_control_cli_registers_both_tampers_and_kill_switch() -> None:
     assert all(probe.feed_fixture_required(args) for args in (after, no_linger, killed, variant, moved))
     with pytest.raises(SystemExit):
         probe.parse_args(["--feed-tamper", "no-linger", "--feed-variant", "from-only"])
+
+
+def test_probe_only_calibration_red_selects_fs_instrument_variant(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = probe.parse_args(["--instrument-variant", "calibration-red"])
+    assert args.instrument_variant == "calibration-red"
+    facts = {"verdicts": [{
+        "id": "carry", "underArtwork": True, "feed": {"draw": 1}, "srcObjectId": "src",
+        "dstObjectId": "dst", "atScene": 2,
+    }]}
+    monkeypatch.setattr(probe, "INSTRUMENT_VARIANT", "calibration-red")
+    (source,) = probe.feed_instrument_pre_navigation_scripts(facts)
+    assert "instrumentVariant:'calibration-red'" in source
+    assert "--instrument-variant" not in (REPO / "scripts" / "run_gates.sh").read_text()
+
+
+@pytest.mark.parametrize(("kind", "feed", "expected"), [
+    ("capture-arm", False, (True, True, False)),
+    ("pass-g", True, (True, True, True)),
+    ("paint-control", False, (True, True, False)),
+    ("carry-cover", True, (True, False, True)),
+    ("visible", True, (False, False, True)),
+])
+def test_instrument_applicability_comes_only_from_capture_configuration(
+    kind: str, feed: bool, expected: tuple[bool, bool, bool],
+) -> None:
+    facts = {"verdicts": [{"id": "carry", "underArtwork": True, "feed": {}}]} if feed else {"verdicts": []}
+    rows = probe.instrument_applicability(kind, facts)
+    assert (rows["sampler.tick"], rows["paint.prePaint"], rows["feed.rvfc"]) == expected
+    assert rows["feed.rvfc"] == rows["feed.raf"] == rows["feed.draw"]
+    assert rows["frame.total"] is True
+
+
+def test_gl_intervals_are_never_empty_for_replay_or_unreadable_feed() -> None:
+    feed = {"id": "carry", "underArtwork": True, "feed": {"draw": 1}}
+    assert probe.gl_intervals_for({"glReplay": {"requested": "auto"}}, {"verdicts": []}) is None
+    assert probe.gl_intervals_for({"continuity": {"glReplay": {"mode": "injected"}}}, {"verdicts": []}) is None
+    assert probe.gl_intervals_for({}, {"verdicts": []}) == []
+    assert probe.gl_intervals_for({"carry": {"underArtwork": {"interval": None}}}, {"verdicts": [feed]}) is None
+    assert probe.gl_intervals_for({
+        "carry": {"underArtwork": {"interval": {"start": 10, "end": 20}}},
+    }, {"verdicts": [feed]}) == [{"start": 10.0, "end": 20.0}]
+    assert probe.gl_intervals_for({
+        "glReplay": {"requested": "auto"},
+        "carry": {"underArtwork": {"interval": {"start": 10, "end": 20}}},
+    }, {"verdicts": [feed]}) is None
+
+
+def test_pass_g_sampler_is_installed_already_stopped_without_an_unheld_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    class Transport:
+        def __init__(self) -> None:
+            self.evaluations: list[str] = []
+            self.unheld_callbacks = 0
+
+        def evaluate(self, source: str) -> Any:
+            self.evaluations.append(source)
+            if source == probe.SAMPLER_JS:
+                self.unheld_callbacks += 1
+            return True
+
+    transport = Transport()
+
+    class Player:
+        output = {"continuity": {"mode": "qualified"}}
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def _require_transport(self) -> Transport:
+            return transport
+
+    monkeypatch.setattr(probe, "LiveOutputHost", Player)
+    monkeypatch.setattr(probe, "warm_up_for_screenshots", lambda player: argparse.Namespace(output_visible=True))
+    monkeypatch.setattr(probe, "finalize_instrument_cost", lambda *args, **kwargs: {})
+    monkeypatch.setattr(probe, "reconcile_instrument_accounting", lambda *args, **kwargs: None)
+    probe._run_goto_arm(
+        Path("export"), [], env={}, tag="G", armed=True, instances={}, expectations={}, viewport=(64, 32),
+        evidence_dir=tmp_path, character_rect=None, onset_scene_id="2", matrix=(),
+        pre_navigation_scripts=(), host_kind=probe.HOST_HEADLESS_CHROME, continuous_expected=True,
+        facts={"verdicts": []},
+    )
+    assert transport.evaluations == [probe.SAMPLER_JS + "\n;" + probe.SAMPLER_STOP_JS]
+    assert transport.unheld_callbacks == 0
+
+
+def test_score_arm_discards_stale_validity_even_on_malformed_samples(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def validity(capture: Any, row: Any, *, gl_intervals: Any) -> dict[str, Any]:
+        seen.update(capture=copy.deepcopy(capture), row=copy.deepcopy(row), gl=copy.deepcopy(gl_intervals))
+        return {"ok": False, "reasons": ["fresh"], "measured": {}, "policy": {}}
+
+    monkeypatch.setattr(probe, "run_validity", validity)
+    capture = {
+        "samples": "malformed", "hostKind": probe.HOST_HEADLESS_CHROME,
+        "runValidity": {"ok": True, "reasons": ["stale"]},
+    }
+    result = probe.score_arm(capture, {"verdicts": []}, {})
+    assert result["runValidity"] == {"ok": False, "reasons": ["fresh"], "measured": {}, "policy": {}}
+    assert "runValidity" not in seen["capture"]
+    assert seen["row"]["hostKind"] == probe.HOST_HEADLESS_CHROME and seen["gl"] == []
+
+
+def test_artifact_validity_failure_precedes_unknown_and_requires_every_holder() -> None:
+    holders = {
+        "green": {"hostKind": probe.HOST_HEADLESS_CHROME, "runValidity": {"ok": True, "reasons": []}},
+        "unknown": {"hostKind": probe.HOST_HEADLESS_CHROME},
+    }
+    assert probe.artifact_run_validity(holders)["ok"] is None
+    holders["red"] = {
+        "hostKind": probe.HOST_HEADLESS_CHROME,
+        "runValidity": {"ok": False, "reasons": ["cost"]},
+    }
+    aggregate = probe.artifact_run_validity(holders)
+    assert aggregate["ok"] is False and "red: cost" in aggregate["reasons"]
+    result = {"runValidity": {"ok": True}}
+    probe.publish_artifact_run_validity(result, holders)
+    assert result["runValidity"]["ok"] is False
+    holders["red"]["hostKind"] = probe.HOST_QUALIFIED_CHROME_ATTACH
+    probe.publish_artifact_run_validity(result, holders)
+    assert "runValidity" not in result
+
+
+def test_artifact_validity_has_the_exact_frozen_shape_and_shared_build() -> None:
+    validities = {
+        name: {
+            "ok": True, "reasons": [],
+            "policy": {"hostKind": probe.HOST_HEADLESS_CHROME, "holder": name},
+            "measured": {
+                "environment": {"chromeBuild": "155.0.8059.79", "holder": name},
+                "cost": {"holder": name},
+            },
+        }
+        for name in ("arms.A", "visible.V")
+    }
+    holders = {
+        name: {"hostKind": probe.HOST_HEADLESS_CHROME, "runValidity": copy.deepcopy(validity)}
+        for name, validity in validities.items()
+    }
+    assert probe.artifact_run_validity(holders) == {
+        "ok": True,
+        "reasons": [],
+        "policy": {"hostKind": probe.HOST_HEADLESS_CHROME},
+        "measured": {"environment": {"chromeBuild": "155.0.8059.79"}},
+        "holders": validities,
+    }
+
+
+def test_artifact_validity_mixed_builds_never_publish_a_build() -> None:
+    holders = {
+        name: {
+            "hostKind": probe.HOST_HEADLESS_CHROME,
+            "runValidity": {
+                "ok": True, "reasons": [], "policy": {"hostKind": probe.HOST_HEADLESS_CHROME},
+                "measured": {"environment": {"chromeBuild": build}},
+            },
+        }
+        for name, build in (("arms.A", "155.0.8059.79"), ("visible.V", "155.0.8059.80"))
+    }
+    aggregate = probe.artifact_run_validity(holders)
+    assert aggregate["measured"] == {"environment": {"chromeBuild": None}}
+    assert aggregate["policy"] == {"hostKind": probe.HOST_HEADLESS_CHROME}
+
+
+def test_publish_validates_every_holder_and_invalidates_a_contract_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, bool | None]] = []
+
+    def holder_contract(holder: Any, path: str, *, attach: bool = False) -> Iterator[str]:
+        calls.append(("holder", path, attach))
+        if path == "attach":
+            yield "validityHolder.environment at attach"
+
+    def aggregate_contract(value: Any, path: str) -> Iterator[str]:
+        calls.append(("aggregate", path, None))
+        return
+        yield
+
+    monkeypatch.setattr(probe.contract, "validity_holder", holder_contract, raising=False)
+    monkeypatch.setattr(probe.contract, "artifact_run_validity", aggregate_contract, raising=False)
+    holders = {
+        name: {
+            "hostKind": probe.HOST_HEADLESS_CHROME,
+            "runValidity": {"ok": True, "reasons": [], "policy": {}, "measured": {}},
+        }
+        for name in ("arms.A", "attach")
+    }
+    result: dict[str, Any] = {}
+    probe.publish_artifact_run_validity(result, holders)
+    assert calls == [
+        ("holder", "arms.A", False), ("holder", "attach", True), ("aggregate", "runValidity", None),
+    ]
+    assert holders["attach"]["contractErrors"] == ["validityHolder.environment at attach"]
+    assert holders["attach"]["runValidity"]["ok"] is None
+    assert result["runValidity"]["holders"]["attach"]["ok"] is None
+
+
+def test_contract_error_preserves_a_measured_holder_and_aggregate_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def holder_contract(holder: Any, path: str, *, attach: bool = False) -> Iterator[str]:
+        yield "validityHolder.instrumentCost at arms.A.instrumentCost"
+
+    monkeypatch.setattr(probe.contract, "validity_holder", holder_contract, raising=False)
+    monkeypatch.setattr(
+        probe.contract, "artifact_run_validity", lambda *args, **kwargs: iter(()), raising=False,
+    )
+    holder = {
+        "hostKind": probe.HOST_HEADLESS_CHROME,
+        "runValidity": {
+            "ok": False,
+            "reasons": ["instrument cost failed"],
+            "policy": {"hostKind": probe.HOST_HEADLESS_CHROME},
+            "measured": {"environment": {"chromeBuild": "155.0.8059.79"}},
+        },
+    }
+    result: dict[str, Any] = {}
+    probe.publish_artifact_run_validity(result, {"arms.A": holder})
+    assert holder["runValidity"]["ok"] is False
+    assert holder["contractErrors"] == ["validityHolder.instrumentCost at arms.A.instrumentCost"]
+    assert result["runValidity"]["ok"] is False
+    assert result["runValidity"]["holders"]["arms.A"]["ok"] is False
+
+
+def test_publish_rejects_an_invalid_aggregate_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(probe.contract, "validity_holder", lambda *args, **kwargs: iter(()), raising=False)
+    monkeypatch.setattr(
+        probe.contract, "artifact_run_validity",
+        lambda *args, **kwargs: iter(("artifactRunValidity.policy at runValidity.policy",)), raising=False,
+    )
+    holder = {
+        "hostKind": probe.HOST_HEADLESS_CHROME,
+        "runValidity": {"ok": True, "reasons": [], "policy": {}, "measured": {}},
+    }
+    result = {"runValidity": {"ok": True}}
+    probe.publish_artifact_run_validity(result, {"arms.A": holder})
+    assert "runValidity" not in result
+    assert result["contractErrors"] == ["artifactRunValidity.policy at runValidity.policy"]
+
+
+def test_every_artifact_family_enumerates_all_required_validity_holders() -> None:
+    holder = {"hostKind": probe.HOST_HEADLESS_CHROME, "runValidity": {"ok": True, "reasons": []}}
+    leg = copy.deepcopy(holder)
+    destination = {**copy.deepcopy(holder), "advanceCarry": leg}
+    families = {
+        "full": ({
+            "arms": {"A": copy.deepcopy(holder)}, "attach": copy.deepcopy(holder),
+            "visible": {name: copy.deepcopy(holder) for name in ("V", "Voff", "Vgl")},
+            "skippedArms": ["B", "C"], "glReplay": {"requested": "auto"},
+        }, {"arms.A", "attach", "visible.V", "visible.Voff", "visible.Vgl"}),
+        "arm": ({"arm": copy.deepcopy(holder)}, {"arm"}),
+        "pass-g": ({
+            "matrix": [[1, 2, 3], [1, 2]],
+            "armed": {"destinations": [destination, copy.deepcopy(holder)]},
+            "nullControl": {"destinations": [copy.deepcopy(holder), copy.deepcopy(holder)]},
+        }, {
+            "armed.destination.0", "armed.leg.0", "armed.destination.1",
+            "nullControl.destination.0", "nullControl.destination.1",
+        }),
+        "carry-cover": ({
+            "bridges": [{"boundary": "b1to2", "capture": copy.deepcopy(holder)}],
+        }, {"bridge.b1to2"}),
+    }
+    for kind, (artifact, expected) in families.items():
+        holders = probe.artifact_validity_holders(kind, artifact)
+        assert set(holders) == expected
+        result: dict[str, Any] = {}
+        probe.publish_artifact_run_validity(result, holders)
+        assert result["runValidity"]["ok"] is True
+        assert set(result["runValidity"]) == {"ok", "reasons", "policy", "measured", "holders"}
+        assert result["runValidity"]["policy"] == {"hostKind": probe.HOST_HEADLESS_CHROME}
+
+    incomplete = {"arms": {"A": copy.deepcopy(holder)}, "skippedArms": ["C", "V", "Voff", "attach"]}
+    holders = probe.artifact_validity_holders("full", incomplete)
+    assert holders["arms.B"] is None
+    result = {"runValidity": {"ok": True}}
+    probe.publish_artifact_run_validity(result, holders)
+    assert "runValidity" not in result
+
+
+def test_sampler_and_carry_cover_cost_lifecycles_are_balanced_and_stopped() -> None:
+    sampler = probe.SAMPLER_JS
+    assert "recorder.enter('sampler.tick') === true" in sampler
+    assert "recorder.leave('sampler.tick') === true" in sampler
+    frame = sampler[sampler.index("function frame(ts){"):sampler.index("function resetMeta(){")]
+    assert frame.index("recorder.enter('sampler.tick')") < frame.index("probe.raf = requestAnimationFrame(frame);")
+    assert frame.index("prepaint.toggle(frameSeq, frameTs);") < frame.index("recorder.leave('sampler.tick')")
+    assert sampler.index("resetMeta();") < sampler.index("prepaint.start();") < sampler.index("meta.running = true;")
+    assert "j !== 'installAttempts'" in sampler
+    stop = sampler[sampler.index("probe.stop = function(){"):]
+    assert stop.index("cancelAnimationFrame") < stop.index("prepaint.stop();") < stop.index("meta.stoppedAt")
+    carry = probe.CARRY_COVER_SAMPLER_JS
+    assert "install('sampler.tick') === true" in carry
+    assert "enter('sampler.tick') === true" in carry and "leave('sampler.tick') === true" in carry
+    delayed = carry[carry.index("setTimeout(function(){"):carry.index("}, 0);")]
+    assert delayed.index("if (!window.__obedCarryCover__.on)") < delayed.index("var delayedCost = enterCost();")
+    assert "row.vids = read();" in delayed
+    assert "var delayedCost = enterCost();" in delayed and "leaveCost(delayedCost);" in delayed
+    assert "cancelAnimationFrame(cc.raf)" in probe.CARRY_COVER_STOP_JS
+
+
+def test_carry_cover_read_deferred_past_recorder_stop_does_not_unbalance_accounting() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available")
+    script = """
+    global.window = global;
+    var now = 0, rafCallback = null, rafId = 0, timers = [];
+    Object.defineProperty(global, 'performance', {value: {
+      timeOrigin: 1000,
+      now: function(){ now += 0.25; return now; }
+    }});
+    global.requestAnimationFrame = function(callback){ rafCallback = callback; rafId++; return rafId; };
+    global.cancelAnimationFrame = function(){};
+    global.setTimeout = function(callback){ timers.push(callback); return timers.length; };
+    global.getComputedStyle = function(){ return {opacity: '1', visibility: 'visible', display: 'block'}; };
+    global.document = {
+      timeline: {currentTime: 0},
+      documentElement: {appendChild: function(){}},
+      createElement: function(){ return {style: {}, appendChild: function(){}}; },
+      querySelectorAll: function(){ return []; },
+      contains: function(){ return true; }
+    };
+    """ + paint_instrument.COST_RECORDER_JS + "\n" + probe.CARRY_COVER_SAMPLER_JS + """
+    rafCallback(16);
+    """ + probe.CARRY_COVER_STOP_JS + """
+    window.__obedCost.stop();
+    timers.shift()();
+    console.log(JSON.stringify({
+      health: window.__obedCarryCover__.health,
+      rows: window.__obedCarryCover__.rows,
+      recording: window.__obedCost.read()
+    }));
+    """
+    completed = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    outcome = json.loads(completed.stdout.strip())
+    assert outcome["health"] == {
+        "installed": True,
+        "callbacks": 1,
+        "enterCount": 1,
+        "leaveCount": 1,
+        "active": 0,
+        "accountingComplete": True,
+    }
+    assert outcome["rows"][0]["vids"] == []
+    assert outcome["recording"]["stopped"] is True
+    assert outcome["recording"]["errors"] == []
+    assert outcome["recording"]["hooks"]["sampler.tick"]["count"] == 1
+
+
+def test_incomplete_callback_accounting_cannot_remain_installed() -> None:
+    cost = {
+        hook: {
+            "applicable": hook in {"sampler.tick", "paint.prePaint", "frame.total"},
+            "installed": hook in {"sampler.tick", "paint.prePaint", "frame.total"},
+            "count": 1 if hook in {"sampler.tick", "paint.prePaint"} else 0,
+            "p95": 1.0 if hook in {"sampler.tick", "paint.prePaint"} else None,
+            "max": 1.0 if hook in {"sampler.tick", "paint.prePaint"} else None,
+            "overBudget": 0,
+        }
+        for hook in probe.REQUIRED_HOOKS
+    }
+    capture = {
+        "instrumentCost": cost,
+        "sampler": {"meta": {
+            "samplerCost": {"accountingComplete": False, "callbacks": 1},
+            "prepaintObserver": {"active": True, "disconnected": False, "callbacks": 1},
+        }},
+    }
+    probe.reconcile_instrument_accounting(capture, "capture-arm", {"verdicts": []})
+    assert capture["instrumentAccounting"]["complete"] is False
+    assert capture["instrumentCost"]["sampler.tick"]["installed"] is False
+    assert capture["instrumentCost"]["paint.prePaint"]["installed"] is False
+
+
+def test_feed_report_precedes_cost_stop_and_chunk_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    facts = {"verdicts": [{
+        "id": "carry", "underArtwork": True, "feed": {"draw": 1}, "srcObjectId": "src",
+        "dstObjectId": "dst", "atScene": 2,
+    }]}
+
+    class Transport:
+        def evaluate(self, source: str) -> Any:
+            if source == probe.SAMPLER_DRAIN_JS:
+                return []
+            if source == probe.SAMPLER_STOP_JS:
+                events.append("sampler-stop")
+                return True
+            if source == "window.__obedMmFeedProbe.report()":
+                events.append("feed-report")
+                return {"kind": "mm-feed"}
+            if "c.stop()===true" in source:
+                events.append("cost-stop")
+                return True
+            if "c.read('__meta__'" in source:
+                events.append("cost-read")
+                return {
+                    "version": 1, "stopped": True, "errors": [],
+                    "hooks": {hook: {"installed": True, "count": 0, "chunks": []} for hook in probe.REQUIRED_HOOKS[:-1]},
+                    "frames": {"count": 0, "chunks": []},
+                }
+            return True
+
+    class Player:
+        slides = [{"originalOrdinal": 1, "playerIndex": 0}]
+
+        def _require_transport(self) -> Any:
+            return Transport()
+
+    monkeypatch.setattr(probe, "wait_for_decode", lambda player: True)
+    monkeypatch.setattr(probe.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(probe.mm_feed_instrument, "verdict_records", lambda *args, **kwargs: {})
+    sink: dict[str, Any] = {}
+    probe.drive_and_sample(Player(), feed_facts=facts, feed_sink={}, cost_sink=sink)
+    assert events == ["sampler-stop", "feed-report", "cost-stop", "cost-read"]
+    assert set(sink["instrumentCost"]) == set(probe.REQUIRED_HOOKS)
+
+
+def test_cost_recording_reads_every_duration_in_bounded_chunks() -> None:
+    calls: list[str] = []
+
+    class Transport:
+        def evaluate(self, source: str) -> Any:
+            calls.append(source)
+            if "c.read('__meta__'" in source:
+                return {
+                    "version": 1, "stopped": True, "errors": [],
+                    "hooks": {"sampler.tick": {"installed": True, "count": 3, "chunks": []}},
+                    "frames": {"count": 2, "chunks": []},
+                }
+            match = re.search(r'c\.read\("([^"]+)",(\d+),(\d+)\)', source)
+            assert match is not None
+            hook, offset, size = match.group(1), int(match.group(2)), int(match.group(3))
+            values = {"sampler.tick": [1.0, 2.0, 3.0], "frame.total": [4.0, 5.0]}[hook][offset:offset + size]
+            if hook == "frame.total":
+                return {"hooks": {}, "frames": {"count": 2, "chunks": [values]}}
+            return {"hooks": {hook: {"installed": True, "count": 3, "chunks": [values]}}, "frames": {}}
+
+    recording = probe.read_instrument_cost_recording(Transport(), page_size=2)
+    assert recording["hooks"]["sampler.tick"]["chunks"] == [[1.0, 2.0], [3.0]]
+    assert recording["frames"]["chunks"] == [[4.0, 5.0]]
+    assert len(calls) == 4
