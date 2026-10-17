@@ -110,7 +110,7 @@ the external monitor (only Route C would). Times are rough; total ≈ 2½ h plus
       output**: press it → **Output engine · Released**. Then quit the dashboard and the owner's OBS.
       2026-10-17: PASS as written (OBS exits ≈ 2 s after Release, clean log); the owner's OBS was closed, so "untouched
       alongside" was not exercised.
-- [ ] **5 · [OBS] · ≈ 45 min + the soak.** Qualification harness from `$W` (a fresh `--out DIR` per run, always
+- [x] **5 · [OBS] · ≈ 45 min + the soak.** Qualification harness from `$W` (a fresh `--out DIR` per run, always
       required; it refuses while any OBS runs or `OBED_LIVE_GL_REPLAY` / `OBED_LIVE_MM_OPACITY` is set; it never drives
       the DeckLink): `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
       → `SUMMARY PASS` (also `--rate 30`; on this default grey P2 fixture cadence is report-only at 30, with `--fixture $F`
@@ -123,6 +123,20 @@ the external monitor (only Route C would). Times are rough; total ≈ 2½ h plus
       default, no `--rate`; ≈ 20 min) → qualified.
       Order: `both` → `g2` → `failsafe` → `placement` → `soak --precheck` → `soak --soak-minutes 20`.
       Only if time allows: `--rate 30`, and `--arm mmo` (25 + 30; Magic Move opacity + hand-back geometry, PASS 2026-09-25).
+      2026-10-17 on `76452a91` (Desktop Video 16.4 installed, no device; run order `both` → `g2` → `failsafe` →
+      `soak --precheck` → `placement` → soak; no retries). Evidence (results only): main checkout
+      `output/evidence/decklink-step5-2026-10-17/<n-arm>/` (console log + run/summary JSON per arm).
+      - `both --rate 25 --takes 2`: `SUMMARY PASS` (13:16–13:19).
+      - `g2 --rate 25 --takes 2 --fixture $F`: `SUMMARY PASS` (13:19–13:27).
+      - `failsafe --fixture $F`: `SUMMARY PASS` (13:27–13:28).
+      - `soak --precheck`: `SUMMARY PASS` (13:28–13:31).
+      - `placement`: **`SUMMARY FAIL`** (13:31–13:50): both launches (25, 30) INVALID, placement INCONCLUSIVE. This is
+        D2, not a new defect: the first session `startup-preview-on` got `persistence-failed`, so the isolation control
+        `startup` FAILs, which makes `iso-obs-offcanvas` INCONCLUSIVE in every later session. Every other gate in those
+        records passed. OBS's saved collections carry `modules.decklink_captions = {"source": ""}` (`4-placement/d2/`).
+        Fix: `claude/placement-decklink-captions-allowlist` (not in this build); rerun `--arm placement` once it lands.
+      - `soak --soak-minutes 20`: `SUMMARY PASS` (13:51–14:11): LIVE at ≈ 30 uploads/s for minutes 1–11, clean wrap
+        windows at minutes 1 and 10, then the gated `loseContext` → `contextLost` stand-down and zone retired.
 - [x] **6 · [OBS] [9222] · ≈ 25 min.** Manual-OBS dry run §0b → §1 → §2 → §3 at **25 fps** (no DeckLink needed): record the
       card's Chromium version and that main behaves as §3 says (1→2 refused, square translucent, no build-1 snap; 3→4 carried).
       2026-10-17: done except the continuity-off comparison — results and finding D1 in "Home dry run — 2026-10-17".
@@ -322,7 +336,8 @@ Evidence (results only): main checkout `output/evidence/decklink-dryrun-2026-10-
   path; open.
 - **D2 — first Keyer calibration fails.** Right after Start output session: `placementProbeRejected` `persistence-failed`
   ("persistence: scene collection differs after cleanup"); one **Recalibrate output** → `valid` / `frac`. Operator step
-  added to §4; cause open.
+  added to §4. Cause: OBS's first save adds `/modules/decklink_captions` once Desktop Video is installed, and the
+  persistence allowlist predates it (step 5 `placement` FAIL confirms it; fix on `claude/placement-decklink-captions-allowlist`).
 - **D3 — F2.key prepare stopped: not a defect.** The owner cancelled it to switch decks; the Keynote -1728 "Can’t get
   document id" error is what that cancel looks like mid-export.
 - The owner's external monitor (XG27UCDMG, 4K60) blanked during one 3→4 replay; macOS logged no display event and the
