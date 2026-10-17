@@ -55,6 +55,10 @@ distances, the diagnosis side-finding) → C5 → C10 audit → **gate 5a (owner
 list and decisions)** → 6a full suites → gates 7–15 → Q7 attempt 4 (the owner's live check).
 
 **Open items carried**
+- **Player follow-up (owner 2026-10-17, not urgent): one-source-frame skip at resume after a feed-off hold.** C4-F
+  diagnosis on round `adfeb552` (Alpha b5to6, feed-off-2s and after-feed): the first callback after resume advances source
+  time two frames while `presentedFrames` advances one; upload and media time agree, so it is the player, not the
+  instrument. Scored as the owner-approved one-frame REPORT meanwhile; ≥2 still fails. Fix in the player later.
 - F4 (3): the Alpha b5to6 / b7to8:wa0121 flips. Re-check on the merged tree.
 - `PRE_DRAW_GRACE_MS` = 320 ms: thin margin (D7 controls 306.5 ms); widening it is the owner's call.
 - C2 integration items (`c2-offline-gate-record.md` §Open).
@@ -83,6 +87,15 @@ trashing any): `stage-b-coord` (merges), `funny-pasteur-751a72` (coordinator, `c
   - Saves about 35 s of wall time per round.
 
 ## Owner decisions (2026-10-15/16/17)
+- 2026-10-17: the gate's attach-once arm (`--headless=new`, forced 1920×1080) is judged as **headless Chrome** for run
+  validity; `qualified Chrome attach` stays reserved for real-display attach (Q7), settled with Q1 at gate 5a.
+- 2026-10-17: positives that hide the decoder in every pre-draw frame (10 entries: Alpha b6to7/b7to8 feed-on and feed-off-2s;
+  D7/D7s b1to2/b2to3; 15–32 ms before the first GL draw; C4-F r1 report) — **measure pixels first**: no `departureExposure`
+  registration for them until a round captures what is painted across hide → first draw. Last decoder frame → True;
+  poster/background → a real 1–2 frame flash, filed as a player follow-up.
+- 2026-10-17: C5 host-feed rows: (1) feed-on `holdFrame` must be an explicit present verdict record of `None` — a missing
+  field is MISMATCH (P emits it at C4 integration); (2) REPORT-only observations (`entryColdStart`, the one-frame resume skip)
+  never change an arm's class: the arm stays MATCH and the observations print as `REPORT:` lines.
 - 2026-10-17: gate 4 decisions 2–4 (`gate4-historical-impact.md` §Decided): inventory accepted after the re-count under the
   155.x rule (1,075 / 299 / 0); cost gate `> 8`; wrf rule narrowed as applied. Decision 5 (Q2) waits for gate 3 data; lean
   per-visit median > 2P, p95/max report-only.
