@@ -126,7 +126,7 @@ import gate_checks  # noqa: E402
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
 import mm_feed_variants  # noqa: E402
 import paint_instrument  # noqa: E402
-from paint_instrument import COST_RECORDER_JS  # noqa: E402
+from paint_instrument import COST_RECORDER_JS, score_departure_pixels  # noqa: E402
 import binary_counter_movie  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
@@ -234,6 +234,7 @@ MM_FEED_REQUEST = "auto"
 MM_OPACITY_REQUEST = "auto"
 FEED_DWELL_S: float | None = None
 INSTRUMENT_VARIANT: str | None = None
+DEPARTURE_PIXEL_TAMPER: str | None = None
 PAINT_SCORER_MIN_FPS = sys.float_info.min
 
 # Pass G (goTo autoplay repair): (fromOriginalOrdinal, toOriginalOrdinal) pairs.
@@ -892,6 +893,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--hold-upload-kill-switch", action="store_true",
         help="Probe control: suppress the departure one-shot upload so holdFrame must show the baked poster",
     )
+    parser.add_argument(
+        "--departure-pixels", action="store_true", default=False,
+        help="Probe-only discovery: capture departure pixels in a separate non-judged artifact",
+    )
+    parser.add_argument(
+        "--departure-pixel-one-frame-poster", action="store_true", default=False,
+        help="Departure-pixel discovery only: select the one-rAF pre-draw decoder-hide red control",
+    )
+    parser.add_argument(
+        "--departure-pixel-persistent-null", action="store_true", default=False,
+        help="Departure-pixel discovery only: keep the attributed decoder painted as the coverage/null control",
+    )
+    parser.add_argument(
+        "--departure-pixel-thresholds", type=Path, default=None, metavar="JSON",
+        help="Departure-pixel discovery only: explicit scorer thresholds with measured provenance",
+    )
     args = parser.parse_args(argv)
     if args.feed_tamper_scene is not None and args.feed_tamper is None:
         parser.error("--feed-tamper-scene requires --feed-tamper")
@@ -899,6 +916,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--feed-variant, --feed-tamper and --hold-upload-kill-switch run as separate controls")
     if args.hold_upload_kill_switch and args.mm_feed != "off":
         parser.error("--hold-upload-kill-switch requires --mm-feed off")
+    pixel_controls = int(args.departure_pixel_one_frame_poster) + int(args.departure_pixel_persistent_null)
+    if pixel_controls > 1:
+        parser.error("departure-pixel controls run separately")
+    if not args.departure_pixels and (pixel_controls or args.departure_pixel_thresholds is not None):
+        parser.error("departure-pixel controls require --departure-pixels")
+    if args.departure_pixels:
+        if (
+            args.only_pass is not None or args.gl_replay != "off" or args.gl_force_fail is not None
+            or args.force_wrap is not None or args.rescore is not None or args.skip_arms or args.carry_cover
+            or args.carry_cover_null or args.paint_control is not None or args.strip is not None
+            or args.burst_poke or args.instrument_variant is not None
+        ):
+            parser.error("--departure-pixels is a separate discovery invocation; judged gate modes are refused")
+        if args.core_variant not in (None, "departure-early-hide"):
+            parser.error("--departure-pixels accepts only the departure-early-hide core control")
+        if args.attach and args.viewport != (VIEWPORT_WIDTH, VIEWPORT_HEIGHT):
+            parser.error("departure-pixel attach is fixed at 1920x1080")
+        return args
     if args.paint_control is not None and (
         args.strip is not None or args.core_variant is not None or args.only_pass is not None or args.attach
         or args.gl_replay != "off" or args.gl_force_fail is not None or args.force_wrap is not None
@@ -1810,7 +1845,9 @@ def counter_layout_for(facts: dict[str, Any] | None) -> dict[str, Any]:
     return binary_counter_movie.layout(offset)
 
 
-def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tuple[str, ...]:
+def feed_instrument_pre_navigation_scripts(
+    facts: dict[str, Any] | None, *, one_frame_poster_entry_id: Any = None,
+) -> tuple[str, ...]:
     entries = feed_specs_for(facts)
     if not entries:
         return ()
@@ -1819,15 +1856,25 @@ def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tupl
         "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
         "counterLayout": counter_layout_for(facts),
     }
+    if one_frame_poster_entry_id is not None:
+        config["oneFramePosterEntryId"] = one_frame_poster_entry_id
     source = mm_feed_instrument.INSTRUMENT_JS
-    if INSTRUMENT_VARIANT is not None:
-        source = mm_feed_instrument.instrument_variant(INSTRUMENT_VARIANT, source)
+    variant = DEPARTURE_PIXEL_TAMPER or INSTRUMENT_VARIANT
+    if variant is not None:
+        source = mm_feed_instrument.instrument_variant(variant, source)
     source += "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
     return (source,)
 
 
-def instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tuple[str, ...]:
-    return (COST_RECORDER_JS, *feed_instrument_pre_navigation_scripts(facts))
+def instrument_pre_navigation_scripts(
+    facts: dict[str, Any] | None, *, one_frame_poster_entry_id: Any = None,
+) -> tuple[str, ...]:
+    return (
+        COST_RECORDER_JS,
+        *feed_instrument_pre_navigation_scripts(
+            facts, one_frame_poster_entry_id=one_frame_poster_entry_id,
+        ),
+    )
 
 
 def instrument_applicability(kind: str, facts: Mapping[str, Any] | None = None) -> dict[str, bool]:
@@ -2063,6 +2110,9 @@ def _artifact_validity_contract_errors(value: Any) -> list[str]:
 
 
 def publish_artifact_run_validity(result: dict[str, Any], holders: Mapping[str, Any]) -> None:
+    judged_errors = contract.first_errors(contract.judged_mm_feed_artifact(result), limit=20)
+    if judged_errors:
+        _merge_contract_errors(result, judged_errors)
     report_errors: list[str] = []
     for name, holder in holders.items():
         errors = _validity_holder_contract_errors(holder, str(name), attach=name == "attach")
@@ -9216,6 +9266,10 @@ CARRY_COVER_SLOT_MATCH_PX = 6.0
 CARRY_COVER_NOTE_MATCH_PX = 0.5
 CARRY_COVER_PREROLL_S = 0.6
 CARRY_COVER_TAIL_S = 1.0
+DEPARTURE_PIXEL_ARTIFACT_KIND = "live-continuity-departure-pixel-discovery"
+DEPARTURE_PIXEL_PREROLL_S = CARRY_COVER_PREROLL_S
+DEPARTURE_PIXEL_TAIL_S = 0.25
+DEPARTURE_PIXEL_MIN_ROI_SIDE = 96
 CARRY_COVER_HIDE_OVERLAY_JS = (
     "(function(){var s=document.createElement('style');s.id='__obedCarryCoverNull';"
     "s.textContent='video{opacity:0 !important}';document.head.appendChild(s);return 1;})()"
@@ -9328,6 +9382,405 @@ CARRY_COVER_READ_JS = r"""
   return {rows: cc ? cc.rows : null, notes: notes, health: cc ? cc.health : null};
 })()
 """
+
+DEPARTURE_PIXEL_SAMPLER_JS = r"""
+(function(){
+  if (window.__obedDeparturePixels__) return performance.timeOrigin;
+  var BITS = __BITS__, CELL = __CELL__, rows = [], cells = [], count = 0;
+  var state = {rows: rows, on: true, raf: null};
+  window.__obedDeparturePixels__ = state;
+  var bar = document.createElement('div');
+  bar.id = '__obedDeparturePixelSync';
+  bar.style.cssText = 'position:fixed;left:0;top:0;margin:0;padding:0;border:0;display:flex;pointer-events:none;'
+    + 'z-index:2147483647;width:' + (2 * BITS * CELL) + 'px;height:' + CELL + 'px';
+  for (var i = 0; i < 2 * BITS; i++) {
+    var cell = document.createElement('div');
+    cell.style.cssText = 'flex:none;width:' + CELL + 'px;height:' + CELL + 'px';
+    bar.appendChild(cell); cells.push(cell);
+  }
+  document.documentElement.appendChild(bar);
+  function visible(v){
+    if (!v || !v.isConnected) return false;
+    var s = getComputedStyle(v), r = v.getBoundingClientRect(), opacity = 1;
+    for (var n = v; n && n.nodeType === 1; n = n.parentElement) opacity *= +(getComputedStyle(n).opacity || 0);
+    return s.display !== 'none' && s.visibility === 'visible' && r.width > 0 && r.height > 0 && opacity >= .99
+      && (!v.checkVisibility || v.checkVisibility({opacityProperty:true, visibilityProperty:true}));
+  }
+  function read(){
+    var out = [];
+    document.querySelectorAll('video').forEach(function(v){
+      if (v.__obedElId == null) return;
+      var r = v.getBoundingClientRect();
+      out.push({elId:v.__obedElId, instance:v.__obedInstance == null ? null : String(v.__obedInstance),
+        visible:visible(v), rect:{x:r.left,y:r.top,w:r.width,h:r.height}});
+    });
+    return out;
+  }
+  function tick(ts){
+    if (!state.on) return;
+    var n = count++ % (1 << BITS);
+    for (var b = 0; b < BITS; b++) {
+      var on = (n >> b) & 1;
+      cells[2*b].style.background = on ? '#fff' : '#000';
+      cells[2*b+1].style.background = on ? '#000' : '#fff';
+    }
+    rows.push({ts:ts,tick:n,videos:read()});
+    if (rows.length > 20000) rows.shift();
+    state.raf = requestAnimationFrame(tick);
+  }
+  state.raf = requestAnimationFrame(tick);
+  return performance.timeOrigin;
+})()
+""".replace("__BITS__", str(CARRY_COVER_SYNC_BITS)).replace("__CELL__", str(CARRY_COVER_SYNC_CELL_PX))
+DEPARTURE_PIXEL_STOP_JS = r"""
+(function(){
+  var state = window.__obedDeparturePixels__;
+  if (!state) return false;
+  state.on = false;
+  if (state.raf != null) cancelAnimationFrame(state.raf);
+  state.raf = null;
+  return true;
+})()
+"""
+DEPARTURE_PIXEL_READ_JS = (
+    "(function(){var s=window.__obedDeparturePixels__;return s?{rows:s.rows}:null})()"
+)
+DEPARTURE_PIXEL_BACKGROUND_JS = (
+    "(function(){var s=document.createElement('style');s.id='__obedDeparturePixelBackground';"
+    "s.textContent='video,canvas{visibility:hidden !important}';document.head.appendChild(s);return true})()"
+)
+
+
+def departure_pixel_entries(facts: Mapping[str, Any], plan: ContinuityPlan) -> list[dict[str, Any]]:
+    """Every feed-bound carry in the plan facts, with no fixture or verdict-id allowlist."""
+    durations = {
+        (boundary.from_player_index, boundary.to_player_index): boundary.transition_duration
+        for boundary in plan.boundaries if boundary.to_player_index is not None
+    }
+    entries = []
+    for spec in facts.get("verdicts") or []:
+        if not (
+            isinstance(spec, dict) and spec.get("kind") == "carry" and spec.get("underArtwork") is True
+            and isinstance(spec.get("feed"), dict) and _is_rect(spec.get("dstRect"))
+        ):
+            continue
+        duration = durations.get((spec.get("fromPlayer"), spec.get("toPlayer")))
+        entries.append({
+            **next(item for item in feed_specs_for(dict(facts)) if item["id"] == spec["id"]),
+            "asset": spec.get("asset"), "fromPlayer": spec.get("fromPlayer"), "toPlayer": spec.get("toPlayer"),
+            "fromOrdinal": spec.get("fromPlayer") + 1 if isinstance(spec.get("fromPlayer"), int) else None,
+            "toOrdinal": spec.get("toPlayer") + 1 if isinstance(spec.get("toPlayer"), int) else None,
+            "durationSeconds": float(duration) if _finite_number(duration) is not None else None,
+        })
+    return entries
+
+
+def departure_screencast_size(viewport: tuple[int, int], screen_roi: Mapping[str, Any]) -> tuple[int, int]:
+    shortest = min(float(screen_roi["w"]), float(screen_roi["h"]))
+    desired = min(1.0, max(0.5, DEPARTURE_PIXEL_MIN_ROI_SIDE / shortest)) if shortest > 0 else 1.0
+    scale = next(candidate for candidate in (0.5, 0.75, 1.0) if candidate >= desired)
+    return max(1, round(viewport[0] * scale)), max(1, round(viewport[1] * scale))
+
+
+def departure_sync_tick(image: np.ndarray, viewport: tuple[int, int]) -> int | None:
+    """Decode the carry-cover counter after CDP has downscaled the page."""
+    scale = image.shape[1] / viewport[0]
+    cell = max(1, round(CARRY_COVER_SYNC_CELL_PX * scale))
+    bits = CARRY_COVER_SYNC_BITS
+    if image.shape[0] < cell or image.shape[1] < 2 * bits * cell:
+        return None
+    levels = image[:cell, :2 * bits * cell].reshape(cell, 2 * bits, cell, -1).mean(axis=(0, 2, 3))
+    tick = 0
+    for bit in range(bits):
+        on, off = levels[2 * bit], levels[2 * bit + 1]
+        if on >= 192 and off <= 63:
+            tick |= 1 << bit
+        elif not (on <= 63 and off >= 192):
+            return None
+    return tick
+
+
+def _unwrap_departure_rows(rows: Any) -> list[dict[str, Any]]:
+    wrap = 1 << CARRY_COVER_SYNC_BITS
+    offset = 0
+    previous: int | None = None
+    unwrapped = []
+    for source in rows if isinstance(rows, list) else []:
+        raw = source.get("tick") if isinstance(source, dict) else None
+        if not isinstance(raw, int) or isinstance(raw, bool) or not 0 <= raw < wrap:
+            continue
+        if previous is not None and raw < previous:
+            offset += wrap
+        unwrapped.append({**source, "tick": offset + raw})
+        previous = raw
+    return unwrapped
+
+
+def _align_departure_frames(
+    rows: Sequence[dict[str, Any]], frames: Sequence[tuple[float, np.ndarray]], viewport: tuple[int, int],
+) -> list[dict[str, Any]]:
+    wrap = 1 << CARRY_COVER_SYNC_BITS
+    by_raw: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_raw.setdefault(row["tick"] % wrap, []).append(row)
+    aligned = []
+    for delivery_ms, image in frames:
+        raw_tick = departure_sync_tick(image, viewport)
+        candidates = by_raw.get(raw_tick, []) if raw_tick is not None else []
+        row = min(candidates, key=lambda item: abs(float(item["ts"]) - delivery_ms)) if candidates else None
+        nearest = min(rows, key=lambda item: abs(float(item["ts"]) - delivery_ms)) if raw_tick is None and rows else None
+        aligned.append({
+            "deliveryMs": float(delivery_ms), "image": image,
+            "tick": row["tick"] if row is not None else None,
+            "t": float((row or nearest)["ts"]) if row is not None or nearest is not None else None,
+        })
+    return aligned
+
+
+def _pixel_crop(image: np.ndarray, authored: Mapping[str, Any], stage_map: Mapping[str, Any],
+                viewport: tuple[int, int]) -> tuple[np.ndarray, dict[str, int]] | None:
+    screen = to_screen_rect(dict(authored), dict(stage_map))
+    sx, sy = image.shape[1] / viewport[0], image.shape[0] / viewport[1]
+    box = _raster_box({"x": screen["x"] * sx, "y": screen["y"] * sy,
+                       "w": screen["w"] * sx, "h": screen["h"] * sy}, image.shape[1], image.shape[0])
+    if box is None:
+        return None
+    crop = image[box[0], box[1]].copy()
+    roi = {"x": box[1].start, "y": box[0].start, "w": box[1].stop - box[1].start,
+           "h": box[0].stop - box[0].start}
+    return crop, roi
+
+
+def _screen_pixel_crop(
+    image: np.ndarray, screen: Mapping[str, Any], viewport: tuple[int, int],
+) -> tuple[np.ndarray, dict[str, int]] | None:
+    sx, sy = image.shape[1] / viewport[0], image.shape[0] / viewport[1]
+    box = _raster_box({"x": float(screen["x"]) * sx, "y": float(screen["y"]) * sy,
+                       "w": float(screen["w"]) * sx, "h": float(screen["h"]) * sy},
+                      image.shape[1], image.shape[0])
+    if box is None:
+        return None
+    return image[box[0], box[1]].copy(), {
+        "x": box[1].start, "y": box[0].start, "w": box[1].stop - box[1].start,
+        "h": box[0].stop - box[0].start,
+    }
+
+
+def _png_evidence(image: np.ndarray, path: Path) -> dict[str, Any]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok, encoded = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    if not ok:
+        raise RuntimeError(f"could not encode pixel evidence {path}")
+    data = encoded.tobytes()
+    path.write_bytes(data)
+    return {"sha256": hashlib.sha256(data).hexdigest(), "path": str(path)}
+
+
+def _pixel_distance(image: np.ndarray, reference: np.ndarray | None) -> float | None:
+    if reference is None or image.shape != reference.shape:
+        return None
+    return round(float(np.abs(image.astype(np.int16) - reference.astype(np.int16)).mean()), 6)
+
+
+def _departure_pixel_identity(value: Any) -> bool:
+    return isinstance(value, (str, int)) and not isinstance(value, bool)
+
+
+def _departure_read(rows: Sequence[dict[str, Any]], decoder_id: Any, at: float) -> dict[str, Any] | None:
+    eligible = [row for row in rows if _finite_number(row.get("ts")) is not None and row["ts"] <= at]
+    if not eligible:
+        return None
+    row = eligible[-1]
+    matches = [video for video in row.get("videos") or []
+               if isinstance(video, dict) and video.get("elId") == decoder_id]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _departure_window(rows: Sequence[dict[str, Any]], first_draw: float) -> tuple[list[dict[str, Any]], bool]:
+    ordered = [row for row in rows if _finite_number(row.get("ts")) is not None
+               and isinstance(row.get("tick"), int) and not isinstance(row.get("tick"), bool)]
+    first = next((index for index, row in enumerate(ordered) if row["ts"] >= first_draw), None)
+    complete = first is not None and first + 2 < len(ordered)
+    return (ordered[:first + 3] if complete else ordered), complete
+
+
+def build_departure_pixel_record(
+    entry: Mapping[str, Any], producer: Any, rows: Any, frames: Sequence[tuple[float, np.ndarray]],
+    stage_map: Any, viewport: tuple[int, int], evidence_dir: Path, *,
+    press_ms: float,
+    poster_reference: np.ndarray | None, poster_provenance: Mapping[str, Any],
+    background_reference: np.ndarray | None, background_provenance: Mapping[str, Any],
+    continuous_expected: bool, thresholds: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    records = mm_feed_instrument.verdict_records(producer, [dict(entry)], continuous_expected=continuous_expected)
+    normalized = records.get(entry.get("id")) if isinstance(records, dict) else None
+    departure = normalized.get("departureExposure") if isinstance(normalized, dict) else None
+    sampler_rows = _unwrap_departure_rows(rows)
+    start = ((departure or {}).get("start") or {}).get("t")
+    first_draw = ((departure or {}).get("firstDraw") or {}).get("t")
+    decoder_id = ((departure or {}).get("decoder") or {}).get("elId")
+    identities = (
+        entry.get("id"), departure.get("visit") if isinstance(departure, dict) else None,
+        departure.get("serial") if isinstance(departure, dict) else None, decoder_id, entry.get("atScene"),
+    )
+    identity_ok = (
+        isinstance(departure, dict) and departure.get("entryId") == entry.get("id")
+        and departure.get("atScene") == entry.get("atScene")
+        and all(_departure_pixel_identity(value) for value in identities)
+        and _finite_number(start) is not None and _finite_number(first_draw) is not None
+    )
+    if not identity_ok:
+        raise RuntimeError("departure pixel attribution requires matching str-or-int identity fields")
+    window_rows, tail_complete = _departure_window(sampler_rows, float(first_draw))
+    expected_window = [row["tick"] for row in window_rows]
+    expected_window_set = set(expected_window)
+    matches = _align_departure_frames(sampler_rows, frames, viewport)
+    by_tick: dict[int, list[dict[str, Any]]] = {}
+    for match in matches:
+        if match["tick"] in expected_window_set:
+            by_tick.setdefault(match["tick"], []).append(match)
+    aligned = []
+    for tick in expected_window:
+        candidates = by_tick.get(tick, [])
+        if not candidates:
+            continue
+        chosen = min(candidates, key=lambda item: abs(item["deliveryMs"] - item["t"]))
+        aligned.append((chosen["t"], chosen["image"], tick))
+    delivered_window_set = {item[2] for item in aligned}
+
+    if _finite_number(press_ms) is None:
+        raise RuntimeError("departure pixel capture requires the advance-press timestamp")
+    visible_rows = [
+        row for row in sampler_rows if row["ts"] <= first_draw
+        and (_departure_read(sampler_rows, decoder_id, row["ts"]) or {}).get("visible") is True
+    ]
+    last_visible_row = visible_rows[-1] if visible_rows else None
+    hide_row = next((
+        row for row in sampler_rows
+        if press_ms < row["ts"] <= first_draw
+        and (_departure_read(sampler_rows, decoder_id, row["ts"]) or {}).get("visible") is not True
+    ), None)
+    hide = float(hide_row["ts"]) if hide_row is not None else min(float(start), float(first_draw))
+    critical_expected = [
+        row["tick"] for row in window_rows
+        if hide is not None and hide <= row["ts"] <= first_draw
+    ]
+    critical_delivered = {tick for _t, _image, tick in aligned if tick in set(critical_expected)}
+    missing_critical = [tick for tick in critical_expected if tick not in critical_delivered]
+    bracket_ticks = (
+        (critical_expected[0] - 1, critical_expected[-1] + 1) if critical_expected else ()
+    )
+    brackets_complete = bool(bracket_ticks) and all(tick in delivered_window_set for tick in bracket_ticks)
+    ambiguous = sum(
+        1 for match in matches
+        if match["tick"] is None and hide is not None and match["t"] is not None and hide <= match["t"] <= first_draw
+    ) + sum(max(0, len(by_tick.get(tick, [])) - 1) for tick in critical_expected)
+    consecutive = 0
+    worst_missing_run = 0
+    missing_window = [tick for tick in expected_window if tick not in delivered_window_set]
+    for tick in expected_window:
+        consecutive = consecutive + 1 if tick in missing_window else 0
+        worst_missing_run = max(worst_missing_run, consecutive)
+    elapsed = window_rows[-1]["ts"] - window_rows[0]["ts"] if len(window_rows) >= 2 else 0
+    fps = 1000.0 * len(delivered_window_set) / elapsed if elapsed > 0 else 0.0
+    coverage = bool(
+        tail_complete and last_visible_row is not None and hide is not None and critical_expected
+        and not missing_critical and brackets_complete and ambiguous == 0
+        and fps >= CARRY_COVER_MIN_FPS and worst_missing_run <= CARRY_COVER_MAX_GAP_FRAMES
+    )
+    visible_frames = [item for item in aligned if item[0] <= first_draw and (
+        (_departure_read(sampler_rows, decoder_id, item[0]) or {}).get("visible") is True
+    )]
+    last_visible = visible_frames[-1] if visible_frames else None
+    last_decoder_crop = None
+    roi = None
+    last_read = _departure_read(sampler_rows, decoder_id, last_visible[0]) if last_visible is not None else None
+    if last_visible is not None and _is_rect((last_read or {}).get("rect")):
+        cropped = _screen_pixel_crop(last_visible[1], last_read["rect"], viewport)
+        if cropped is not None:
+            last_decoder_crop, roi = cropped
+    if roi is None and frames and _is_rect(entry.get("srcRect")) and isinstance(stage_map, dict):
+        cropped = _pixel_crop(frames[0][1], entry["srcRect"], stage_map, viewport)
+        if cropped is not None:
+            _, roi = cropped
+
+    def normalize_reference(image: np.ndarray | None, *, full_frame: bool = False) -> np.ndarray | None:
+        if image is None or roi is None:
+            return None
+        if full_frame:
+            return image[roi["y"]:roi["y"] + roi["h"], roi["x"]:roi["x"] + roi["w"]].copy()
+        if image.shape[:2] == (roi["h"], roi["w"]):
+            return image
+        return cv2.resize(image, (roi["w"], roi["h"]), interpolation=cv2.INTER_AREA)
+
+    if poster_reference is not None and _is_rect((last_read or {}).get("rect")):
+        poster_aspect = poster_reference.shape[1] / poster_reference.shape[0]
+        roi_aspect = float(last_read["rect"]["w"]) / float(last_read["rect"]["h"])
+        if not math.isclose(poster_aspect, roi_aspect, rel_tol=0.001, abs_tol=0.001):
+            raise RuntimeError("export poster aspect does not match the pre-draw decoder ROI")
+    poster = normalize_reference(poster_reference)
+    background = normalize_reference(background_reference, full_frame=True)
+    ref_images = {"lastDecoder": last_decoder_crop, "poster": poster, "background": background}
+    if any(image is None for image in ref_images.values()):
+        reason = "decoder was never visible; coverage incomplete" if last_visible_row is None else "reference is missing"
+        raise RuntimeError(f"departure pixel capture requires last-decoder, poster, and background references: {reason}")
+    references: dict[str, Any] = {}
+    for name, image in ref_images.items():
+        provenance = dict(
+            {"source": "last-visible-delivered-frame", "t": last_visible[0], "tick": last_visible[2]}
+            if name == "lastDecoder" and last_visible is not None else
+            poster_provenance if name == "poster" else background_provenance
+        )
+        if name == "poster" and frames:
+            provenance["scale"] = frames[0][1].shape[1] / viewport[0]
+        saved = _png_evidence(
+            image, evidence_dir / f"{str(entry['id']).replace('/', '_')}-reference-{name}.png",
+        )
+        references[name] = {
+            "sha256": saved["sha256"],
+            "provenance": {
+                **provenance, "metric": "mad",
+                "path": provenance.get("path", saved["path"]), "evidencePath": saved["path"],
+            },
+        }
+    if isinstance(references["poster"].get("provenance"), dict):
+        references["poster"]["dstRect"] = copy.deepcopy((last_read or {}).get("rect"))
+    references["pairwise"] = {
+        "lastDecoder_poster": _pixel_distance(last_decoder_crop, poster),
+        "lastDecoder_background": _pixel_distance(last_decoder_crop, background),
+        "poster_background": _pixel_distance(poster, background),
+    }
+    frame_records = []
+    exposed = 0
+    red_min = _finite_number(thresholds.get("redMin")) if isinstance(thresholds, Mapping) else None
+    for index, (t, image, tick) in enumerate(aligned):
+        if roi is None:
+            continue
+        crop = image[roi["y"]:roi["y"] + roi["h"], roi["x"]:roi["x"] + roi["w"]].copy()
+        if crop.shape[:2] != (roi["h"], roi["w"]):
+            continue
+        saved = _png_evidence(
+            crop, evidence_dir / f"{str(entry['id']).replace('/', '_')}-{index:04d}-t{tick}.png",
+        )
+        distances = {name: _pixel_distance(crop, reference) for name, reference in ref_images.items()}
+        if (
+            red_min is not None and hide is not None and hide <= t <= first_draw
+            and min(distances["poster"], distances["background"]) - distances["lastDecoder"] <= -red_min
+        ):
+            exposed += 1
+        frame_records.append({"t": float(t), "tick": tick, **saved, "distances": distances})
+    return {
+        "entryId": entry.get("id"), "visit": departure.get("visit") if isinstance(departure, dict) else None,
+        "contextSerial": departure.get("serial") if isinstance(departure, dict) else None,
+        "decoderId": decoder_id, "atScene": entry.get("atScene"),
+        "startMs": float(start) if _finite_number(start) is not None else None,
+        "hideMs": hide, "firstDrawMs": float(first_draw) if _finite_number(first_draw) is not None else None,
+        "roi": roi, "frames": frame_records, "references": references,
+        "expectedTicks": len(critical_expected), "deliveredTicks": len(critical_delivered),
+        "missingTicks": missing_critical,
+        "ambiguousFrames": ambiguous, "exposedFrames": exposed,
+        "_coverageComplete": coverage,
+    }
 
 
 def _slot_chain(slot: Any) -> list[dict[str, Any]]:
@@ -9886,6 +10339,344 @@ def page_target_ws_url(port: int) -> str:
     return pages[0]["webSocketDebuggerUrl"]
 
 
+def _score_departure_pixel_record(
+    record: dict[str, Any], thresholds: Mapping[str, Any] | None, coverage_complete: bool,
+) -> dict[str, Any]:
+    if thresholds is None:
+        return {
+            "verdict": None,
+            "reason": "thresholds not supplied",
+            "coverageComplete": coverage_complete,
+            "exposedFrameCount": 0,
+        }
+    scored = score_departure_pixels(record, thresholds=thresholds)
+    if not isinstance(scored, dict):
+        raise RuntimeError("score_departure_pixels returned a non-object")
+    return scored
+
+
+def capture_departure_pixels(
+    player: Any, entry: Mapping[str, Any], viewport: tuple[int, int], evidence_dir: Path, *,
+    poster_reference: np.ndarray | None = None, poster_provenance: Mapping[str, Any] | None = None,
+    thresholds: Mapping[str, Any] | None = None, continuous_expected: bool = True,
+    one_frame_red: bool = False, screencast: Callable[..., None] | None = None,
+) -> dict[str, Any]:
+    """Capture one attributed departure through the probe-only discovery path."""
+    if (
+        not _is_rect(entry.get("srcRect")) or not _is_rect(entry.get("dstRect"))
+        or _finite_number(entry.get("durationSeconds")) is None
+    ):
+        raise ValueError("departure pixel entry needs source/destination rects and measured transition duration")
+    normalized_thresholds = _normalize_departure_pixel_thresholds(thresholds)
+    transport = player._require_transport()
+    source = entry.get("fromOrdinal")
+    if isinstance(source, int) and source > 1:
+        player.execute("goTo", source)
+    if not wait_until_settled(player):
+        raise RuntimeError(f"departure source slide {source} did not settle")
+    stage_map = transport.evaluate(STAGE_MAP_JS)
+    if not isinstance(stage_map, dict):
+        raise RuntimeError("departure pixel capture has no readable stage map")
+    screen_roi = to_screen_rect(dict(entry["srcRect"]), stage_map)
+    if rects_overlap(screen_roi, CARRY_COVER_SYNC_RECT, 0):
+        raise RuntimeError("departure pixel decoder ROI overlaps the sync bar")
+    size = departure_screencast_size(viewport, screen_roi)
+    if FEED_DWELL_S is not None and FEED_DWELL_S > DEPARTURE_PIXEL_PREROLL_S:
+        time.sleep(FEED_DWELL_S - DEPARTURE_PIXEL_PREROLL_S)
+    origin = transport.evaluate(DEPARTURE_PIXEL_SAMPLER_JS)
+    raw: list[tuple[Any, str]] = []
+    errors: list[str] = []
+    stop = threading.Event()
+    runner = screencast or _screencast
+    thread = threading.Thread(
+        target=runner, args=(page_target_ws_url(transport.port), raw, stop, errors, size), daemon=True,
+    )
+    thread.start()
+    try:
+        time.sleep(DEPARTURE_PIXEL_PREROLL_S)
+        press_ms = transport.evaluate("performance.now()")
+        player.execute("advance")
+        time.sleep(float(entry["durationSeconds"]) + DEPARTURE_PIXEL_TAIL_S)
+    finally:
+        stop.set()
+        thread.join(10)
+    transport.evaluate(DEPARTURE_PIXEL_STOP_JS)
+    read = transport.evaluate(DEPARTURE_PIXEL_READ_JS)
+    producer = transport.evaluate("window.__obedMmFeedProbe.report()")
+    transport.evaluate(DEPARTURE_PIXEL_BACKGROUND_JS)
+    background_data = transport.call("Page.captureScreenshot", format="png").get("data")
+    if errors:
+        raise RuntimeError(f"departure screencast failed: {errors}")
+    if not isinstance(origin, (int, float)):
+        raise RuntimeError("departure sampler returned no time origin")
+    decoded = [
+        (float(ts) * 1000.0 - float(origin), decode_png(data))
+        for ts, data in raw if isinstance(ts, (int, float))
+    ]
+    if not decoded:
+        raise RuntimeError("departure screencast delivered no timestamped frames")
+    background = decode_png(background_data) if isinstance(background_data, str) else None
+    if background is not None and background.shape[:2] != decoded[0][1].shape[:2]:
+        background = cv2.resize(
+            background, (decoded[0][1].shape[1], decoded[0][1].shape[0]), interpolation=cv2.INTER_AREA,
+        )
+    record = build_departure_pixel_record(
+        entry, producer, read.get("rows") if isinstance(read, dict) else None, decoded, stage_map, viewport,
+        evidence_dir, press_ms=press_ms,
+        poster_reference=poster_reference, poster_provenance=poster_provenance or {},
+        background_reference=background,
+        background_provenance={"source": "same-session screenshot", "decoderHidden": True, "posterHidden": True},
+        continuous_expected=continuous_expected, thresholds=normalized_thresholds,
+    )
+    coverage = bool(record.pop("_coverageComplete", False))
+    one_frame_poster = producer.get("oneFramePoster") if isinstance(producer, dict) else None
+    instrument_variant = producer.get("instrumentVariant") if isinstance(producer, dict) else None
+    if one_frame_red and not (
+        isinstance(one_frame_poster, dict) and one_frame_poster.get("fired") is True
+        and one_frame_poster.get("entryId") == entry.get("id")
+        and one_frame_poster.get("contextSerial") == record.get("contextSerial")
+    ):
+        raise RuntimeError("one-frame tamper did not fire for this entry")
+    result = {
+        "departurePixels": record,
+        "pixelVerdict": _score_departure_pixel_record(record, normalized_thresholds, coverage),
+        "thresholds": copy.deepcopy(normalized_thresholds),
+        "oneFramePoster": copy.deepcopy(one_frame_poster),
+        "instrumentVariant": instrument_variant,
+        "screencast": {"maxWidth": size[0], "maxHeight": size[1], "rawFrames": len(raw)},
+    }
+    errors = contract.first_errors(contract.mm_feed_report(producer, discovery=True), limit=20) \
+        + contract.first_errors(contract.pixel_discovery_artifact(result))
+    if errors:
+        raise RuntimeError(f"departure pixel contract: {errors}")
+    return result
+
+
+def departure_persistent_decoder_script(entry: Mapping[str, Any]) -> str:
+    config = {"ids": [entry.get("objectId"), entry.get("dstObjectId")], "rect": entry.get("srcRect")}
+    return r"""
+(function(config){
+  function same(a,b){return typeof a==='string'&&typeof b==='string'&&a.toLowerCase()===b.toLowerCase()}
+  function tick(){
+    var stage=document.getElementById('stage'),sr=stage&&stage.getBoundingClientRect();
+    if(stage&&sr&&stage.offsetWidth>0){
+      var scale=sr.width/stage.offsetWidth;
+      document.querySelectorAll('video').forEach(function(v){
+        if(!config.ids.some(function(id){return same(v.__obedInstance,id)}))return;
+        var r=config.rect,s=v.style;
+        s.setProperty('position','fixed','important');s.setProperty('left',(sr.left+r.x*scale)+'px','important');
+        s.setProperty('top',(sr.top+r.y*scale)+'px','important');s.setProperty('width',(r.w*scale)+'px','important');
+        s.setProperty('height',(r.h*scale)+'px','important');s.setProperty('opacity','1','important');
+        s.setProperty('visibility','visible','important');s.setProperty('display','block','important');
+        s.setProperty('z-index','2147483000','important');
+      });
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})(__CONFIG__)
+""".replace("__CONFIG__", json.dumps(config))
+
+
+def _capture_departure_poster_reference(
+    export: Path, slides: list[dict[str, Any]], entry: Mapping[str, Any], render_dir: Path,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """Decode the source movie's exported poster at its native texture-page size."""
+    try:
+        loaded = preview_textures._load(export, slides)
+        sources = [slide for slide in loaded if slide.ordinal == entry.get("fromOrdinal")]
+        if len(sources) != 1:
+            raise RuntimeError("source slide is not uniquely identified in the export")
+        slide = sources[0]
+        object_matches = [
+            (object_id, asset, texture)
+            for object_id, (asset, texture) in slide.movies.items()
+            if object_id == entry.get("objectId")
+        ]
+        asset_name = canonical_asset_name(str(entry.get("asset") or ""))
+        matches = object_matches or [
+            (object_id, asset, texture)
+            for object_id, (asset, texture) in slide.movies.items()
+            if asset_name and asset == asset_name
+        ]
+        if len(matches) != 1 or not isinstance(matches[0][2], str):
+            raise RuntimeError("source movie poster is not uniquely identified in the export")
+        object_id, asset, texture = matches[0]
+        page_index = slide.page_index(texture)
+        poster_file = slide.pdf_path
+        if not poster_file.is_file() or page_index is None:
+            raise RuntimeError("source movie poster file or page is missing")
+        render_dir.mkdir(parents=True, exist_ok=True)
+        rendered = render_dir / f"{str(entry.get('id')).replace('/', '_')}-{texture}-{page_index}.png"
+        if not preview_textures._Renderer().png(poster_file, page_index, rendered):
+            raise RuntimeError("source movie poster page could not be rendered")
+        decoded = cv2.imread(str(rendered), cv2.IMREAD_COLOR)
+        if decoded is None:
+            raise RuntimeError("rendered source movie poster could not be decoded")
+        source_rect = entry.get("srcRect")
+        if not _is_rect(source_rect) or not math.isclose(
+            decoded.shape[1] / decoded.shape[0],
+            float(source_rect["w"]) / float(source_rect["h"]),
+            rel_tol=0.001, abs_tol=0.001,
+        ):
+            raise RuntimeError("export poster aspect does not match the source decoder ROI")
+        return cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB), {
+            "source": "export poster image", "path": str(poster_file.resolve()),
+            "sha256": hashlib.sha256(poster_file.read_bytes()).hexdigest(),
+            "renderedPath": str(rendered.resolve()), "metric": "mad", "slide": entry.get("fromPlayer"),
+            "objectId": object_id, "asset": asset, "texture": texture, "pageIndex": page_index,
+        }
+    except Exception as exc:  # noqa: BLE001 - the caller records the per-entry discovery error and continues
+        return None, {
+            "source": "export poster image", "missing": True, "metric": "mad", "reason": str(exc),
+        }
+
+
+def _normalize_departure_pixel_thresholds(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"margin", "redMin", "provenance"}:
+        raise ValueError("departure pixel thresholds must contain exactly margin, redMin, and provenance")
+    margin = _finite_number(value.get("margin"))
+    red_min = _finite_number(value.get("redMin"))
+    provenance = value.get("provenance")
+    if margin is None or margin <= 0 or red_min is None or red_min <= 0:
+        raise ValueError("departure pixel margin and redMin must be positive finite numbers")
+    if not isinstance(provenance, Mapping) or not provenance:
+        raise ValueError("departure pixel threshold provenance must be a non-empty mapping")
+    return copy.deepcopy(dict(value))
+
+
+def _departure_threshold_input(path: Path | None) -> tuple[Mapping[str, Any] | None, dict[str, Any]]:
+    if path is None:
+        return None, {
+            "value": None,
+            "provenance": (
+                "not supplied; derive from the persistent-decoder null / one-rAF pre-draw decoder-hide red separation"
+            ),
+        }
+    value = _normalize_departure_pixel_thresholds(json.loads(path.read_text()))
+    assert value is not None
+    return value, {"value": value, "provenance": value["provenance"], "path": str(path.resolve())}
+
+
+def _run_departure_pixel_entry(
+    args: argparse.Namespace, export: Path, slides: list[dict[str, Any]], facts: dict[str, Any],
+    entry: dict[str, Any], evidence: Path, thresholds: Mapping[str, Any] | None,
+    poster_reference: np.ndarray | None, poster_provenance: Mapping[str, Any], scratch: Path,
+) -> dict[str, Any]:
+    scripts = list(instrument_pre_navigation_scripts(
+        facts,
+        one_frame_poster_entry_id=entry["id"] if args.departure_pixel_one_frame_poster else None,
+    ))
+    if args.departure_pixel_persistent_null:
+        scripts.append(departure_persistent_decoder_script(entry))
+
+    def run() -> dict[str, Any]:
+        player = LiveOutputHost(
+            export, slides, headless=True, mm_feed=MM_FEED_REQUEST, mm_opacity=MM_OPACITY_REQUEST,
+            pre_navigation_scripts=tuple(scripts),
+        )
+        try:
+            player.start()
+            holder: dict[str, Any] = {"continuity": copy.deepcopy(player.output.get("continuity"))}
+            show_output(player, holder)
+            warm_up_for_screenshots(player)
+            wait_for_decode(player)
+            holder.update(capture_departure_pixels(
+                player, entry, args.viewport, evidence,
+                poster_reference=poster_reference, poster_provenance=poster_provenance,
+                thresholds=thresholds,
+                continuous_expected=args.mm_feed != "off" and not args.attach,
+                one_frame_red=args.departure_pixel_one_frame_poster,
+            ))
+            return holder
+        finally:
+            try:
+                player.stop()
+            except Exception:
+                pass
+
+    if not args.attach:
+        return run()
+    attach_record: dict[str, Any] = {}
+    with attach_chrome(scratch, attach_record) as port:
+        with env_override({ATTACH_ENV: f"http://127.0.0.1:{port}"}):
+            result = run()
+    result["attach"] = attach_record
+    return result
+
+
+def run_departure_pixels(args: argparse.Namespace) -> dict[str, Any]:
+    root = run_root(args.artifact)
+    plan_export = prepare_export(args.fixture, args.original_index, root, "departure-pixel-plan")
+    plan_slides = load_slides(plan_export)
+    plan = ground_truth_plan(plan_export, plan_slides)
+    facts = complete_facts(plan, plan_export, plan_slides)
+    entries = departure_pixel_entries(facts, plan)
+    if not entries:
+        raise RuntimeError("the plan facts contain no feed-bound departure entries")
+    thresholds, threshold_record = _departure_threshold_input(args.departure_pixel_thresholds)
+    force_viewport(*args.viewport)
+    evidence = evidence_dir_of(args.artifact) / "departure-pixels"
+    captures = []
+    context = injected_core_variant(args.core_variant) if args.core_variant else nullcontext(js_sha256())
+    with context as core_sha:
+        for index, entry in enumerate(entries):
+            try:
+                poster, provenance = _capture_departure_poster_reference(
+                    plan_export, plan_slides, entry, root / "departure-poster-renders",
+                )
+                if poster is None:
+                    raise RuntimeError(f"poster reference unavailable: {provenance.get('reason') or 'unknown reason'}")
+                export = prepare_export(args.fixture, args.original_index, root, f"departure-candidate-{index}")
+                captures.append(_run_departure_pixel_entry(
+                    args, export, load_slides(export), facts, entry, evidence, thresholds,
+                    poster, provenance, root / f"departure-attach-{index}",
+                ))
+            except Exception as exc:  # noqa: BLE001 - one bad discovery entry must not suppress the remaining evidence
+                captures.append({"entryId": entry.get("id"), "status": "error", "error": str(exc)})
+    return {
+        "status": "recorded", "planSha256": facts.get("planSha256"), "coreSha256": core_sha,
+        "thresholdInput": threshold_record,
+        "control": "one-raf-pre-draw-decoder-hide" if args.departure_pixel_one_frame_poster else
+                   "persistent-decoder" if args.departure_pixel_persistent_null else "candidate",
+        "arm": {
+            "mmFeed": args.mm_feed, "mmOpacity": args.mm_opacity, "feedDwell": args.feed_dwell,
+            "feedTamper": args.feed_tamper, "feedTamperScene": args.feed_tamper_scene,
+            "feedVariant": args.feed_variant, "holdUploadKillSwitch": args.hold_upload_kill_switch,
+            "coreVariant": args.core_variant, "attach": args.attach,
+        },
+        "entryCount": len(entries), "entries": captures,
+    }
+
+
+def run_departure_pixels_cli(args: argparse.Namespace) -> None:
+    artifact = args.artifact
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    result: dict[str, Any] = {
+        "kind": DEPARTURE_PIXEL_ARTIFACT_KIND, "status": "running",
+        "fixture": str(args.fixture), "originalIndex": str(args.original_index),
+        "viewport": {"width": args.viewport[0], "height": args.viewport[1]},
+        "discoveryOnly": True,
+    }
+
+    def save() -> None:
+        artifact.write_text(json.dumps(result, indent=2, default=str) + "\n")
+
+    save()
+    try:
+        result.update(run_departure_pixels(args))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - discovery still leaves a readable artifact
+        result.update(status="error", error=str(exc))
+    finally:
+        result["leftoverChrome"] = check_no_leftover_chrome()
+        save()
+    print(json.dumps({key: result.get(key) for key in ("status", "control", "entryCount", "error")}, indent=2))
+    if result.get("status") != "recorded":
+        raise SystemExit(1)
+
+
 def capture_carry_cover(
     export: Path, slides: list[dict[str, Any]], bridge: dict[str, Any], viewport: tuple[int, int], *, hide_overlay: bool,
 ) -> dict[str, Any]:
@@ -10048,7 +10839,7 @@ def run_carry_cover_cli(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    global FEED_CONTROL, MM_FEED_REQUEST, MM_OPACITY_REQUEST, FEED_DWELL_S, INSTRUMENT_VARIANT
+    global FEED_CONTROL, MM_FEED_REQUEST, MM_OPACITY_REQUEST, FEED_DWELL_S, INSTRUMENT_VARIANT, DEPARTURE_PIXEL_TAMPER
     args = parse_args()
     FEED_CONTROL = {"tamper": None if args.feed_tamper == "no-linger" else args.feed_tamper,
                     "tamperScene": args.feed_tamper_scene,
@@ -10057,6 +10848,7 @@ def main() -> None:
     MM_OPACITY_REQUEST = args.mm_opacity
     FEED_DWELL_S = args.feed_dwell
     INSTRUMENT_VARIANT = args.instrument_variant
+    DEPARTURE_PIXEL_TAMPER = "one-frame-poster" if args.departure_pixel_one_frame_poster else None
     try:
         with run_scope(args.rescore if args.rescore is not None else args.artifact), (
             tampered_feed_ordinal(args.feed_tamper_scene) if args.feed_tamper == "ordinal" else nullcontext()
@@ -10068,6 +10860,7 @@ def main() -> None:
         MM_OPACITY_REQUEST = "auto"
         FEED_DWELL_S = None
         INSTRUMENT_VARIANT = None
+        DEPARTURE_PIXEL_TAMPER = None
 
 
 def run_cli(args: argparse.Namespace) -> None:
@@ -10075,6 +10868,9 @@ def run_cli(args: argparse.Namespace) -> None:
         run_forced_fail_cli(args)
         return
     check_fixture(args)
+    if args.departure_pixels:
+        run_departure_pixels_cli(args)
+        return
     if args.paint_control is not None:
         run_paint_control_cli(args)
         return
