@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from obed_edom.fixture_paths import source_deck
 from obed_edom.parse_outline import parse_outline
 from obed_edom.slide_map import map_slides
 from obed_edom.validate import validate_inspect, validate_slide_specs, validate_style_text
@@ -836,7 +837,7 @@ def test_mm_prefs_survive_a_json_round_trip():
     assert _pairs(_zorder(payload)) == ["'shape #0' and 'shape #1'"]
 
 
-_MINIMAL_ALPHA = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
+_MINIMAL_ALPHA = source_deck("Minimal Alpha_DSK.key")
 
 
 @pytest.mark.skipif(not _MINIMAL_ALPHA.exists(), reason="Minimal Alpha_DSK.key not on this machine")

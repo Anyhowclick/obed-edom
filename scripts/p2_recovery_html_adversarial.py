@@ -49,7 +49,7 @@ from p2_recovery_html_dissolve_live import (  # noqa: E402
     inject_preserve,
 )
 from obed_edom.dsk_live import keynote_running  # noqa: E402
-from obed_edom.fixture_paths import fixture  # noqa: E402
+from obed_edom.fixture_paths import fixture, source_deck  # noqa: E402
 from obed_edom.html_alpha_probe import (  # noqa: E402
     analyze_rgba,
     DEAD_RECT_MAX_LIVE_FRAC,
@@ -166,7 +166,7 @@ from obed_edom.p2_verdict import (  # noqa: E402
     _times,
 )
 
-SOURCE = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
+SOURCE = source_deck("Minimal Alpha_DSK.key")
 OUT = fixture("p2-recovery") / "html-adversarial"
 CLICK_DELAY_S = 1.5
 DENSE_FPS = 20

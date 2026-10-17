@@ -24,3 +24,7 @@ def fixture(name: str) -> Path:
     if name not in FIXTURE_NAMES:
         raise ValueError(f"unknown fixture {name!r}; expected one of {FIXTURE_NAMES}")
     return main_checkout() / "output" / "fixtures" / name
+
+
+def source_deck(name: str) -> Path:
+    return main_checkout() / "output" / "source-decks" / name

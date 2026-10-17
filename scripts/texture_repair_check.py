@@ -45,7 +45,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from obed_edom import live_host  # noqa: E402
-from obed_edom.fixture_paths import fixture, main_checkout  # noqa: E402
+from obed_edom.fixture_paths import fixture, main_checkout, source_deck  # noqa: E402
 from obed_edom.html_preview import PreviewError, PreviewStale, file_sha256, read_jsonish, source_slides  # noqa: E402
 from obed_edom.live_continuity import canonical_asset_name, derive_plan  # noqa: E402
 
@@ -53,7 +53,7 @@ PREVIEWS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Continuity/
 ALPHA_7E3C = "7e3c930194d00effe3a21ee0e86a20baddb74223f661b9fa23186282aaf7081d"
 ALPHA_3B9019 = "3b9019f068d8ef1c14e586c86e75274a2bebad3c65116fd2247362ed9f39a7e3"
 MINIMAL_59CB = "59cb220d674317326e710ccdc7d65fe1d7e473c83646227d2f691e6373d6fa0c"
-F2_SOURCE = Path.home() / "Desktop" / "Convert wall to 16x9 CGs" / "F2.key"
+F2_SOURCE = source_deck("F2.key")
 F2_EXPORT = F2_SOURCE.with_name("F2-html")
 F2_SOURCE_SHA256 = "f99a68ef3dc53f5e46e639e8607954b7fa4a8d69ba9a863b453f93b5320cc51b"
 F2_WINNER = "DF3DB700EEDF01B099F884EDCEAB50D3"
