@@ -5,7 +5,46 @@
 - **Coordinator:** session `local_4b825e27-26e0-4d7b-a4af-de1cc7d9d4c2`, worktree `funny-pasteur-751a72`. This session cannot write into other worktrees with the file tools. Work detached at `origin/claude/stage-b-arch` here, push, then fast-forward `stage-b-coord`.
 - **Owner instruction (2026-10-17):** pause and hand over before the phase-3 round-3 reviews. Nothing has started since.
 
-## Resume here
+## Resume here — IMPLEMENTERS (2026-10-17 late; owner: "stop at the planning stage, implementers in another session")
+
+**What to implement:** `.agents/plans/keynote_live_continuity_stage_b_pre5a_folds.plan.md`.
+- That is plan r4, final: three plan-critique rounds (Astra r1, Fable r1–r3) found no remaining blocker or major, and plan critiques are capped at 3.
+- It has the owner decisions, folds F1–F4, F6 (step 0 / F6a / F6b / `frame.gl`), acceptance and sequencing.
+- F5 is DEFERRED pending the owner's confirmation.
+
+**Base:**
+- Branch `claude/stage-b-c4c5` @ `6639d4f0`, in worktree `.claude/worktrees/stage-b-c4c5` (clean; it holds the venvs and the git-ignored evidence).
+- Cut each stream's worktree from c4c5. Do not edit c4c5 directly.
+- Do step 1 of "Next, in order" below first (bring c4c5 up to date with main #299+), or expect the two census failures.
+
+**Roster (until 2026-10-27):**
+- Sol high implements, one per disjoint stream. It writes plans and reports to scratch and does not commit; the coordinator commits.
+- Opus 5.5 high reviews: rounds 1–3 cover all severities, round 4+ majors and blockers only.
+
+**Sequencing (plan §Sequencing):**
+1. P (F1, including the O delegation) and F (F2 + `alpha_read_separation` + the F3/F4 detail fields) run in parallel.
+2. G (`gate_checks.py` + `run_gates.sh` OPEN tally: F3 + F4) starts after F lands.
+3. F6 step 0 is a quiet-window measurement.
+4. F6a, with `frame.gl` co-landing, then F6b only if needed.
+5. Re-run the affected arms interleaved, then a full round, then the pixel round.
+6. Merge only on the owner's go.
+
+**Evidence and tools (git-ignored, under `stage-b-c4c5/.cache/`):**
+- `gates/pre5a-6639d4f0/` + `.log`: the non-pixel pre-5a round. Its staged `D7-html`, `D7s-html` and `alpha-dsk-repaired` are reusable for single-arm probe runs.
+- `gates/calib-red-6639d4f0.*`.
+- `suites/`: the full-suite logs, plus `venv310` for the 3.10 floor.
+- `debug/dbg-{cost,glint,mismatch}/`: investigator scripts and rerun artifacts.
+  - `dbg-cost/wrap/diagprobe.py` is the per-frame/sub-timer diagnostic wrapper for F6 step 0.
+  - Its paths may still point at the old session scratchpad, so check them before use.
+- Reports, critiques and fold texts: `funny-pasteur-751a72/.cache/reviews/` (`pre5a-debug-*.md`, `pre5a-folds-critique-*.md`).
+
+**Live-run rules:**
+- One heavy job machine-wide.
+- At most 3 headless Chromes; investigators used one at a time under `stage-b-c4c5/.cache/gates/live.lock` (`mkdir` lock).
+- `run_gates.sh` needs a fresh pinned clean worktree and start load < 4.
+- Never touch Keynote, OBS or port 9222.
+
+## Resume here (coordinator history)
 
 **Plan:** `.agents/plans/keynote_live_continuity_stage_b_c2_integration.plan.md` (r3, owner-approved). It has three phases, then the full suites, then the pre-5a integration round, then a merge to `claude/stage-b-arch` on the owner's explicit go.
 
