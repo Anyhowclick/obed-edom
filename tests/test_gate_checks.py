@@ -127,7 +127,8 @@ def test_alpha_controls_are_scoped_by_exact_id_and_scene_and_na_is_exempt() -> N
     ordinal = feed_record()
     target = ordinal["arms"]["A"][TARGET_ID]["underArtwork"]
     target.update(
-        feedLive={"verdict": False}, holdFrame={"verdict": False}, posterHold={"verdict": True}, verdict=False,
+        feedLive={"verdict": False}, holdFrame={"verdict": False}, posterHold={"verdict": True},
+        resume={"verdict": True, "report": False, "dropSize": 0}, verdict=False,
     )
     result = checks.judge(ordinal, "check_mm_feed", "ordinal", checks.live_run_validity.HOST_HEADLESS_CHROME, rc=1)
     assert result.verdict is checks.Verdict.MATCH
@@ -140,7 +141,8 @@ def test_alpha_controls_are_scoped_by_exact_id_and_scene_and_na_is_exempt() -> N
 
     after_feed = feed_record()
     after_feed["arms"]["A"][TARGET_ID]["underArtwork"].update(
-        feedLive={"verdict": False}, holdFrame={"verdict": True}, posterHold={"verdict": True}, verdict=False,
+        feedLive={"verdict": False}, holdFrame={"verdict": True}, posterHold={"verdict": True},
+        resume={"verdict": True, "report": False, "dropSize": 0}, verdict=False,
     )
     assert checks.judge(
         after_feed, "check_mm_feed", "after-feed", checks.live_run_validity.HOST_HEADLESS_CHROME, rc=1,
@@ -221,6 +223,169 @@ def test_report_rows_are_observations_not_acceptance() -> None:
     assert result.verdict is checks.Verdict.MATCH
     assert result.exit_code == 0 and result.status == "pass"
     assert result.lines[-1] == "    REPORT: asset=counter-a.mov scene=4 visibleUndecodedDurationMs=16.6"
+
+
+def test_resume_report_is_additive_and_two_dropped_frames_are_a_mismatch() -> None:
+    record = feed_record()
+    for spec in record["groundTruth"]["verdicts"]:
+        if spec.get("underArtwork"):
+            record["arms"]["A"][spec["id"]]["underArtwork"].update(
+                feedLive={"verdict": False},
+                holdFrame={"verdict": True},
+                posterHold={"verdict": True},
+                resume={"verdict": True, "report": False, "dropSize": 0},
+            )
+    target = record["arms"]["A"][TARGET_ID]["underArtwork"]
+    target["resume"] = {"verdict": True, "report": True, "dropSize": 1}
+
+    result = checks.judge(record, "check_mm_feed", "feed-off-2s", HOST, rc=0)
+
+    assert result.verdict is checks.Verdict.MATCH
+    assert result.lines[-1] == f"    REPORT: {TARGET_ID} resume dropSize=1"
+
+    target["resume"] = {"verdict": True, "report": True, "dropSize": 2}
+    mutant = checks.judge(record, "check_mm_feed", "feed-off-2s", HOST, rc=0)
+    assert mutant.verdict is checks.Verdict.MISMATCH
+    assert f"{TARGET_ID}.resume dropSize 2 is not an approved one-frame report" in "\n".join(mutant.lines)
+
+    target["feedLive"] = {"verdict": True}
+    target["resume"] = {"verdict": True, "report": True, "dropSize": 1}
+    mutant = checks.judge(record, "check_mm_feed", "feed-off-2s", HOST, rc=0)
+    assert mutant.verdict is checks.Verdict.MISMATCH
+    assert mutant.lines[-1] == f"    REPORT: {TARGET_ID} resume dropSize=1"
+
+
+def discovery_record() -> dict:
+    record = feed_record()
+    record["groundTruth"]["planSha256"] = checks.D7_PLAN_SHA256
+    arm = record.pop("arms")["A"]
+    for spec in record["groundTruth"]["verdicts"]:
+        if spec.get("underArtwork"):
+            arm[spec["id"]]["underArtwork"]["departureExposure"] = {"verdict": None}
+    variant = "departure-early-hide"
+    sha = variant_sha(variant)
+    arm["continuity"] = {"mode": "qualified", "sha256": sha}
+    record.update(
+        kind="live-continuity-probe-red-arm",
+        status="unregistered",
+        coreVariant=variant,
+        redArm=f"core:{variant}",
+        expectedCoreSha256=sha,
+        expectedRedSet=None,
+        redSet=[],
+        unknown=[],
+        arm=arm,
+    )
+    return record
+
+
+def test_departure_early_hide_is_exact_recorded_discovery_and_never_match() -> None:
+    record = discovery_record()
+
+    result = checks.judge(record, "check_mm_feed", "departure-early-hide", HOST, rc=1)
+
+    assert result.verdict is checks.Verdict.RECORDED
+    assert result.candidate is checks.Verdict.RECORDED
+    assert result.exit_code == 3 and result.status == "recorded"
+
+    record["arm"][TARGET_ID]["underArtwork"]["departureExposure"] = {"verdict": False}
+    mutant = checks.judge(record, "check_mm_feed", "departure-early-hide", HOST, rc=1)
+    assert mutant.verdict is checks.Verdict.MISMATCH
+    assert "departureExposure False != None" in "\n".join(mutant.lines)
+
+    missing = discovery_record()
+    missing["arm"]["verdicts"].pop(TARGET_ID)
+    mutant = checks.judge(missing, "check_mm_feed", "departure-early-hide", HOST, rc=1)
+    assert mutant.verdict is checks.Verdict.MISMATCH
+    assert f"missing verdict ids ['{TARGET_ID}']" in "\n".join(mutant.lines)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "host_kind", "rc", "problem"),
+    [
+        ("coreVariant", "wrong", HOST, 1, "coreVariant 'wrong'"),
+        ("redArm", "core:wrong", HOST, 1, "redArm 'core:wrong'"),
+        (None, None, checks.live_run_validity.HOST_MANAGED_OBS_30, 1, "unregistered MM-FEED label"),
+        ("continuityMode", "diagnostic", HOST, 1, "arm.continuity.mode 'diagnostic'"),
+        ("departureExposure", True, HOST, 1, "departureExposure True != None"),
+        ("status", "recorded", HOST, 1, "status 'recorded' != 'unregistered'"),
+        ("expectedRedSet", "record", HOST, 1, "expectedRedSet is not explicit None"),
+        (None, None, HOST, 0, "exit 0 != 1"),
+    ],
+)
+def test_departure_discovery_rejects_non_registered_shapes(
+    field: str | None, value: object, host_kind: str, rc: int, problem: str,
+) -> None:
+    record = discovery_record()
+    record["runValidity"]["policy"]["hostKind"] = host_kind
+    if field == "continuityMode":
+        record["arm"]["continuity"]["mode"] = value
+    elif field == "departureExposure":
+        record["arm"][TARGET_ID]["underArtwork"]["departureExposure"]["verdict"] = value
+    elif field is not None:
+        record[field] = value
+
+    result = checks.judge(record, "check_mm_feed", "departure-early-hide", host_kind, rc=rc)
+
+    assert result.verdict is checks.Verdict.MISMATCH
+    assert problem in "\n".join(result.lines)
+
+
+def test_early_mm_feed_paths_retain_cold_start_reports_on_mismatch() -> None:
+    report = {
+        "10": {"asset": "counter-a.mov", "scene": 4, "visibleUndecodedDurationMs": 16.6},
+    }
+    expected = "    REPORT: asset=counter-a.mov scene=4 visibleUndecodedDurationMs=16.6"
+
+    discovery = discovery_record()
+    discovery["arm"]["entryColdStart"] = report
+    discovery["status"] = "recorded"
+    result = checks.judge(discovery, "check_mm_feed", "departure-early-hide", HOST, rc=1)
+    assert result.verdict is checks.Verdict.MISMATCH
+    assert result.lines[-1] == expected
+
+    strip = feed_record()
+    strip["arm"] = strip.pop("arms")["A"]
+    strip["arm"]["entryColdStart"] = report
+    strip.update(
+        redArm="strip:bridge@14:movie2", status="fail",
+        redSet=list(checks.MM_FEED_STRIP_EXPECTATIONS[(
+            checks.ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off",
+        )]), unknown=[],
+    )
+    result = checks.judge(strip, "check_mm_feed", "strip-bridge14-movie2", HOST, rc=0)
+    assert result.verdict is checks.Verdict.MISMATCH
+    assert result.lines[-1] == expected
+
+
+def test_candidate_class_survives_validity_precedence() -> None:
+    record = discovery_record()
+    record.pop("runValidity")
+
+    result = checks.judge(record, "check_mm_feed", "departure-early-hide", HOST, rc=1)
+
+    assert result.verdict is checks.Verdict.INVALID
+    assert result.candidate is checks.Verdict.RECORDED
+    assert result.lines[-1] == "    INVALID: runValidity is missing or malformed"
+
+
+def test_main_prints_candidate_when_validity_changes_the_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    record = discovery_record()
+    record.pop("runValidity")
+    artifact = tmp_path / "discovery.json"
+    artifact.write_text(json.dumps(record))
+    monkeypatch.setattr(sys, "argv", [
+        "gate_checks.py", "check_mm_feed", str(artifact), "1",
+        "departure-early-hide", HOST,
+    ])
+
+    with pytest.raises(SystemExit) as raised:
+        checks.main()
+
+    assert raised.value.code == 1
+    assert capsys.readouterr().out.splitlines()[-1] == "    candidate: RECORDED"
 
 
 def test_plan_registry_uses_ground_truth_sha_not_a_caller_deck_label() -> None:
@@ -500,6 +665,7 @@ def test_attach_once_uses_attach_holder_without_fallback() -> None:
         if spec.get("underArtwork"):
             attach[spec["id"]]["underArtwork"].update(
                 holdFrame={"verdict": True}, posterHold={"verdict": True}, feedLive={"verdict": False},
+                resume={"verdict": True, "report": False, "dropSize": 0},
             )
     record["attach"] = attach
     record["arms"] = {"A": {"verdicts": attach["verdicts"]}}
@@ -511,8 +677,8 @@ def test_attach_once_uses_attach_holder_without_fallback() -> None:
     assert "attach missing or malformed" in "\n".join(result.lines)
 
 
-def test_unknown_mm_feed_label_is_not_the_registered_empty_row() -> None:
-    result = checks.judge(feed_record(), "check_mm_feed", "departure-early-hide", HOST, rc=1)
+def test_unknown_mm_feed_label_is_not_a_registered_empty_row() -> None:
+    result = checks.judge(feed_record(), "check_mm_feed", "another-discovery", HOST, rc=1)
     assert result.verdict is checks.Verdict.MISMATCH
     assert result.lines[-1] == "    MISMATCH: unregistered MM-FEED label"
 
@@ -675,6 +841,48 @@ def test_host_red_sampler_and_floor_controls_fail_closed() -> None:
     result = checks.judge(gl_mismatch, "check_host_red", "core:no-pin-hold", HOST, rc=0)
     assert result.verdict is checks.Verdict.MISMATCH
     assert "glReplay.requested 'off' != argv 'auto'" in "\n".join(result.lines)
+
+
+def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() -> None:
+    expected = {
+        "feed-on", "feed-off", "attach-once", "hold-upload-killed", "ordinal", "after-feed",
+        "from-only-crossfade", "from-only-single", "overlay-ride", "settle-on-stage",
+        "no-pause", "mm-opacity-off", "no-linger", "interim-delay", "startup-moved-decoder",
+    }
+    assert set(checks.MM_FEED_GATE_EXPECTATIONS) == expected
+    assert checks.MM_FEED_GATE_EXPECTATIONS["feed-off"]["resume"] is True
+    assert checks.MM_FEED_GATE_EXPECTATIONS["attach-once"]["resume"] is True
+    assert checks.MM_FEED_GATE_EXPECTATIONS["ordinal"]["resume"] is True
+    assert checks.MM_FEED_GATE_EXPECTATIONS["after-feed"]["resume"] is True
+    assert checks.MM_FEED_RESUME_EXEMPTIONS == frozenset({"no-pause", "hold-upload-killed"})
+    for label in checks.MM_FEED_RESUME_EXEMPTIONS:
+        assert "resume" not in checks.MM_FEED_GATE_EXPECTATIONS[label]
+    assert checks.MM_FEED_DISCOVERY_REGISTRY == {
+        (checks.D7_PLAN_SHA256, "departure-early-hide", HOST): {
+            "redArm": "core:departure-early-hide",
+            "coreVariant": "departure-early-hide",
+            "departureExposure": None,
+        },
+    }
+    assert (checks.D7_PLAN_SHA256, "core:departure-early-hide", "off") not in checks.RED_ARM_EXPECTATIONS
+
+    text = (REPO / "scripts" / "run_gates.sh").read_text()
+    block = text.split("MM_FEED_ARMS=(", 1)[1].split("\n)", 1)[0]
+    for label in expected - {"feed-on", "feed-off", "attach-once", "from-only-crossfade", "from-only-single"}:
+        assert f" {label} " in block
+    assert all(block.count(f" feed-on-{viewport} ") == 3 for viewport in ("2560", "1600", "1920"))
+    assert all(f" feed-off-{dwell}s " in block for dwell in (2, 5, 12))
+    assert block.count(" attach-once ") == 2
+    assert "D7 departure-early-hide --core-variant departure-early-hide" in block
+    assert "--feed-variant from-only" in block
+    assert "ordinal --feed-tamper ordinal --feed-tamper-scene 10" in block
+    assert "strip-bridge14-movie2 --strip bridge@14:movie2" in block
+    assert checks.MM_FEED_STRIP_EXPECTATIONS[(
+        checks.ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off",
+    )] == ("b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",)
+    assert checks.MM_FEED_READ_EXPECTATIONS[("D7", "crossfade")] == {0.25: True, 0.5: False, 0.75: False}
+    assert checks.D7_PLAN_SHA256 == "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
+    assert checks.D7S_PLAN_SHA256 == "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
 
 
 def test_paint_control_minus_one_tick_is_a_mismatch() -> None:

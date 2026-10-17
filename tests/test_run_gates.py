@@ -224,6 +224,21 @@ if mode in ("red-ok", "red-noself", "red-floor", "red-nofloor"):
         d["paintFloor"] = floor
     artifact.write_text(json.dumps(d))
     sys.exit(0)
+if arg("--core-variant") == "departure-early-hide":
+    sys.path.insert(0, "scripts")
+    from continuity_core_variants import variant_sha
+    variant = arg("--core-variant")
+    sha = variant_sha(variant)
+    target = "b0to1:counter-a.mov#1->counter-a.mov#1:carry"
+    meta = gate_meta()
+    meta["groundTruth"]["verdicts"] = [{"id": target, "kind": "carry", "underArtwork": True}]
+    d = {**meta, **validity(), "kind": "live-continuity-probe-red-arm", "status": "unregistered",
+         "coreVariant": variant, "redArm": f"core:{variant}", "expectedCoreSha256": sha,
+         "expectedRedSet": None, "redSet": [], "unknown": [],
+         "arm": {"continuity": {"mode": "qualified", "sha256": sha}, "verdicts": {target: {}},
+                 target: {"underArtwork": {"verdict": None, "departureExposure": {"verdict": None}}}}}
+    artifact.write_text(json.dumps(d))
+    sys.exit(1)
 if arg("--pass") == "G":
     statuses = {"g-fail": "fail", "g-inconclusive": "inconclusive", "g-error": "error"}
     g = {**validity(), "kind": "live-continuity-probe-pass-g", "pass": "G", "status": statuses.get(mode, "pass"),
@@ -786,7 +801,7 @@ def test_the_pattern_cache_is_prewarmed_and_verified_before_the_first_timed_run(
     events = gates["events"]()
     assert events[:2] == ["prewarm html-unmodified", "prewarm html-unmodified"], "the fill, then the verifying lookup"
     assert all(not e.startswith("prewarm") for e in events[2:])
-    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 29 + 8
+    assert len([e for e in events if e.endswith(" start")]) == 3 + 5 + len(DECK_ARMS) + 7 + 1 + 3 + 6 + 30 + 8
     assert f"h264 pattern prewarm 46.0333s: encoded key={'k' * 64}" in done.stdout
     assert f"h264 pattern cache verified 46.0333s: hit key={'k' * 64} sha256={'s' * 64}" in done.stdout
     assert "cache hit" in gates["run"]("--tier", "dev", outdir=gates["tmp"] / "out2").stdout
@@ -1275,9 +1290,10 @@ def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_o
     events = gates["events"]()
     starts = [e.split()[1] for e in events if e.endswith(" start")]
     feed_starts = [s for s in starts if s.startswith("mm-feed-")]
-    assert len(feed_starts) == 29
+    assert len(feed_starts) == 30
     assert "mm-feed-D7-no-linger" in feed_starts
     assert "mm-feed-D7-interim-delay" in feed_starts
+    assert "mm-feed-D7-departure-early-hide" in feed_starts
     assert starts == _full_launch_stems()
     out = str(gates["out"].resolve())
     args = _probe_args(events)
@@ -1285,6 +1301,10 @@ def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_o
     assert args["mm-feed-D7-no-linger"][2][args["mm-feed-D7-no-linger"][2].index("--feed-tamper") + 1] == "no-linger"
     assert "--core-variant" in args["mm-feed-D7-interim-delay"][2]
     assert args["mm-feed-D7-interim-delay"][2][args["mm-feed-D7-interim-delay"][2].index("--core-variant") + 1] == "interim-delay"
+    discovery_args = args["mm-feed-D7-departure-early-hide"][2]
+    assert discovery_args[discovery_args.index("--core-variant") + 1] == "departure-early-hide"
+    assert "[MM-FEED D7 departure-early-hide] exit=1 records=1 status=unregistered" in done.stdout
+    assert "    PENDING REGISTRATION: MM-FEED D7 departure-early-hide" in done.stdout
     assert _cc_argvs(events) == [
         ["--fixture", args[f"passG-{deck}"][0], "--original-index", args[f"passG-{deck}"][1],
          "--viewport", "1920x1080", "--carry-cover", "--artifact", f"{out}/{stem}.json", *extra]
@@ -1358,7 +1378,7 @@ def test_paint_census_entries_are_findings_that_never_change_the_verdict_or_the_
     assert "    FINDING HOST D5 --core-variant no-pin-hold | arm | endOfShow | " in out
     assert (gates["out"] / "paint-findings.txt").read_text().count("\n") == 1
     assert "paint census findings by class (report only): endOfShow=1 " in out
-    summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=1$", out, re.M)
+    summary = re.search(r"^DONE tier=full failed=(\d+) pending=1 findings=1$", out, re.M)
     assert summary, out
     assert int(summary.group(1)) == len([line for line in out.splitlines() if line.startswith("    GATE FAILED: ")])
     assert done.returncode == 1, "the stub's other red arms cannot match"
@@ -1376,5 +1396,5 @@ def test_one_multi_fault_round_counts_each_migrated_gate_once(gates) -> None:
     for prefix in ("GATE FAILED: PASSG D1", "GATE FAILED: PASSG-RED ",
                    "GATE FAILED: PAINT-CONTROL ", "GATE FAILED: CARRY-COVER green"):
         assert sum(line.startswith(prefix) for line in failures) == 1, done.stdout
-    summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=", done.stdout, re.M)
+    summary = re.search(r"^DONE tier=full failed=(\d+) pending=1 findings=", done.stdout, re.M)
     assert summary and int(summary.group(1)) == len(failures)

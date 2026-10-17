@@ -102,6 +102,7 @@ MM_FEED_ARMS=(
   "D7 no-linger --mm-feed on --feed-tamper no-linger --skip-arms B,C,V,Voff,attach"
   "D7 interim-delay --mm-feed on --core-variant interim-delay"
   "D7 startup-moved-decoder --core-variant startup-moved-decoder"
+  "D7 departure-early-hide --core-variant departure-early-hide"
   "D7 attach-once --mm-feed off --feed-dwell 5 --skip-arms A,B,C,V,Voff"
   "D7s feed-on-2560 --mm-feed on --viewport 2560x1440 --skip-arms B,C,V,Voff,attach"
   "D7s feed-on-1600 --mm-feed on --viewport 1600x1000 --skip-arms B,C,V,Voff,attach"
@@ -527,7 +528,7 @@ run_mm_feed(){ local deck=$1 label=$2; shift 2; mm_feed_fixture $deck
   queue $O/mm-feed-$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html \
     --viewport 1920x1080 --artifact $O/mm-feed-$n.json "$@"; }
 check_mm_feed(){ local deck=$1 label=$2; shift 2; local n=$deck-$label rc=$(status_of $O/mm-feed-$deck-$label)
-  $PY scripts/gate_checks.py check_mm_feed "$O/mm-feed-$n.json" "$rc" "$label" "headless Chrome" "$deck" || fail "MM-FEED $deck $label"
+  $PY scripts/gate_checks.py check_mm_feed "$O/mm-feed-$n.json" "$rc" "$label" "headless Chrome" "$deck"; tally $? "MM-FEED $deck $label"
   paint_report "$O/mm-feed-$n.json" "MM-FEED $deck $label"; }
 # Each P2 arm runs in its own --out-dir.
 run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')

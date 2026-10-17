@@ -142,13 +142,13 @@ RED_ARM_REQUIRED: dict[tuple[str, str, str], tuple[str, ...]] = {
 MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
     "feed-on": {"feedLive": True, "holdFrame": None, "noRiderAboveCanvas": True,
                 "labelsOverFeed": True, "artworkAbove": True, "handbackContinuity": True},
-    "feed-off": {"feedLive": False, "holdFrame": True, "posterHold": True,
+    "feed-off": {"feedLive": False, "holdFrame": True, "posterHold": True, "resume": True,
                  "noRiderAboveCanvas": True, "artworkAbove": True, "handbackContinuity": True},
-    "attach-once": {"holdFrame": True, "posterHold": True,
+    "attach-once": {"holdFrame": True, "posterHold": True, "resume": True,
                     "noRiderAboveCanvas": True, "artworkAbove": True, "handbackContinuity": True},
     "hold-upload-killed": {"holdFrame": False},
-    "ordinal": {"feedLive": False, "holdFrame": False, "posterHold": True},
-    "after-feed": {"feedLive": False, "holdFrame": True, "posterHold": True},
+    "ordinal": {"feedLive": False, "holdFrame": False, "posterHold": True, "resume": True},
+    "after-feed": {"feedLive": False, "holdFrame": True, "posterHold": True, "resume": True},
     "from-only-crossfade": {"feedLive": False},
     "from-only-single": {"feedLive": True},
     "overlay-ride": {"noRiderAboveCanvas": False, "labelsOverFeed": True},
@@ -159,6 +159,7 @@ MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
     "interim-delay": {},
     "startup-moved-decoder": {"labelsOverFeed": True},
 }
+MM_FEED_RESUME_EXEMPTIONS = frozenset({"no-pause", "hold-upload-killed"})
 MM_FEED_STRIP_EXPECTATIONS = {
     (ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off"): (
         "b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",
@@ -178,6 +179,13 @@ MM_FEED_NOT_APPLICABLE = {
     (ALPHA_DSK_PLAN_SHA256, "mm-opacity-off"): frozenset({ALPHA_ORDINAL_TARGET}),
 }
 MM_FEED_REPORT_ROWS = ("entryColdStart",)
+MM_FEED_DISCOVERY_REGISTRY: dict[tuple[str, str, str], dict[str, Any]] = {
+    (D7_PLAN_SHA256, "departure-early-hide", live_run_validity.HOST_HEADLESS_CHROME): {
+        "redArm": "core:departure-early-hide",
+        "coreVariant": "departure-early-hide",
+        "departureExposure": None,
+    },
+}
 
 PLAN_DECK_CLASS = {
     **{sha: "P2" for sha in P2_PLAN_SHA256},
@@ -205,6 +213,7 @@ class GateResult:
     lines: tuple[str, ...]
     exit_code: int
     status: str
+    candidate: Verdict
 
 
 _RESULTS = {
@@ -216,9 +225,9 @@ _RESULTS = {
 }
 
 
-def _result(verdict: Verdict, lines: Sequence[str]) -> GateResult:
+def _result(verdict: Verdict, lines: Sequence[str], *, candidate: Verdict | None = None) -> GateResult:
     exit_code, status = _RESULTS[verdict]
-    return GateResult(verdict, tuple(lines), exit_code, status)
+    return GateResult(verdict, tuple(lines), exit_code, status, candidate or verdict)
 
 
 def _plan_sha(record: Mapping[str, Any]) -> str | None:
@@ -254,10 +263,18 @@ def _with_precedence(
     ok = validity.get("ok")
     reasons = validity.get("reasons") if isinstance(validity.get("reasons"), list) else []
     if ok is False:
-        return _result(Verdict.INVALID, [*candidate.lines, *[f"    INVALID: {reason}" for reason in reasons]])
+        return _result(
+            Verdict.INVALID,
+            [*candidate.lines, *[f"    INVALID: {reason}" for reason in reasons]],
+            candidate=candidate.candidate,
+        )
     if ok is not True:
         suffix = reasons or ["run validity is unproven"]
-        return _result(Verdict.INVALID, [*candidate.lines, *[f"    INVALID: {reason}" for reason in suffix]])
+        return _result(
+            Verdict.INVALID,
+            [*candidate.lines, *[f"    INVALID: {reason}" for reason in suffix]],
+            candidate=candidate.candidate,
+        )
     return candidate
 
 
@@ -376,7 +393,83 @@ def _control_aggregate_problems(label: str, rows: Sequence[Mapping[str, Any]]) -
     return problems
 
 
-def _mm_feed(record: Mapping[str, Any], arm: str, rc: Any) -> tuple[GateResult, bool]:
+def _mm_feed_report_lines(scored: Mapping[str, Any]) -> list[str]:
+    entry_cold_start = scored.get("entryColdStart")
+    if "entryColdStart" not in MM_FEED_REPORT_ROWS or not isinstance(entry_cold_start, Mapping):
+        return []
+    return [
+        f"    REPORT: asset={mount.get('asset')} scene={mount.get('scene')} "
+        f"visibleUndecodedDurationMs={mount.get('visibleUndecodedDurationMs')}"
+        for mount in entry_cold_start.values()
+        if isinstance(mount, Mapping)
+    ]
+
+
+def _mm_feed_discovery(
+    record: Mapping[str, Any], label: str, rc: Any, host_kind: str
+) -> tuple[GateResult, bool] | None:
+    registration = MM_FEED_DISCOVERY_REGISTRY.get((_plan_sha(record), label, host_kind))
+    if registration is None:
+        return None
+    from continuity_core_variants import variant_sha
+
+    specs, scored, problems = _inventory(record, label)
+    variant = registration["coreVariant"]
+    expected_sha = variant_sha(variant)
+    continuity = scored.get("continuity") if isinstance(scored.get("continuity"), Mapping) else {}
+    if record.get("kind") != "live-continuity-probe-red-arm":
+        problems.append(f"kind {record.get('kind')!r} is not a red-arm capture")
+    if record.get("coreVariant") != variant:
+        problems.append(f"coreVariant {record.get('coreVariant')!r} != {variant!r}")
+    if record.get("redArm") != registration["redArm"]:
+        problems.append(f"redArm {record.get('redArm')!r} != {registration['redArm']!r}")
+    if record.get("expectedCoreSha256") != expected_sha or continuity.get("sha256") != expected_sha:
+        problems.append("the departure discovery did not run the registered core variant")
+    if continuity.get("mode") != "qualified":
+        problems.append(f"arm.continuity.mode {continuity.get('mode')!r} != 'qualified'")
+    if "expectedRedSet" not in record or record.get("expectedRedSet") is not None:
+        problems.append("expectedRedSet is not explicit None")
+    if record.get("status") != "unregistered":
+        problems.append(f"status {record.get('status')!r} != 'unregistered'")
+    if not _strings(record.get("redSet")):
+        problems.append("redSet is not a list of strings")
+    if record.get("unknown") != []:
+        problems.append(f"unknown {record.get('unknown')!r} != []")
+    if str(rc) != "1":
+        problems.append(f"exit {rc} != 1")
+
+    feed_specs = [spec for spec in specs if spec.get("underArtwork") is True]
+    rows = 0
+    for spec in feed_specs:
+        entry = scored.get(spec["id"])
+        under = entry.get("underArtwork") if isinstance(entry, Mapping) else None
+        if not isinstance(under, Mapping) or "verdict" not in under:
+            problems.append(f"{spec['id']}.underArtwork missing or malformed")
+            continue
+        rows += 1
+        departure = under.get("departureExposure")
+        if not isinstance(departure, Mapping) or "verdict" not in departure:
+            problems.append(f"{spec['id']}.departureExposure missing or malformed")
+        elif departure.get("verdict") is not registration["departureExposure"]:
+            problems.append(
+                f"{spec['id']}.departureExposure {departure.get('verdict')!r} != "
+                f"{registration['departureExposure']!r}"
+            )
+    if not rows:
+        problems.append("no under-artwork verdict records")
+    lines = [
+        f"[MM-FEED {_deck_class(record)} {label}] exit={rc} records={rows} status={record.get('status')}",
+        f"    discovery redSet={record.get('redSet')}",
+        *[f"    MISMATCH: {problem}" for problem in problems],
+        *_mm_feed_report_lines(scored),
+    ]
+    ok = not problems
+    return _result(Verdict.RECORDED if ok else Verdict.MISMATCH, lines), ok
+
+
+def _mm_feed(
+    record: Mapping[str, Any], arm: str, rc: Any, *, host_kind: str
+) -> tuple[GateResult, bool]:
     deck = _deck_class(record)
     label = arm
     if record.get("_loadError"):
@@ -387,7 +480,11 @@ def _mm_feed(record: Mapping[str, Any], arm: str, rc: Any) -> tuple[GateResult, 
         lines = [f"[MM-FEED unknown {label}] exit={rc} records=0 status={record.get('status')}",
                  "    MISMATCH: unregistered or missing groundTruth.planSha256"]
         return _result(Verdict.MISMATCH, lines), False
+    discovery = _mm_feed_discovery(record, label, rc, host_kind)
+    if discovery is not None:
+        return discovery
     if label == "strip-bridge14-movie2":
+        scored, _ = _scored_arm(record, label)
         key = (_plan_sha(record), record.get("redArm"), "off")
         wanted = MM_FEED_STRIP_EXPECTATIONS.get(key)
         got = record.get("redSet")
@@ -399,7 +496,8 @@ def _mm_feed(record: Mapping[str, Any], arm: str, rc: Any) -> tuple[GateResult, 
         if record.get("unknown") != []:
             problems.append(f"unknown {record.get('unknown')!r} != []")
         lines = [f"[MM-FEED {deck} {label}] exit={rc} redSet={got}",
-                 *[f"    MISMATCH: {problem}" for problem in problems]]
+                 *[f"    MISMATCH: {problem}" for problem in problems],
+                 *_mm_feed_report_lines(scored or {})]
         ok = str(rc) == "0" and not problems
         return _result(Verdict.MATCH if ok else Verdict.MISMATCH, lines), ok
 
@@ -444,6 +542,8 @@ def _mm_feed(record: Mapping[str, Any], arm: str, rc: Any) -> tuple[GateResult, 
         problems.append(f"target carry {target_id!r} atScene {target_scene} is missing")
     applicable_na = MM_FEED_NOT_APPLICABLE.get((_plan_sha(record), label), frozenset())
     opacity_evidence = 0
+    resume_problems: list[str] = []
+    resume_reports: list[str] = []
     for spec, row in rows:
         row_expectation = expectation
         wanted = dict(MM_FEED_GATE_EXPECTATIONS.get(expectation, {}))
@@ -483,9 +583,29 @@ def _mm_feed(record: Mapping[str, Any], arm: str, rc: Any) -> tuple[GateResult, 
                     problems.append(f"{spec['id']}.{name} is not registered as notApplicable")
                     continue
             if not isinstance(check, Mapping) or "verdict" not in check:
-                problems.append(f"{spec['id']}.{name} missing or malformed")
+                target = resume_problems if name == "resume" else problems
+                target.append(f"{spec['id']}.{name} missing or malformed")
                 continue
             actual = check.get("verdict")
+            if name == "resume":
+                if actual is not want:
+                    resume_problems.append(f"{spec['id']}.{name} {actual!r} != {want!r}")
+                report, drop = check.get("report"), check.get("dropSize")
+                if not isinstance(report, bool):
+                    resume_problems.append(f"{spec['id']}.{name}.report missing or malformed")
+                if not isinstance(drop, int) or isinstance(drop, bool) or drop < 0:
+                    resume_problems.append(f"{spec['id']}.{name}.dropSize missing or malformed")
+                elif drop >= 2:
+                    resume_problems.append(
+                        f"{spec['id']}.{name} dropSize {drop} is not an approved one-frame report"
+                    )
+                elif report is True and drop != 1:
+                    resume_problems.append(f"{spec['id']}.{name} report requires dropSize 1, got {drop}")
+                elif report is False and drop != 0:
+                    resume_problems.append(f"{spec['id']}.{name} dropSize {drop} requires report true")
+                elif report is True:
+                    resume_reports.append(f"    REPORT: {spec['id']} resume dropSize=1")
+                continue
             if row_expectation == "feed-on" and name == "holdFrame" and want is None:
                 if actual is not None or check.get("notApplicable") is not True or row.get("mode") != "continuous":
                     problems.append(
@@ -497,17 +617,12 @@ def _mm_feed(record: Mapping[str, Any], arm: str, rc: Any) -> tuple[GateResult, 
                 opacity_evidence += 1
     if label == "mm-opacity-off" and opacity_evidence == 0:
         problems.append("mm-opacity-off has no evidenced labelsOverFeed False row")
+    problems.extend(resume_problems)
     lines = [f"[MM-FEED {deck} {label}] exit={rc} records={len(rows)} status={record.get('status')}", *notes,
              *[f"    MISMATCH: {problem}" for problem in problems]]
     ok = str(rc) in ("0", "1") and not problems
-    entry_cold_start = scored.get("entryColdStart")
-    if ok and "entryColdStart" in MM_FEED_REPORT_ROWS and isinstance(entry_cold_start, Mapping):
-        for mount in entry_cold_start.values():
-            if isinstance(mount, Mapping):
-                lines.append(
-                    f"    REPORT: asset={mount.get('asset')} scene={mount.get('scene')} "
-                    f"visibleUndecodedDurationMs={mount.get('visibleUndecodedDurationMs')}"
-                )
+    lines.extend(_mm_feed_report_lines(scored))
+    lines.extend(resume_reports)
     verdict = Verdict.MATCH if ok else Verdict.MISMATCH
     return _result(verdict, lines), ok
 
@@ -902,7 +1017,11 @@ def judge(record: Mapping[str, Any], gate_kind: str, arm: str, host_kind: str, *
     if live_run_validity.qualification(host_kind) is None:
         return _result(Verdict.MISMATCH, (f"{gate_kind}: unregistered host kind {host_kind!r}",))
     try:
-        candidate, _ = handler(record, arm, rc)
+        candidate, _ = (
+            handler(record, arm, rc, host_kind=host_kind)
+            if gate_kind == "check_mm_feed"
+            else handler(record, arm, rc)
+        )
     except Exception as exc:
         return _result(Verdict.MISMATCH, (f"{gate_kind}: judgement error ({exc})",))
     if (
@@ -988,6 +1107,8 @@ def main() -> None:
         })
     result = judge(record, args.gate_kind, arm, args.host_kind, rc=args.rc)
     print("\n".join(result.lines))
+    if result.candidate is not result.verdict:
+        print(f"    candidate: {result.candidate}")
     raise SystemExit(result.exit_code)
 
 
