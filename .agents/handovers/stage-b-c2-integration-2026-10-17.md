@@ -44,7 +44,79 @@
 
   - Both interpreters fail the two real-export census tests (`test_mm_opacity_census_mirror…`, `test_handback_census_mirror…`). They reproduce on `0ec8d143` and are caused by a new export at main `output/source-decks/F2-html` (written 11:55 today by another session). It was not moved: the owner decides.
   - The third 3.13 failure, `test_run_gates::test_known_bad_the_dev_tier…`, was an xdist-load timeout: it passes alone in 24 s.
-- **Next:** step 5 (pre-5a integration round), then a merge only on the owner's go.
+- **Correction to the census note above:** `output/source-decks/` (F2-html, F2.key, Minimal Alpha_DSK.key) is not a foreign export. It was moved there on purpose by main #299 (`source_deck()`). c4c5 is based on `stage-b-arch`, which predates #299, so its real-export censuses count those files. Expect the two census failures to clear once c4c5/arch is brought up to date with main; re-check then.
+
+## Pre-5a integration round, NON-PIXEL part (2026-10-17 21:00–21:25; owner: "stop before pixel discovery")
+
+Evidence is git-ignored in `stage-b-c4c5/.cache/gates/`:
+- `pre5a-6639d4f0/` + `.log`: the full round. Run from a clean pinned worktree `stage-b-gate-6639d4f0` (since trashed), `GATE_JOBS=3 run_gates.sh … --allow-record --tier full`.
+- `calib-red-6639d4f0.{json,log}`.
+- Copy the finished evidence into main `output/evidence/` when it is reviewed.
+
+**Round facts**
+- exit 1, wall 1366 s; load 2.74 at start, 3.86 at launch, 5.03 at end.
+- `ROUND BUILD MATCH chromeBuild=155.0.8059.80`, and every P2 report is "build not recorded (validity N/A)", per N3.
+- runtime sha `838eeedf…` unchanged start to end.
+- `DONE failed=77 pending=0 findings=137` (paint census, report only).
+- `failed=77` is by design: every judged arm is INVALID for cadence-open (§7 final class). The candidate classes and the non-cadence reasons are what count.
+
+**§7 acceptance**
+
+| Check | Result |
+|---|---|
+| Judged artifacts carry `runValidity`, build matches | MET |
+| Calibration red INVALID for measured cost (`arms.A: cost: hook p95 exceeds 8 ms: feed.rvfc, frame.total`) | MET |
+| D7 departure-early-hide RECORDED | MET |
+| Host gates, host reds, deck reds, Pass G (+red), paint control, carry-cover: candidate MATCH with cadence-only INVALID | MET, except D4 wrong-instance (below) |
+| GL-replay host red: only "GL intervals unavailable (GL replay)" | MET |
+| **Clean-null cost True** | **NOT MET** (below) |
+| **Only cadence-open / GL-replay None reasons** | **NOT MET** (below) |
+| **Candidate lines equal the table** | **NOT MET**: 9 MISMATCH (below). Unexplained mismatches block the merge (§7). |
+
+**Clean-null cost is not True.** `frame.total` p95 is over 8 ms on EVERY D7/D7s mm-feed arm:
+- the null feed-on arms at 2560, 1600 and 1920, plus from-only, no-linger, interim-delay, startup-moved-decoder, departure-early-hide and attach-once;
+- p95 is a steady 9.9–10.8 ms, with 123–226 frames over budget;
+- Alpha mm-opacity-off is also over (8.7 ms);
+- every other Alpha arm stays at 3.5–7.6 ms.
+
+The D7 level is uniform across viewports and arms, which looks systematic rather than load noise. It still needs a quiet-machine rerun of one D7 feed-on null before blaming the instrument or the deck. Never relax the `> 8` gate (owner gate-4 decision 3).
+
+**"GL intervals were not supplied" (integration gap, not a permitted reason).** It appears on three Alpha arms:
+- `hold-upload-killed` (`arms.A`);
+- `ordinal` (`arms.A`);
+- `strip-bridge14-movie2` (`arm`).
+
+These are not GL-replay arms. Find which producer path omits the GL intervals for these arm kinds.
+
+**Candidate MISMATCHes**
+
+| Arm | Mismatch |
+|---|---|
+| HOST D4 `--core-variant wrong-instance` | Status inconclusive; contract `unknown` for `b0to1:counter-a.mov#2->counter-a.mov#1:carry` and `b1to2:counter-a.mov#1->counter-a.mov#1:carry`. Only the two duplicates were observed. |
+| Alpha feed-on-1920 | `b7to8 wa0125 handbackContinuity False != True`. The 2560 and 1600 runs MATCH. |
+| Alpha feed-off-2s | holdFrame None for b6to7 wa0125, b7to8 wa0121 and b7to8 wa0125 |
+| Alpha feed-off-5s | holdFrame None for b7to8 wa0121 and wa0125 |
+| Alpha feed-off-12s | holdFrame None for b6to7 wa0125 and b7to8 wa0125 |
+| Alpha attach-once | holdFrame None for b5to6 wa0125, b7to8 wa0121 and wa0125 |
+| Alpha after-feed | holdFrame None for b5to6 wa0125 |
+| Alpha ordinal (fresh v3) | `b5to6 wa0125 holdFrame None != False` |
+| Alpha no-pause (fresh v3) | `posterHold None != False` for b6to7 and b7to8 wa0125 |
+
+- Per §7, "Unseparated None stays open, never triggers threshold changes". The holdFrame/posterHold Nones may be legitimately unseparated holds, which become documented open items needing an owner disposition. Each still needs its per-frame reads checked first, using the artifacts in `pre5a-6639d4f0/mm-feed-Alpha_DSK-*.json`.
+- The D4 inconclusive and the 1920 handback False are real deviations: rerun interleaved on a quiet machine before attributing them.
+
+**Not run (owner stop):**
+- the pixel feasibility pair (`--departure-pixels --departure-pixel-persistent-null`, then `--departure-pixel-one-frame-poster`), both threshold-free;
+- `derive_pixel_thresholds` by hand, writing the JSON for `--departure-pixel-thresholds`;
+- the discovery captures over D7/D7s departures and the Alpha b5to6, b6to7 and both b7to8 carries.
+
+**Next, in order:**
+1. Bring c4c5 up to date with main (#299 and later) and re-run the census tests.
+2. Quiet-machine reruns: one D7 feed-on null (cost), D4 wrong-instance, Alpha feed-on-1920.
+3. Per-frame read of the Alpha None holds, then the owner's disposition.
+4. Fix the GL-intervals gap.
+5. Pixel round.
+6. Merge only on the owner's go.
 
 **Phases**
 - **Phase 1 LANDED on c4c5:**
