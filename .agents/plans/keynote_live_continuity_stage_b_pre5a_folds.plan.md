@@ -13,6 +13,9 @@ landed on c4c5 (`6639d4f0`), so every fold's base is c4c5.
 r4 (final; plan critiques capped at 3 rounds): critique r3 by Fable (`pre5a-folds-critique-fable-r3.md`; no blocker,
 2 majors: `Verdict.OPEN` erased by validity precedence and uncountable by `tally`; RGBA scratch copy from an
 `alpha:false` drawing buffer errors) folded, plus its two `mark()` mediums. Remaining r3 lows are implementer notes.
+r4 amendment (owner, 2026-10-17): F5 is INCLUDED, as the last, droppable P item. Its design is assembled from both
+critics' round-1 F5 findings; the plan-critique cap is reached, so implementation review rounds 1–3 (all severities)
+carry its scrutiny.
 
 ## Owner decisions (2026-10-17, ~22:45)
 - **D-A.** Cost reduction option **(A)**: keep verifying every GL frame; restructure the reads. The `> 8` ms gate stays.
@@ -21,10 +24,13 @@ r4 (final; plan critiques capped at 3 rounds): critique r3 by Fable (`pre5a-fold
   INVALID). Follow-up evidence: an exact-frame check on a counter deck. Never a threshold change.
 - **D-np.** Narrow no-pause `posterHold False` to the connected carries; the detached carries are recorded as None.
 - **D-gl.** Take the GL-interval fallback fold.
-- **D-ts.** "As recommended" (the recommendation was optional hardening). **Coordinator (reversible): DEFERRED** — both
-  critics showed the push-only skip breaks sampler integrity (seq gap, `rows != rafTicks`, `ppMismatch`), and Astra showed
-  an equal-timestamp callback can carry a conflicting pre-paint observation, so a correct version needs its own design.
-  PENDING OWNER CONFIRMATION of the deferral. The observed failure (1/71 arms) is fail-closed (inconclusive, never a false pass); the strict contract stays.
+- **D-ts.** INCLUDE NOW (owner, 2026-10-17, superseding the r2 coordinator deferral). The failure is fail-closed
+  (inconclusive, never a false pass), but `run_gates.sh` never retries, so one inconclusive arm fails a qualification
+  round; at the observed 1/71 per arm (a single event, so very uncertain) a ~71-arm round would hit it about half the
+  time. F5 changes the sampler, so it needs a full round to re-validate, and this checkpoint already ends with one.
+  F5 is the LAST item in stream P, in its own commit, and droppable: if its review has not closed when the rest is ready
+  for the full round, it is cut (back to deferred) rather than blocking. The strict `row:ts not increasing` contract
+  stays.
 
 ## Folds
 
@@ -126,11 +132,33 @@ current requirements (incl. the continuous-mode explicit N/A at `gate_checks.py:
   feed-off-2s → verdict OPEN, exit 4, candidate OPEN, 3 OPEN lines; wrapped under not-ok validity → INVALID with
   `candidate: OPEN`; `tally 4` increments OPEN, not FAIL.
 
-### F5. Sampler duplicate timestamp — DEFERRED (see D-ts)
-Recorded follow-up design (both critics): handle a duplicate logical frame atomically BEFORE `frameSeq++`/`rafTicks++`/
-paint controls/pre-paint toggle, still inside the `sampler.tick` span, with `meta.duplicateTs` (contract meta
-whitelists `live_evidence_contract.py:605-620`, `:643`); a duplicate whose observation conflicts with the kept row stays
-inconclusive. Needs an end-to-end sampler/ResizeObserver harness test.
+### F5. Sampler duplicate timestamp (stream P, last and droppable; see D-ts)
+Cause: D4 wrong-instance went inconclusive once (1/71 sampler arms) because two pre-press rows 1.5 ms apart carried the
+same `document.timeline.currentTime` (528.732), tripping `row:ts not increasing at samples[1]`
+(`live_evidence_contract.py:990-992`). The rows' decoder clocks differed, so the second callback is not proven empty.
+r1 critics showed a push-only skip breaks the sampler integrity scorer (`paint_instrument.py:1760-1850`): seq gap,
+`len(rows) != meta.rafTicks`, and `prepaint.toggle` moving `currentSeq` to the un-pushed seq → `ppMismatch`
+(`:1014`). The 1/71 flake would become a deterministic INVALID.
+- Change (`live_continuity_probe.py` sampler `frame(ts)`, ~474-507): when the logical-frame timestamp (the value the
+  row's `ts` would carry) equals the previous KEPT row's, treat the callback as a duplicate logical frame, decided
+  atomically BEFORE `frameSeq++`, `rafTicks++`, paint-control `ctl.tick`, the sampler `tick`, and the pre-paint toggle.
+  Still inside the `sampler.tick` span (its physical cost stays counted); re-arm rAF and return. Keep-first.
+- Conflict rule (Astra): the duplicate still takes the row's observation snapshot (the same fields a row would carry,
+  without pushing it) and compares it with the kept row. Any difference → `meta.duplicateConflicts++`. The contract
+  treats `duplicateConflicts > 0` as unreadable evidence (an inconclusive arm with a named reason), never as a clean
+  row, so a decoder hidden on the second equal-timestamp callback cannot vanish.
+- Meta: `meta.duplicateTs` and `meta.duplicateConflicts` (non-negative ints), added to the contract meta whitelists
+  (`live_evidence_contract.py:605-620`, `:643`). `rows == rafTicks` and seq contiguity still hold by construction.
+  Backwards timestamps still fail the contract.
+- Red-first tests in the probe JS harness (`tests/test_live_continuity_probe.py:7849-7864` drives
+  `timeline.currentTime`), end to end through `sampler_self_check`: two rAFs with equal time and identical observation
+  → one row, `rafTicks` 1, `duplicateTs` 1, no `ppMismatch`, self-check ok; equal time with a changed observation →
+  `duplicateConflicts` 1 → contract reason → inconclusive; backwards timestamp → still rejected; duplicate across a
+  drain boundary; stop/start; a paint-control injection sequence is not double-advanced; the `sampler.tick` cost spans
+  stay balanced. Node 16.0.0, ES5 only.
+- Acceptance: unit tests above; in the full round every sampler arm reports `duplicateTs`/`duplicateConflicts`;
+  `duplicateConflicts` must be 0 on every clean arm. The rare duplicate is no longer expected to make an arm
+  inconclusive. No historical replay is possible (the producer changes).
 
 ### F6. Instrument GL-frame cost, option (A), plus `frame.gl` (streams F, V, P, contract)
 Facts (verified by both critics): product contexts are **WebGL1** (`html_alpha_probe.py:2955`, `live_mm_feed_js.py:215`):
@@ -254,12 +282,13 @@ key, nested spans, chunk boundaries, missing marker, exactly 8 vs > 8.
   viewports, hold/attach/stand-down arms, and a full `run_gates.sh` round. Final validity stays cadence-open (Q2).
 
 ## Sequencing
-1. Parallel Sol folds, disjoint files: P (F1 incl. O delegation) and F (F2 + `alpha_read_separation` + the F3 clock
+1. Parallel Sol folds, disjoint files: P (F1 incl. O delegation, then F5 as a separate commit) and F (F2 + `alpha_read_separation` + the F3 clock
    detail + the F4 `mode`/`targetFrame` detail); then G (`gate_checks.py` + `run_gates.sh` `open=N`: F3 + F4) after F
    lands, because G depends on F for both. Opus 5.5 high review, r1–r3 all severities.
 2. F6 step 0 on a quiet window (can run now; no code change beyond a probe-only flag or scratch wrapper).
 3. F6a → review → measure; F6b only if step 0 + F6a do not clear both decks with margin; `frame.gl` co-lands with F6a.
-4. Re-run affected arms interleaved, full round, pixel round, merge only on the owner's go.
+4. Re-run affected arms interleaved, full round, pixel round, merge only on the owner's go. F5 joins the full round
+   only if its review closed; otherwise it is cut and recorded as deferred.
 
 ## Non-goals / never
 Never relax `ALPHA_HOLD_MARGIN`, `PRE_DRAW_GRACE_MS`, the 8 ms gate or any registered red; no promotion of None to True;

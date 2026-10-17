@@ -10,7 +10,7 @@
 **What to implement:** `.agents/plans/keynote_live_continuity_stage_b_pre5a_folds.plan.md`.
 - That is plan r4, final: three plan-critique rounds (Astra r1, Fable r1–r3) found no remaining blocker or major, and plan critiques are capped at 3.
 - It has the owner decisions, folds F1–F4, F6 (step 0 / F6a / F6b / `frame.gl`), acceptance and sequencing.
-- F5 is DEFERRED pending the owner's confirmation.
+- F5 (sampler duplicate timestamp) is INCLUDED (owner, 2026-10-17): the last item in stream P, its own commit, droppable if its review has not closed by the full round.
 
 **Base:**
 - Branch `claude/stage-b-c4c5` @ `6639d4f0`, in worktree `.claude/worktrees/stage-b-c4c5` (clean; it holds the venvs and the git-ignored evidence).
@@ -22,7 +22,7 @@
 - Opus 5.5 high reviews: rounds 1–3 cover all severities, round 4+ majors and blockers only.
 
 **Sequencing (plan §Sequencing):**
-1. P (F1, including the O delegation) and F (F2 + `alpha_read_separation` + the F3/F4 detail fields) run in parallel.
+1. P (F1, including the O delegation, then F5 as a separate droppable commit) and F (F2 + `alpha_read_separation` + the F3/F4 detail fields) run in parallel.
 2. G (`gate_checks.py` + `run_gates.sh` OPEN tally: F3 + F4) starts after F lands.
 3. F6 step 0 is a quiet-window measurement.
 4. F6a, with `frame.gl` co-landing, then F6b only if needed.
@@ -213,7 +213,7 @@ Three Opus 5.5 high investigators worked read-only; the coordinator spot-checked
 - The owner chose cost option (A), and "the rest as per rec", including dilution = yes.
 - Fold plan r2: `.agents/plans/keynote_live_continuity_stage_b_pre5a_folds.plan.md`.
   - It folds critique r1 by Codex GPT-6 Astra high and by Fable; their critiques are in `.cache/reviews/pre5a-folds-critique-{astra,fable}.md`.
-  - F5 (sampler duplicate timestamp) is deferred, a reversible coordinator call.
+  - F5 (sampler duplicate timestamp) was deferred in r2; the owner then included it (r4 amendment).
   - F6 is split into step 0 (`willReadFrequently`), F6a (pixel-identical) and F6b (an independent decoder reference via an instrument-owned texture), plus `frame.gl`.
 - Steps 2–4 below are superseded by that plan's Sequencing. Step 1 still applies.
 
