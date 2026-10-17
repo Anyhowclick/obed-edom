@@ -50,6 +50,25 @@ INSTRUMENT_COST_HOOKS = (
 )
 FEED_COST_HOOKS = ("feed.rvfc", "feed.raf", "feed.draw")
 INSTRUMENT_COST_ROW_FIELDS = frozenset({"applicable", "installed", "count", "p95", "max", "overBudget"})
+RUN_VALIDITY_FIELDS = frozenset({"ok", "reasons", "measured", "policy"})
+RUN_VALIDITY_MEASURED_FIELDS = frozenset({"cost", "environment", "cadence"})
+RUN_VALIDITY_COST_FIELDS = frozenset({
+    "ok", "budgetP95Ms", "hooks", "missingHooks", "malformedHooks", "uninstalledHooks",
+    "inapplicableHooks", "overBudgetHooks",
+})
+RUN_VALIDITY_ENVIRONMENT_FIELDS = frozenset({
+    "ok", "qualificationIdentity", "gitHead", "browserVersion", "observations",
+})
+RUN_VALIDITY_CADENCE_FIELDS = frozenset({
+    "ok", "cadenceBoundaryMs", "glIntervals", "visits", "visitCount", "deltaCount",
+})
+RUN_VALIDITY_STATUS_FIELDS = frozenset({"cost", "cadence", "hostRows", "requiredHooks", "load", "percentile"})
+ARTIFACT_RUN_VALIDITY_FIELDS = frozenset({"ok", "reasons", "policy", "measured", "holders"})
+VISIBLE_PASSES = frozenset({"V", "Voff", "Vgl"})
+HOLDER_SCOPE_KINDS = frozenset({
+    "full-deck", "pass-g-destination", "advance-leg", "carry-cover", "visible", "replay",
+})
+FULL_SAMPLER_SCOPE_KINDS = frozenset({"full-deck", "pass-g-destination", "advance-leg"})
 
 
 def first_errors(*streams: Iterable[str], limit: int = CONTRACT_ERROR_LIMIT) -> list[str]:
@@ -221,6 +240,547 @@ def instrument_cost(value: Any, path: str = "instrumentCost") -> Iterator[str]:
     frame_total = value.get("frame.total")
     if isinstance(frame_total, dict) and frame_total.get("applicable") is not True:
         yield f"instrumentCost.frame.total:applicable at {path}['frame.total']"
+
+
+def _bool_or_null(value: Any) -> bool:
+    return value is None or isinstance(value, bool)
+
+
+def _finite_nonnegative_or_null(value: Any) -> bool:
+    return value is None or _finite(value) and value >= 0
+
+
+def _string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(_non_empty_str(item) for item in value)
+
+
+def _run_validity_policy(value: Any, path: str) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"runValidity.policy:object at {path}"
+        return
+    status = value.get("status")
+    if "status" not in value:
+        yield f"runValidity.policy.status:missing at {path}"
+    elif not isinstance(status, dict) or set(status) != RUN_VALIDITY_STATUS_FIELDS \
+            or not all(_non_empty_str(item) for item in status.values()):
+        yield f"runValidity.policy.status at {path}.status"
+    host_kind = value.get("hostKind")
+    if host_kind is None:
+        if set(value) != {"status"}:
+            yield f"runValidity.policy:fields at {path}"
+        return
+    yield from _fields(value, "runValidity.policy", path, {
+        "hostKind": _non_empty_str,
+        "engine": lambda item: item in ("chrome", "cef"),
+        "periodMs": lambda item: _finite(item) and item > 0,
+        "cadenceBoundaryMs": lambda item: _finite(item) and item > 0,
+        "costBudgetP95Ms": lambda item: _finite(item) and item > 0,
+        "requiredHooks": lambda item: isinstance(item, list) and tuple(item) == INSTRUMENT_COST_HOOKS,
+    })
+    engine = value.get("engine")
+    if engine == "chrome":
+        expected = {
+            "hostKind", "engine", "periodMs", "cadenceBoundaryMs", "costBudgetP95Ms",
+            "requiredHooks", "chromeMajors", "status",
+        }
+        if set(value) != expected:
+            yield f"runValidity.policy:fields at {path}"
+        yield from _fields(value, "runValidity.policy", path, {
+            "chromeMajors": lambda item: isinstance(item, list) and bool(item)
+            and all(_int(major) and major > 0 for major in item),
+        })
+    elif engine == "cef":
+        expected = {
+            "hostKind", "engine", "periodMs", "cadenceBoundaryMs", "costBudgetP95Ms",
+            "requiredHooks", "outputHz", "browserSourceHz", "obsVersion", "status",
+        }
+        if set(value) != expected:
+            yield f"runValidity.policy:fields at {path}"
+        yield from _fields(value, "runValidity.policy", path, {
+            "outputHz": lambda item: _finite(item) and item > 0,
+            "browserSourceHz": lambda item: _finite(item) and item > 0,
+            "obsVersion": _non_empty_str,
+        })
+
+
+def _run_validity_cost(
+    value: Any, path: str, *, missing_instrument: bool = False, validate_hooks: bool = True,
+) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"runValidity.measured.cost:object at {path}"
+        return
+    if set(value) != RUN_VALIDITY_COST_FIELDS:
+        yield f"runValidity.measured.cost:fields at {path}"
+    yield from _fields(value, "runValidity.measured.cost", path, {
+        "ok": _bool_or_null,
+        "budgetP95Ms": _finite_nonnegative_or_null,
+        "hooks": lambda item: isinstance(item, dict),
+        "missingHooks": _string_list,
+        "malformedHooks": _string_list,
+        "uninstalledHooks": _string_list,
+        "inapplicableHooks": _string_list,
+        "overBudgetHooks": _string_list,
+    })
+    hooks = value.get("hooks")
+    missing = value.get("missingHooks")
+    malformed = value.get("malformedHooks")
+    if isinstance(missing, list) and all(isinstance(hook, str) for hook in missing) \
+            and not set(missing) <= set(INSTRUMENT_COST_HOOKS):
+        yield f"runValidity.measured.cost.missingHooks at {path}.missingHooks"
+    if isinstance(malformed, list) and all(isinstance(hook, str) for hook in malformed) \
+            and isinstance(hooks, dict) and not set(malformed) <= set(hooks):
+        yield f"runValidity.measured.cost.malformedHooks at {path}.malformedHooks"
+    if validate_hooks and isinstance(hooks, dict) and missing == [] and malformed == [] \
+            and not (not hooks and missing_instrument):
+        yield from instrument_cost(hooks, f"{path}.hooks")
+
+
+def _run_validity_environment(value: Any, path: str, engine: Any) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"runValidity.measured.environment:object at {path}"
+        return
+    expected = set(RUN_VALIDITY_ENVIRONMENT_FIELDS)
+    if engine == "chrome":
+        expected.add("chromeBuild")
+    elif engine == "cef":
+        expected.update(("obsVersion", "outputRate", "browserSourceRate"))
+    if set(value) != expected:
+        yield f"runValidity.measured.environment:fields at {path}"
+    yield from _fields(value, "runValidity.measured.environment", path, {
+        "ok": _bool_or_null,
+        "qualificationIdentity": _str_or_null,
+        "gitHead": _str_or_null,
+        "browserVersion": lambda item: item is None or isinstance(item, dict),
+        "observations": lambda item: item is None or isinstance(item, dict),
+    })
+    chrome_build = value.get("chromeBuild")
+    if engine == "chrome" and not (chrome_build is None or _non_empty_str(chrome_build)):
+        yield f"runValidity.measured.environment.chromeBuild at {path}.chromeBuild"
+    if engine == "cef":
+        yield from _fields(value, "runValidity.measured.environment", path, {
+            "obsVersion": _str_or_null,
+            "outputRate": lambda item: item is None or isinstance(item, dict),
+            "browserSourceRate": lambda item: item is None or isinstance(item, dict),
+        })
+
+
+def _run_validity_visit(value: Any, path: str) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"runValidity.cadence.visit:object at {path}"
+        return
+    yield from _fields(value, "runValidity.cadence.visit", path, {
+        "scene": lambda item: item is None or _finite(item),
+        "start": _finite,
+        "end": _finite,
+        "sampleCount": _count,
+        "deltaCount": _count,
+        "medianMs": _finite_nonnegative_or_null,
+        "p95Ms": _finite_nonnegative_or_null,
+        "maxMs": _finite_nonnegative_or_null,
+        "overBoundaryCount": _count,
+        "glExcludedDeltas": _count,
+    })
+
+
+def _run_validity_cadence(value: Any, path: str) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"runValidity.measured.cadence:object at {path}"
+        return
+    if set(value) != RUN_VALIDITY_CADENCE_FIELDS:
+        yield f"runValidity.measured.cadence:fields at {path}"
+    yield from _fields(value, "runValidity.measured.cadence", path, {
+        "ok": lambda item: item is None,
+        "cadenceBoundaryMs": _finite_nonnegative_or_null,
+        "glIntervals": lambda item: item is None or isinstance(item, list),
+        "visits": lambda item: item is None or isinstance(item, list),
+        "visitCount": lambda item: item is None or _count(item),
+        "deltaCount": lambda item: item is None or _count(item),
+    })
+    intervals = value.get("glIntervals")
+    if isinstance(intervals, list):
+        for index, interval in enumerate(intervals):
+            if not isinstance(interval, dict) or not _finite(interval.get("start")) \
+                    or not _finite(interval.get("end")) or interval["end"] < interval["start"]:
+                yield f"runValidity.cadence.glInterval at {path}.glIntervals[{index}]"
+    visits = value.get("visits")
+    if isinstance(visits, list):
+        for index, visit in enumerate(visits):
+            yield from _run_validity_visit(visit, f"{path}.visits[{index}]")
+
+
+def run_validity(value: Any, path: str = "runValidity") -> Iterator[str]:
+    """The exact per-holder result shape emitted by ``live_run_validity.run_validity``."""
+    if not isinstance(value, dict):
+        yield f"runValidity:object at {path}"
+        return
+    if set(value) != RUN_VALIDITY_FIELDS:
+        yield f"runValidity:fields at {path}"
+    yield from _fields(value, "runValidity", path, {
+        "ok": _bool_or_null,
+        "reasons": _string_list,
+        "measured": lambda item: isinstance(item, dict),
+        "policy": lambda item: isinstance(item, dict),
+    })
+    policy = value.get("policy")
+    yield from _run_validity_policy(policy, f"{path}.policy")
+    measured = value.get("measured")
+    if not isinstance(measured, dict):
+        return
+    if set(measured) != RUN_VALIDITY_MEASURED_FIELDS:
+        for key in RUN_VALIDITY_MEASURED_FIELDS - set(measured):
+            yield f"runValidity.measured.{key}:missing at {path}.measured"
+        if set(measured) - RUN_VALIDITY_MEASURED_FIELDS:
+            yield f"runValidity.measured:fields at {path}.measured"
+    engine = policy.get("engine") if isinstance(policy, dict) else None
+    if "cost" in measured:
+        reasons = value.get("reasons")
+        missing_instrument = isinstance(reasons, list) \
+            and "cost: instrumentCost is missing or malformed" in reasons
+        yield from _run_validity_cost(
+            measured["cost"], f"{path}.measured.cost", missing_instrument=missing_instrument,
+            validate_hooks=isinstance(policy, dict) and _non_empty_str(policy.get("hostKind")),
+        )
+    if "environment" in measured:
+        yield from _run_validity_environment(measured["environment"], f"{path}.measured.environment", engine)
+    if "cadence" in measured:
+        yield from _run_validity_cadence(measured["cadence"], f"{path}.measured.cadence")
+
+
+def artifact_run_validity(value: Any, path: str = "runValidity") -> Iterator[str]:
+    """The homogeneous top-level aggregate, retaining every holder's full validity result."""
+    if not isinstance(value, dict):
+        yield f"artifactRunValidity:object at {path}"
+        return
+    if set(value) != ARTIFACT_RUN_VALIDITY_FIELDS:
+        yield f"artifactRunValidity:fields at {path}"
+    yield from _fields(value, "artifactRunValidity", path, {
+        "ok": _bool_or_null,
+        "reasons": _string_list,
+        "policy": lambda item: isinstance(item, dict),
+        "measured": lambda item: isinstance(item, dict),
+        "holders": lambda item: isinstance(item, dict) and bool(item),
+    })
+    policy = value.get("policy")
+    if isinstance(policy, dict):
+        if set(policy) != {"hostKind"}:
+            yield f"artifactRunValidity.policy:fields at {path}.policy"
+        yield from _fields(policy, "artifactRunValidity.policy", f"{path}.policy", {
+            "hostKind": _non_empty_str,
+        })
+    measured = value.get("measured")
+    environment = measured.get("environment") if isinstance(measured, dict) else None
+    if isinstance(measured, dict) and set(measured) != {"environment"}:
+        yield f"artifactRunValidity.measured:fields at {path}.measured"
+    if isinstance(environment, dict):
+        if set(environment) != {"chromeBuild"}:
+            yield f"artifactRunValidity.measured.environment:fields at {path}.measured.environment"
+        yield from _fields(
+            environment, "artifactRunValidity.measured.environment", f"{path}.measured.environment",
+            {"chromeBuild": lambda item: item is None or _non_empty_str(item)},
+        )
+    elif isinstance(measured, dict):
+        yield f"artifactRunValidity.measured.environment:object at {path}.measured.environment"
+    holders = value.get("holders")
+    if not isinstance(holders, dict):
+        return
+    statuses: list[bool | None] = []
+    expected_reasons: list[str] = []
+    holder_builds: list[Any] = []
+    aggregate_host = policy.get("hostKind") if isinstance(policy, dict) else None
+    for name, validity in holders.items():
+        where = f"{path}.holders[{name!r}]"
+        if not _non_empty_str(name):
+            yield f"artifactRunValidity.holderName at {where}"
+        if not isinstance(validity, dict):
+            statuses.append(None)
+            expected_reasons.append(f"{name}: runValidity is missing or malformed")
+            holder_builds.append(None)
+            continue
+        yield from run_validity(validity, where)
+        status = validity.get("ok")
+        statuses.append(status if status is True or status is False else None)
+        reasons = validity.get("reasons")
+        if isinstance(reasons, list):
+            expected_reasons.extend(f"{name}: {reason}" for reason in reasons if _non_empty_str(reason))
+        holder_policy = validity.get("policy")
+        policy_host = holder_policy.get("hostKind") if isinstance(holder_policy, dict) else None
+        if policy_host != aggregate_host:
+            yield f"artifactRunValidity.policy.hostKind at {where}.policy.hostKind"
+        holder_measured = validity.get("measured")
+        holder_environment = holder_measured.get("environment") if isinstance(holder_measured, dict) else None
+        holder_builds.append(
+            holder_environment.get("chromeBuild") if isinstance(holder_environment, dict) else None
+        )
+    expected_ok = (
+        False if False in statuses
+        else True if statuses and all(status is True for status in statuses)
+        else None
+    )
+    if value.get("ok") is not expected_ok:
+        yield f"artifactRunValidity.ok at {path}.ok"
+    if value.get("reasons") != expected_reasons:
+        yield f"artifactRunValidity.reasons at {path}.reasons"
+    expected_build = (
+        holder_builds[0]
+        if holder_builds and all(build == holder_builds[0] for build in holder_builds)
+        else None
+    )
+    aggregate_build = environment.get("chromeBuild") if isinstance(environment, dict) else None
+    if aggregate_build != expected_build:
+        yield f"artifactRunValidity.measured.environment.chromeBuild at {path}.measured.environment.chromeBuild"
+
+
+def _sampler_observer(value: Any, path: str) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"samplerObserver:object at {path}"
+        return
+    yield from _fields(value, "samplerObserver", path, {
+        "installed": lambda item: isinstance(item, bool),
+        "active": lambda item: isinstance(item, bool),
+        "disconnected": lambda item: isinstance(item, bool),
+        "callbacks": _count,
+        "ignored": _count,
+        "failures": _count,
+    })
+
+
+def _read_cost(value: Any, kind: str, path: str) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"{kind}:object at {path}"
+        return
+    yield from _fields(value, kind, path, {
+        "sum": lambda item: _finite(item) and item >= 0,
+        "max": lambda item: _finite(item) and item >= 0,
+    })
+    if _finite(value.get("sum")) is True and _finite(value.get("max")) is True and value["max"] > value["sum"]:
+        yield f"{kind}:maximum at {path}"
+
+
+def _sampler_cost_health(value: Any, path: str) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"samplerCost:object at {path}"
+        return
+    yield from _fields(value, "samplerCost", path, {
+        "installAttempts": _count,
+        "installed": lambda item: isinstance(item, bool),
+        "callbacks": _count,
+        "enterCount": _count,
+        "leaveCount": _count,
+        "active": _count,
+        "accountingComplete": lambda item: isinstance(item, bool),
+    })
+    counts = [value.get(key) for key in ("callbacks", "enterCount", "leaveCount", "active")]
+    if all(_count(count) for count in counts) and isinstance(value.get("installed"), bool) \
+            and isinstance(value.get("accountingComplete"), bool):
+        complete = value["installed"] and value["active"] == 0 \
+            and value["callbacks"] == value["enterCount"] == value["leaveCount"]
+        if value["accountingComplete"] is not complete:
+            yield f"samplerCost.accountingComplete at {path}"
+
+
+def sampler_health(value: Any, path: str = "sampler") -> Iterator[str]:
+    """The stopped sampler's lifecycle, retained-row and observer-accounting record."""
+    if not isinstance(value, dict):
+        yield f"sampler:object at {path}"
+        return
+    yield from _fields(value, "sampler", path, {
+        "schema": lambda item: item is None or item == 2,
+        "meta": lambda item: isinstance(item, dict),
+        "selfCheck": lambda item: isinstance(item, dict),
+    })
+    meta = value.get("meta")
+    missing_meta = value.get("schema") is None
+    if isinstance(meta, dict):
+        meta_fields = {
+            "schema": lambda item: item is None or item == 2,
+            "rafTicks": lambda item: item is None or _count(item),
+            "overflow": lambda item: item is None or _count(item),
+            "errors": lambda item: item is None or _string_list(item),
+            "lastTs": lambda item: item is None or _finite(item),
+            "running": lambda item: item is None or item is False,
+            "startedAt": lambda item: item is None or _finite(item),
+            "stoppedAt": lambda item: item is None or _finite(item),
+            "prepaint": lambda item: item is None or _count(item),
+            "ppMismatch": lambda item: item is None or _count(item),
+            "ppDuplicate": lambda item: item is None or _count(item),
+            "readCostMs": lambda item: item is None or isinstance(item, dict),
+            "prepaintObserver": lambda item: item is None or isinstance(item, dict),
+            "samplerCost": lambda item: item is None or isinstance(item, dict),
+        }
+        for key, valid in meta_fields.items():
+            if key not in meta or meta[key] is None:
+                missing_meta = True
+            elif not valid(meta[key]):
+                yield f"samplerMeta.{key} at {path}.meta"
+        if isinstance(meta.get("readCostMs"), dict):
+            yield from _read_cost(meta["readCostMs"], "samplerReadCost", f"{path}.meta.readCostMs")
+        if isinstance(meta.get("prepaintObserver"), dict):
+            yield from _sampler_observer(meta["prepaintObserver"], f"{path}.meta.prepaintObserver")
+        if isinstance(meta.get("samplerCost"), dict):
+            yield from _sampler_cost_health(meta["samplerCost"], f"{path}.meta.samplerCost")
+    check = value.get("selfCheck")
+    if isinstance(check, dict):
+        yield from _fields(check, "samplerSelfCheck", f"{path}.selfCheck", {
+            "ok": lambda item: isinstance(item, bool),
+            "reasons": _string_list,
+            "rows": _count,
+            "rowsWithPp": _count,
+            "rowsWithoutPp": _count,
+            "seqGaps": _count,
+            "staleMs": _finite_nonnegative_or_null,
+            "periodMs": _finite_nonnegative_or_null,
+            "rafTicks": lambda item: item is None or _count(item),
+            "prepaint": lambda item: item is None or _count(item),
+            "startedAt": lambda item: item is None or _finite(item),
+            "stoppedAt": lambda item: item is None or _finite(item),
+            "prepaintObserver": lambda item: item is None or isinstance(item, dict),
+            "observerAccountingComplete": lambda item: item is None or isinstance(item, bool),
+            "readCostMs": lambda item: item is None or isinstance(item, dict),
+        })
+        if isinstance(check.get("prepaintObserver"), dict):
+            yield from _sampler_observer(check["prepaintObserver"], f"{path}.selfCheck.prepaintObserver")
+        if isinstance(check.get("readCostMs"), dict):
+            yield from _read_cost(check["readCostMs"], "samplerReadCost", f"{path}.selfCheck.readCostMs")
+        reasons = check.get("reasons")
+        ok = check.get("ok")
+        if isinstance(ok, bool) and isinstance(reasons, list) and ok is not (reasons == []):
+            yield f"samplerSelfCheck.ok at {path}.selfCheck.ok"
+        if missing_meta and not (ok is False and isinstance(reasons, list) and bool(reasons)):
+            yield f"samplerHealth.failureState at {path}.selfCheck"
+
+
+def attach_provenance(value: Any, path: str = "environment.attach") -> Iterator[str]:
+    """The disposable headless-Chrome attach launch and exact renderer read-back."""
+    if not isinstance(value, dict):
+        yield f"attachProvenance:object at {path}"
+        return
+    yield from _fields(value, "attachProvenance", path, {
+        "launchArguments": lambda item: isinstance(item, list) and all(isinstance(arg, str) for arg in item),
+        "deviceMetricsResponse": lambda item: isinstance(item, dict),
+        "viewportReadback": lambda item: isinstance(item, dict),
+    })
+    args = value.get("launchArguments")
+    if isinstance(args, list) and "--headless=new" not in args:
+        yield f"attachProvenance.launchArguments:headless at {path}.launchArguments"
+    viewport = value.get("viewportReadback")
+    if isinstance(viewport, dict):
+        yield from _fields(viewport, "attachViewport", f"{path}.viewportReadback", {
+            "innerWidth": lambda item: item == 1920 and _int(item),
+            "innerHeight": lambda item: item == 1080 and _int(item),
+            "devicePixelRatio": lambda item: _finite(item) and item == 1,
+        })
+
+
+def visible_scope(value: Any, path: str = "scope") -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"visibleScope:object at {path}"
+        return
+    if set(value) != {"kind", "pass"}:
+        yield f"visibleScope.fields at {path}"
+    yield from _fields(value, "visibleScope", path, {
+        "kind": lambda item: item == "visible",
+        "pass": lambda item: item in VISIBLE_PASSES,
+    })
+
+
+def validity_holder(value: Any, path: str = "holder", *, attach: bool = False) -> Iterator[str]:
+    """Common Phase-2 holder contract; capture-kind policy remains with the producer."""
+    if not isinstance(value, dict):
+        yield f"validityHolder:object at {path}"
+        return
+    yield from _fields(value, "validityHolder", path, {
+        "hostKind": _non_empty_str,
+        "scope": lambda item: isinstance(item, dict),
+        "runValidity": lambda item: isinstance(item, dict),
+    })
+    costs = value.get("instrumentCost")
+    validity = value.get("runValidity")
+    reasons = validity.get("reasons") if isinstance(validity, dict) else None
+    measured = validity.get("measured") if isinstance(validity, dict) else None
+    missing_cost_reason = isinstance(reasons, list) \
+        and "cost: instrumentCost is missing or malformed" in reasons
+    missing_environment_reason = isinstance(reasons, list) \
+        and "environment: environment is missing or malformed" in reasons
+    environment = value.get("environment")
+    if environment is None:
+        if not missing_environment_reason:
+            yield f"validityHolder.environment:missing at {path}"
+    elif not isinstance(environment, dict):
+        yield f"validityHolder.environment at {path}.environment"
+    if costs is None:
+        if not missing_cost_reason:
+            yield f"validityHolder.instrumentCost:missing at {path}"
+    elif not isinstance(costs, dict):
+        yield f"validityHolder.instrumentCost at {path}.instrumentCost"
+    if isinstance(validity, dict):
+        yield from run_validity(validity, f"{path}.runValidity")
+        policy = validity.get("policy")
+        if isinstance(policy, dict) and policy.get("hostKind") != value.get("hostKind"):
+            yield f"validityHolder.hostKind at {path}.runValidity.policy.hostKind"
+        measured_cost = measured.get("cost") if isinstance(measured, dict) else None
+        if isinstance(measured_cost, dict):
+            missing = measured_cost.get("missingHooks")
+            malformed = measured_cost.get("malformedHooks")
+            if isinstance(costs, dict) and missing == [] and malformed == []:
+                yield from instrument_cost(costs, f"{path}.instrumentCost")
+            expected_hooks = costs if isinstance(costs, dict) else {}
+            if measured_cost.get("hooks") != expected_hooks:
+                yield f"validityHolder.instrumentCost at {path}.runValidity.measured.cost.hooks"
+    scope = value.get("scope")
+    kind = scope.get("kind") if isinstance(scope, dict) else None
+    if isinstance(scope, dict):
+        if kind not in HOLDER_SCOPE_KINDS:
+            yield f"validityHolder.scope.kind at {path}.scope.kind"
+        elif kind == "visible":
+            yield from visible_scope(scope, f"{path}.scope")
+    measured_cost = measured.get("cost") if isinstance(measured, dict) else None
+    missing_values = measured_cost.get("missingHooks") if isinstance(measured_cost, dict) else None
+    malformed_values = measured_cost.get("malformedHooks") if isinstance(measured_cost, dict) else None
+    missing_hooks = {hook for hook in missing_values or [] if isinstance(hook, str)} \
+        if isinstance(missing_values, list) else set()
+    malformed_hooks = {hook for hook in malformed_values or [] if isinstance(hook, str)} \
+        if isinstance(malformed_values, list) else set()
+    pinned = {
+        "full-deck": {"sampler.tick": True, "paint.prePaint": True},
+        "pass-g-destination": {"sampler.tick": True, "paint.prePaint": True},
+        "advance-leg": {"sampler.tick": True, "paint.prePaint": True},
+        "carry-cover": {"sampler.tick": True, "paint.prePaint": False},
+        "visible": {"sampler.tick": False, "paint.prePaint": False},
+    }
+    if isinstance(costs, dict):
+        expected_applicability = {"frame.total": True, **pinned.get(kind, {})}
+        for hook, applicable in expected_applicability.items():
+            if hook in missing_hooks or hook in malformed_hooks:
+                continue
+            row = costs.get(hook)
+            if not isinstance(row, dict) or row.get("applicable") is not applicable:
+                yield f"validityHolder.scope.applicability at {path}.instrumentCost[{hook!r}]"
+    if kind == "replay" and isinstance(validity, dict) and validity.get("ok") is True:
+        yield f"validityHolder.replay.ok at {path}.runValidity.ok"
+    if kind == "visible" and "sampler" in value:
+        yield f"visibleHolder.sampler at {path}.sampler"
+    elif kind in FULL_SAMPLER_SCOPE_KINDS and "sampler" not in value:
+        yield f"validityHolder.sampler:missing at {path}"
+    elif "sampler" in value:
+        sampler = value["sampler"]
+        if sampler is None:
+            has_reason = isinstance(reasons, list) and bool(reasons)
+            tick = costs.get("sampler.tick") if isinstance(costs, dict) else None
+            full_sampler_failure = (
+                isinstance(tick, dict) and tick.get("installed") is False
+                or costs is None and missing_cost_reason
+            )
+            if not has_reason or kind in FULL_SAMPLER_SCOPE_KINDS and not (
+                    full_sampler_failure and isinstance(validity, dict) and validity.get("ok") is not True):
+                yield f"validityHolder.sampler at {path}.sampler"
+        else:
+            yield from sampler_health(sampler, f"{path}.sampler")
+    if attach:
+        environment = value.get("environment")
+        provenance = environment.get("attach") if isinstance(environment, dict) else None
+        yield from attach_provenance(provenance, f"{path}.environment.attach")
+        if value.get("hostKind") != "headless Chrome":
+            yield f"attachProvenance.hostKind at {path}.hostKind"
 
 
 STAGE_MAP_FIELDS = {

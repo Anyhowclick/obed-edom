@@ -22,13 +22,16 @@ from typing import Any, Callable
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+PB_REPO = REPO.parent / "stage-b-pb"
 for sub in ("scripts", "src"):
     if str(REPO / sub) not in sys.path:
         sys.path.insert(0, str(REPO / sub))
 
 import binary_counter_movie as binary_counter  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
+import live_run_validity  # noqa: E402
 import mm_feed_instrument  # noqa: E402
+import paint_instrument  # noqa: E402
 from obed_edom import p2_verdict  # noqa: E402
 
 LEGAL = {c["name"]: c for c in json.loads((REPO / "tests/fixtures/live_continuity/contract/legal.json").read_text())["cases"]}
@@ -56,6 +59,16 @@ def _load_probe():
 
 
 probe = _load_probe()
+
+
+def _load_phase_2_probe():
+    path = PB_REPO / "scripts" / "live_continuity_probe.py"
+    if not path.exists():
+        pytest.skip("the phase-2 P-b worktree is unavailable")
+    spec = importlib.util.spec_from_file_location("phase_2_live_continuity_probe", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 CHECKS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "rows": lambda case: contract.sample_rows(case["record"], schema=case.get("schema")),
@@ -235,7 +248,8 @@ def test_each_clause_rejects_its_violation(base: str, mutate: Callable[[Any], An
 
 
 def _node(script: str) -> Any:
-    node = shutil.which("node")
+    pinned = Path.home() / ".nvm/versions/node/v16.0.0/bin/node"
+    node = str(pinned) if pinned.is_file() else shutil.which("node")
     if node is None:
         pytest.skip("node is not available")
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
@@ -601,6 +615,18 @@ def test_v3_mm_feed_contract_counts_unplanned_contexts_and_removes_v2_exemption(
     ]
 
 
+def test_attempt_3_legacy_feed_reports_keep_the_frozen_error_inventory() -> None:
+    saved = REPO / "output/evidence/stage-b-2026-10-13/q7-attempt3/Alpha/runs/feed-20261015-150437.json"
+    if not saved.exists():
+        pytest.skip("attempt-3 evidence link is unavailable")
+    sessions = json.loads(saved.read_text())["sessions"]
+    assert [session["session"] for session in sessions] == ["feed", "feed-off"]
+    assert [
+        len(list(contract.mm_feed_report(session["feedEvidence"]["producer"])))
+        for session in sessions
+    ] == [222, 197]
+
+
 def test_feed_hook_health_contract_rejects_false_complete_and_uninstalled_accounting_mutants() -> None:
     health = _feed_hook_health()
     assert list(contract.feed_hook_health(health)) == []
@@ -644,6 +670,454 @@ def test_instrument_cost_contract_matches_the_canonical_hook_row_grammar() -> No
     }
     assert "instrumentCost.frame.total:applicable" in [
         problem.split(" at ")[0] for problem in contract.instrument_cost(costs)
+    ]
+
+
+def _instrument_cost(*, visible: bool = False) -> dict[str, dict[str, Any]]:
+    hooks = {
+        hook: {"installed": True, "count": 1, "chunks": [[1.0]]}
+        for hook in contract.INSTRUMENT_COST_HOOKS if hook != "frame.total"
+    }
+    recording = {
+        "version": 1, "stopped": True, "errors": [], "hooks": hooks,
+        "frames": {"count": 1, "chunks": [[2.0]]},
+    }
+    applicability = {
+        hook: hook == "frame.total" or not visible and hook in ("sampler.tick", "paint.prePaint")
+        for hook in contract.INSTRUMENT_COST_HOOKS
+    }
+    return paint_instrument.summarize_instrument_cost(recording, applicability)
+
+
+def _environment() -> dict[str, Any]:
+    observation = {
+        "at": 1.0, "loadAverage": [0.1, 0.2, 0.3], "uptime": "up 1 day",
+        "chromeCounts": {"owned": 1, "foreign": 0},
+    }
+    return {
+        "qualificationIdentity": live_run_validity.HOST_HEADLESS_CHROME,
+        "gitHead": "a" * 40,
+        "browserVersion": {"product": "HeadlessChrome/155.0.8059.80"},
+        "observations": {key: copy.deepcopy(observation) for key in ("before", "during", "after")},
+    }
+
+
+def _run_validity(*, visible: bool = False) -> dict[str, Any]:
+    capture = {
+        "hostKind": live_run_validity.HOST_HEADLESS_CHROME,
+        "instrumentCost": _instrument_cost(visible=visible),
+        "environment": _environment(),
+        "scope": {"kind": "visible", "pass": "V"} if visible else {"kind": "full-deck"},
+        "samples": [] if visible else [
+            {"ts": 1.0, "scene": 1, "playerState": "IdleAtFinalState", "busy": False},
+            {"ts": 17.0, "scene": 1, "playerState": "IdleAtFinalState", "busy": False},
+        ],
+    }
+    return live_run_validity.run_validity(
+        capture, live_run_validity.qualification(live_run_validity.HOST_HEADLESS_CHROME), gl_intervals=[],
+    )
+
+
+def _validity_capture() -> dict[str, Any]:
+    return {
+        "hostKind": live_run_validity.HOST_HEADLESS_CHROME,
+        "environment": _environment(),
+        "scope": {"kind": "full-deck"},
+        "samples": [
+            {"ts": 1.0, "scene": 1, "playerState": "IdleAtFinalState", "busy": False},
+            {"ts": 17.0, "scene": 1, "playerState": "IdleAtFinalState", "busy": False},
+        ],
+    }
+
+
+def _sampler_record() -> dict[str, Any]:
+    observer = {
+        "installed": True, "active": False, "disconnected": True,
+        "callbacks": 1, "ignored": 0, "failures": 0,
+    }
+    read_cost = {"sum": 0.25, "max": 0.25}
+    return {
+        "schema": 2,
+        "meta": {
+            "schema": 2, "rafTicks": 1, "overflow": 0, "errors": [], "lastTs": 10.0,
+            "running": False, "startedAt": 1.0, "stoppedAt": 11.0, "prepaint": 1,
+            "ppMismatch": 0, "ppDuplicate": 0, "readCostMs": read_cost,
+            "prepaintObserver": observer,
+            "samplerCost": {
+                "installAttempts": 1, "installed": True, "callbacks": 1,
+                "enterCount": 1, "leaveCount": 1, "active": 0, "accountingComplete": True,
+            },
+        },
+        "selfCheck": {
+            "ok": True, "reasons": [], "rows": 1, "rowsWithPp": 1, "rowsWithoutPp": 0,
+            "seqGaps": 0, "staleMs": 1.0, "periodMs": None, "rafTicks": 1, "prepaint": 1,
+            "startedAt": 1.0, "stoppedAt": 11.0, "prepaintObserver": observer,
+            "observerAccountingComplete": True, "readCostMs": read_cost,
+        },
+    }
+
+
+@pytest.mark.parametrize("failure", ["absent", "malformed", "missing"])
+def test_real_unproven_cost_results_are_contract_valid(failure: str) -> None:
+    capture = _validity_capture()
+    costs = _instrument_cost()
+    if failure == "malformed":
+        costs["feed.draw"] = {"bad": True}
+        capture["instrumentCost"] = costs
+    elif failure == "missing":
+        costs.pop("feed.draw")
+        capture["instrumentCost"] = costs
+    result = live_run_validity.run_validity(
+        capture, live_run_validity.qualification(live_run_validity.HOST_HEADLESS_CHROME), gl_intervals=[],
+    )
+    holder = {**capture, "sampler": _sampler_record(), "runValidity": result}
+    assert result["ok"] is None
+    assert list(contract.validity_holder(holder)) == []
+
+
+def _failed_sampler_record(meta: dict[str, Any], schema: Any = 2) -> dict[str, Any]:
+    read_now = meta.get("stoppedAt") if isinstance(meta.get("stoppedAt"), (int, float)) else float("inf")
+    return {
+        "schema": schema,
+        "meta": meta,
+        "selfCheck": paint_instrument.sampler_self_check([], meta, read_now=read_now, max_gap_frames=3),
+    }
+
+
+def test_sampler_failure_records_are_contract_valid_unproven_evidence() -> None:
+    last_ts_missing = copy.deepcopy(_sampler_record()["meta"])
+    last_ts_missing.update(lastTs=None, rafTicks=0, prepaint=0)
+    last_ts_missing["prepaintObserver"]["callbacks"] = 0
+    last_ts_missing["samplerCost"].update(callbacks=0, enterCount=0, leaveCount=0)
+    assert list(contract.sampler_health(_failed_sampler_record(last_ts_missing))) == []
+    assert list(contract.sampler_health(_failed_sampler_record({}, schema=None))) == []
+
+
+@pytest.mark.parametrize(("ok", "reasons"), [
+    pytest.param(False, [], id="false-without-reasons"),
+    pytest.param(True, ["failure"], id="true-with-reasons"),
+])
+def test_sampler_self_check_ok_exactly_matches_empty_reasons(ok: bool, reasons: list[str]) -> None:
+    sampler = _sampler_record()
+    sampler["selfCheck"].update(ok=ok, reasons=reasons)
+    assert "samplerSelfCheck.ok" in [
+        problem.split(" at ")[0] for problem in contract.sampler_health(sampler)
+    ]
+
+
+def test_missing_sampler_fields_require_a_failed_self_check() -> None:
+    sampler = _sampler_record()
+    sampler["meta"].pop("lastTs")
+    assert "samplerHealth.failureState" in [
+        problem.split(" at ")[0] for problem in contract.sampler_health(sampler)
+    ]
+
+
+def test_null_sampler_requires_an_unproven_validity_reason() -> None:
+    capture = _validity_capture()
+    capture["instrumentCost"] = _instrument_cost()
+    capture["instrumentCost"]["sampler.tick"] = {
+        "applicable": True, "installed": False, "count": 0,
+        "p95": None, "max": None, "overBudget": 0,
+    }
+    validity = live_run_validity.run_validity(
+        capture, live_run_validity.qualification(live_run_validity.HOST_HEADLESS_CHROME), gl_intervals=[],
+    )
+    holder = {**capture, "sampler": None, "runValidity": validity}
+    assert validity["ok"] is None
+    assert validity["reasons"]
+    assert list(contract.validity_holder(holder)) == []
+
+    validity["reasons"] = []
+    assert "validityHolder.sampler" in [
+        problem.split(" at ")[0] for problem in contract.validity_holder(holder)
+    ]
+
+
+def test_null_sampler_rejects_a_measured_installed_sampler_tick() -> None:
+    holder = _holder()
+    row = {
+        "applicable": True, "installed": True, "count": 3,
+        "p95": 1.0, "max": 1.0, "overBudget": 0,
+    }
+    holder["instrumentCost"]["sampler.tick"] = copy.deepcopy(row)
+    holder["runValidity"]["measured"]["cost"]["hooks"]["sampler.tick"] = copy.deepcopy(row)
+    holder["sampler"] = None
+    assert holder["runValidity"]["ok"] is not True
+    assert "validityHolder.sampler" in [
+        problem.split(" at ")[0] for problem in contract.validity_holder(holder)
+    ]
+
+
+def test_real_phase_2_failure_paths_are_contract_valid_unproven_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    phase_2_probe = _load_phase_2_probe()
+    advance = phase_2_probe.run_advance_leg(
+        None, 1, 2, [], {}, host_kind=phase_2_probe.HOST_HEADLESS_CHROME, continuous_expected=True,
+    )
+    assert "environment: environment is missing or malformed" in advance["runValidity"]["reasons"]
+    assert list(contract.validity_holder(advance)) == []
+
+    class FailingVisibleHost:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("environment unavailable")
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(phase_2_probe, "force_viewport", lambda *args: None)
+    monkeypatch.setattr(phase_2_probe, "slide_instances_of", lambda plan: [])
+    monkeypatch.setattr(phase_2_probe, "LiveOutputHost", FailingVisibleHost)
+    visible = phase_2_probe.run_visible_pass(
+        "V", Path("."), [], None, (1920, 1080), {}, Path("."),
+    )
+    assert "environment: environment is missing or malformed" in visible["runValidity"]["reasons"]
+    assert list(contract.validity_holder(visible)) == []
+
+
+def test_unknown_host_without_cost_is_a_contract_valid_unproven_result() -> None:
+    result = live_run_validity.run_validity(
+        {"hostKind": "unknown", "scope": {"kind": "replay"}}, None, gl_intervals=[],
+    )
+    assert result["policy"].get("hostKind") is None
+    assert result["measured"]["cost"]["hooks"] == {}
+    assert list(contract.run_validity(result)) == []
+
+
+def _holder(*, visible: bool = False, attach: bool = False) -> dict[str, Any]:
+    environment = _environment()
+    if attach:
+        environment["attach"] = {
+            "launchArguments": ["--headless=new", "--remote-debugging-port=0"],
+            "deviceMetricsResponse": {},
+            "viewportReadback": {"innerWidth": 1920, "innerHeight": 1080, "devicePixelRatio": 1},
+        }
+    holder = {
+        "hostKind": live_run_validity.HOST_HEADLESS_CHROME,
+        "scope": {"kind": "visible", "pass": "V"} if visible else {"kind": "full-deck"},
+        "environment": environment,
+        "instrumentCost": _instrument_cost(visible=visible),
+        "runValidity": _run_validity(visible=visible),
+    }
+    if not visible:
+        holder["sampler"] = _sampler_record()
+    return holder
+
+
+def _artifact_validity(holders: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    statuses = [holder["runValidity"]["ok"] for holder in holders.values()]
+    validities = {name: copy.deepcopy(holder["runValidity"]) for name, holder in holders.items()}
+    host_kind = next(iter(validities.values()))["policy"]["hostKind"]
+    builds = [validity["measured"]["environment"]["chromeBuild"] for validity in validities.values()]
+    chrome_build = builds[0] if builds and all(build == builds[0] for build in builds) else None
+    return {
+        "ok": False if False in statuses else True if all(status is True for status in statuses) else None,
+        "reasons": [
+            f"{name}: {reason}"
+            for name, holder in holders.items()
+            for reason in holder["runValidity"]["reasons"]
+        ],
+        "policy": {"hostKind": host_kind},
+        "measured": {"environment": {"chromeBuild": chrome_build}},
+        "holders": validities,
+    }
+
+
+def test_phase_2_holder_contract_accepts_actual_validity_sampler_attach_and_visible_shapes() -> None:
+    ordinary = _holder()
+    assert list(contract.run_validity(ordinary["runValidity"])) == []
+    assert list(contract.sampler_health(ordinary["sampler"])) == []
+    assert list(contract.validity_holder(ordinary)) == []
+
+    attached = _holder(attach=True)
+    assert list(contract.attach_provenance(attached["environment"]["attach"])) == []
+    assert list(contract.validity_holder(attached, attach=True)) == []
+
+    visible = _holder(visible=True)
+    assert list(contract.visible_scope(visible["scope"])) == []
+    assert list(contract.validity_holder(visible)) == []
+
+    aggregate = _artifact_validity({"arm.A": ordinary, "visible.V": visible})
+    assert list(contract.artifact_run_validity(aggregate)) == []
+
+
+def test_artifact_validity_accepts_unusable_holder_as_unknown() -> None:
+    aggregate = _artifact_validity({"arm.A": _holder()})
+    aggregate["holders"]["arm.missing"] = None
+    aggregate["ok"] = None
+    aggregate["reasons"].append("arm.missing: runValidity is missing or malformed")
+    aggregate["measured"]["environment"]["chromeBuild"] = None
+    assert list(contract.artifact_run_validity(aggregate)) == []
+
+    aggregate["reasons"][-1] = "arm.missing: unavailable"
+    assert "artifactRunValidity.reasons" in [
+        problem.split(" at ")[0] for problem in contract.artifact_run_validity(aggregate)
+    ]
+
+
+@pytest.mark.parametrize("host_kind", [
+    live_run_validity.HOST_HEADLESS_CHROME,
+    live_run_validity.HOST_QUALIFIED_CHROME_ATTACH,
+    live_run_validity.HOST_MANAGED_OBS_25,
+    live_run_validity.HOST_MANAGED_OBS_30,
+])
+def test_run_validity_contract_accepts_every_actual_host_policy(host_kind: str) -> None:
+    policy = live_run_validity.qualification(host_kind)
+    assert policy is not None
+    environment = _environment()
+    environment["qualificationIdentity"] = host_kind
+    if policy["engine"] == "cef":
+        environment.update(
+            obsVersion=policy["obsVersion"],
+            outputRate={"configuredHz": policy["outputHz"], "observedHz": policy["outputHz"]},
+            browserSourceRate={
+                "configuredHz": policy["browserSourceHz"], "settingHz": policy["browserSourceHz"],
+            },
+        )
+    result = live_run_validity.run_validity({
+        "hostKind": host_kind, "instrumentCost": _instrument_cost(visible=True),
+        "environment": environment, "scope": {"kind": "visible", "pass": "V"},
+    }, policy, gl_intervals=[])
+    assert list(contract.run_validity(result)) == []
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    pytest.param(lambda h: h["runValidity"]["policy"].pop("status"), "runValidity.policy.status:missing",
+                 id="validity-policy"),
+    pytest.param(lambda h: h["runValidity"]["measured"].pop("cadence"), "runValidity.measured.cadence:missing",
+                 id="validity-measured"),
+    pytest.param(lambda h: h["runValidity"]["measured"]["cost"]["hooks"].pop("feed.draw"),
+                 "instrumentCost.hooks", id="validity-cost-hooks"),
+    pytest.param(lambda h: h["runValidity"]["measured"]["cost"]["missingHooks"].append("unknown"),
+                 "runValidity.measured.cost.missingHooks", id="validity-cost-missing-subset"),
+    pytest.param(lambda h: h["runValidity"]["measured"]["cost"]["malformedHooks"].append("unknown"),
+                 "runValidity.measured.cost.malformedHooks", id="validity-cost-malformed-subset"),
+    pytest.param(lambda h: h["sampler"]["meta"]["prepaintObserver"].pop("disconnected"),
+                 "samplerObserver.disconnected:missing", id="sampler-lifecycle"),
+    pytest.param(lambda h: h["sampler"]["selfCheck"].pop("observerAccountingComplete"),
+                 "samplerSelfCheck.observerAccountingComplete:missing", id="sampler-accounting"),
+    pytest.param(lambda h: h["sampler"]["meta"]["samplerCost"].update(accountingComplete=False),
+                 "samplerCost.accountingComplete", id="sampler-cost-accounting"),
+])
+def test_phase_2_holder_contract_rejects_policy_measured_and_sampler_mutants(
+    mutate: Callable[[dict[str, Any]], Any], clause: str,
+) -> None:
+    holder = _holder()
+    mutate(holder)
+    assert clause in [problem.split(" at ")[0] for problem in contract.validity_holder(holder)]
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    pytest.param(lambda a: a["holders"]["arm.A"].pop("measured"),
+                 "runValidity.measured:missing", id="child-measurements"),
+    pytest.param(lambda a: a.update(ok=True), "artifactRunValidity.ok", id="aggregate-status"),
+    pytest.param(lambda a: a.update(reasons=[]), "artifactRunValidity.reasons", id="aggregate-reasons"),
+    pytest.param(lambda a: a["policy"].update(hostKind=live_run_validity.HOST_QUALIFIED_CHROME_ATTACH),
+                 "artifactRunValidity.policy.hostKind", id="aggregate-host"),
+    pytest.param(lambda a: a["measured"]["environment"].update(chromeBuild="wrong"),
+                 "artifactRunValidity.measured.environment.chromeBuild", id="aggregate-build"),
+    pytest.param(lambda a: a["holders"]["arm.B"]["measured"]["environment"].update(chromeBuild="mixed"),
+                 "artifactRunValidity.measured.environment.chromeBuild", id="aggregate-build-on-mixed-holders"),
+    pytest.param(lambda a: a.pop("policy"), "artifactRunValidity.policy:missing", id="aggregate-policy-missing"),
+    pytest.param(lambda a: a.update(hostKind=live_run_validity.HOST_HEADLESS_CHROME),
+                 "artifactRunValidity:fields", id="top-level-host-kind-rejected"),
+])
+def test_phase_2_artifact_validity_rejects_aggregate_mutants(
+    mutate: Callable[[dict[str, Any]], Any], clause: str,
+) -> None:
+    ordinary = _holder()
+    aggregate = _artifact_validity({"arm.A": ordinary, "arm.B": _holder()})
+    if clause == "artifactRunValidity.reasons":
+        aggregate["holders"]["arm.A"]["reasons"] = ["cost"]
+        aggregate["reasons"] = ["arm.A: cost"]
+    mutate(aggregate)
+    assert clause in [problem.split(" at ")[0] for problem in contract.artifact_run_validity(aggregate)]
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    pytest.param(lambda h: h["environment"]["attach"]["launchArguments"].remove("--headless=new"),
+                 "attachProvenance.launchArguments:headless", id="not-headless"),
+    pytest.param(lambda h: h["environment"]["attach"].pop("deviceMetricsResponse"),
+                 "attachProvenance.deviceMetricsResponse:missing", id="no-device-response"),
+    pytest.param(lambda h: h["environment"]["attach"]["viewportReadback"].update(innerWidth=1919),
+                 "attachViewport.innerWidth", id="wrong-width"),
+])
+def test_phase_2_attach_contract_rejects_provenance_mutants(
+    mutate: Callable[[dict[str, Any]], Any], clause: str,
+) -> None:
+    holder = _holder(attach=True)
+    mutate(holder)
+    assert clause in [problem.split(" at ")[0] for problem in contract.validity_holder(holder, attach=True)]
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    pytest.param(lambda h: h["scope"].update(pass_="V"), "visibleScope.fields", id="extra-field"),
+    pytest.param(lambda h: h["scope"].__setitem__("pass", "X"), "visibleScope.pass", id="unknown-pass"),
+    pytest.param(lambda h: h["instrumentCost"]["sampler.tick"].update(applicable=True, installed=True),
+                 "validityHolder.scope.applicability", id="sampler-applicable"),
+])
+def test_phase_2_visible_holder_contract_rejects_scope_and_applicability_mutants(
+    mutate: Callable[[dict[str, Any]], Any], clause: str,
+) -> None:
+    holder = _holder(visible=True)
+    mutate(holder)
+    assert clause in [problem.split(" at ")[0] for problem in contract.validity_holder(holder)]
+
+
+def _set_holder_hook_applicability(holder: dict[str, Any], hook: str, applicable: bool) -> None:
+    row = {
+        "applicable": applicable, "installed": applicable, "count": 1 if applicable else 0,
+        "p95": 1.0 if applicable else None, "max": 1.0 if applicable else None, "overBudget": 0,
+    }
+    holder["instrumentCost"][hook] = row
+    holder["runValidity"]["measured"]["cost"]["hooks"][hook] = copy.deepcopy(row)
+
+
+def _scoped_holder(kind: str) -> dict[str, Any]:
+    holder = _holder(visible=kind == "visible")
+    holder["scope"] = {
+        "kind": kind,
+        **({"pass": "V"} if kind == "visible" else {}),
+        **({"fromOrdinal": 1, "toOrdinal": 2} if kind in ("pass-g-destination", "advance-leg") else {}),
+    }
+    if kind == "carry-cover":
+        _set_holder_hook_applicability(holder, "paint.prePaint", False)
+    return holder
+
+
+@pytest.mark.parametrize(("kind", "mutate", "clause"), [
+    pytest.param("full-deck", lambda h: _set_holder_hook_applicability(h, "sampler.tick", False),
+                 "validityHolder.scope.applicability", id="full-deck"),
+    pytest.param("pass-g-destination", lambda h: _set_holder_hook_applicability(h, "paint.prePaint", False),
+                 "validityHolder.scope.applicability", id="pass-g-destination"),
+    pytest.param("advance-leg", lambda h: h.pop("sampler"),
+                 "validityHolder.sampler:missing", id="advance-leg"),
+    pytest.param("carry-cover", lambda h: _set_holder_hook_applicability(h, "paint.prePaint", True),
+                 "validityHolder.scope.applicability", id="carry-cover"),
+    pytest.param("visible", lambda h: _set_holder_hook_applicability(h, "sampler.tick", True),
+                 "validityHolder.scope.applicability", id="visible"),
+    pytest.param("replay", lambda h: h["runValidity"].update(ok=True),
+                 "validityHolder.replay.ok", id="replay"),
+])
+def test_scope_kind_pins_applicability_and_live_qualification(
+    kind: str, mutate: Callable[[dict[str, Any]], Any], clause: str,
+) -> None:
+    holder = _scoped_holder(kind)
+    assert list(contract.validity_holder(holder)) == []
+    mutate(holder)
+    assert clause in [problem.split(" at ")[0] for problem in contract.validity_holder(holder)]
+
+
+def test_scope_rejects_unknown_kind_but_leaves_feed_applicability_fact_driven() -> None:
+    holder = _scoped_holder("visible")
+    _set_holder_hook_applicability(holder, "feed.rvfc", True)
+    assert list(contract.validity_holder(holder)) == []
+
+    holder["scope"] = {"kind": "unknown"}
+    assert "validityHolder.scope.kind" in [
+        problem.split(" at ")[0] for problem in contract.validity_holder(holder)
     ]
 
 
