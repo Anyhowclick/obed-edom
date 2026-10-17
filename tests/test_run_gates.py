@@ -30,7 +30,8 @@ an events file and behaves per `STUB_MODES` (artifact/out-dir stem -> mode):
   shape), `pc-unfired`, `pc-control` (another control's artifact), `pc-no-<field>` (a recorder field deleted);
 - `red-ok` / `red-noself` (host red run) write a matching red artifact (paintFloor 60) with one `endOfShow` paint
   census entry / the same with no `sampler.selfCheck`; `red-floor` / `red-nofloor` the same with a paintFloor above the
-  red carry's longest run / with no paintFloor.
+  red carry's longest run / with no paintFloor;
+- `build-mixed` / `build-missing` record a different exact Chrome build / omit it from an artifact carrying validity.
 
 What is pinned here:
 - a non-empty (or non-directory) `<outdir>` is refused before anything runs, so nothing from an
@@ -48,6 +49,8 @@ What is pinned here:
   positive freeze-bracket arms (and refused on those), and the `Freeze bracket:` header checked;
 - `--tier dev` runs the 1920x1080 + 1600x1000 host gates and three P2 arms, says DEV loudly and
   exits 10 on a pass (never 0);
+- the end-of-round Chrome-build pass retains one homogeneous exact build, rejects mixed or missing builds on artifacts
+  carrying `runValidity`, and prints P2 adversarial artifacts as validity-N/A without invalidating the round;
 - killing the queue owner (TERM/INT/HUP) leaves none of the queued runs or their children behind;
 - `GATE_JOBS` outside 1..5 is refused before anything is launched, and above 3 warns loudly;
 - the H.264 pattern cache is prewarmed (and logged) before the first timed run, and a round refuses to start (exit 2)
@@ -154,7 +157,12 @@ def gate_meta():
     return {"groundTruth": {"planSha256": plan, "verdicts": []}}
 
 def validity():
-    return {"runValidity": {"ok": True, "reasons": [], "policy": {"hostKind": "headless Chrome"}}}
+    mode = mode_of(Path(arg("--artifact")).stem)
+    environment = {} if mode == "build-missing" else {
+        "chromeBuild": "155.0.8059.81" if mode == "build-mixed" else "155.0.8059.80",
+    }
+    return {"runValidity": {"ok": True, "reasons": [], "policy": {"hostKind": "headless Chrome"},
+                            "measured": {"environment": environment}}}
 
 artifact = Path(arg("--artifact"))
 stem = artifact.stem
@@ -277,6 +285,7 @@ given = (arg("--skip-arms") or "").split(",")
 skip = [] if mode == "ignore-skip" else [n for n in ("A", "B", "C", "V", "Voff", "attach") if n in given]
 d = {
     **gate_meta(),
+    **validity(),
     "status": "pass", "skippedArms": skip,
     "arms": {n: {} for n in ("A", "B", "C") if n not in skip and not (mode == "lose-A" and n == "A")},
     "visible": {n: {} for n in ("V", "Voff") if n not in skip},
@@ -312,6 +321,9 @@ print(f"success: **{not red}**")
 print("Source unchanged: **True**")
 for i in ids:
     print(f"- {i}: **{i not in red}**")
+report = out / "gl-replay" / "report.json" if auto else out / "report.json"
+report.parent.mkdir(parents=True, exist_ok=True)
+report.write_text(json.dumps({"kind": "p2-adversarial"}))
 sys.exit(1 if red else 0)
 '''
 
@@ -1212,6 +1224,39 @@ def test_the_dev_tier_runs_its_subset_and_a_pass_exits_10(gates) -> None:
     assert "DONE tier=dev failed=0 pending=0 findings=0" in done.stdout
     assert done.stdout.count("-> MATCH") == 3, done.stdout
     assert done.returncode == 10, done.stdout
+
+
+def test_round_build_null_keeps_the_exact_build_and_p2_is_validity_na(gates) -> None:
+    done = gates["run"](
+        "--tier", "dev", GATE_JOBS="1",
+        STUB_MODES=json.dumps({_p2_name(a): "report" for a in DEV_P2_ARMS}),
+        STUB_P2_RED=_dev_red(),
+    )
+
+    assert done.returncode == 10, done.stdout
+    assert "ROUND BUILD MATCH: chromeBuild=155.0.8059.80" in done.stdout
+    assert done.stdout.count("build not recorded (validity N/A)") == len(DEV_P2_ARMS)
+    assert "GATE FAILED: round Chrome build" not in done.stdout
+
+
+@pytest.mark.parametrize(
+    ("mode", "line"),
+    [
+        ("build-mixed", "ROUND BUILD INVALID: mixed exact chromeBuild values:"),
+        ("build-missing", "MISSING: runValidity.measured.environment.chromeBuild"),
+    ],
+)
+def test_round_build_mutants_invalidate_the_dev_round(gates, mode: str, line: str) -> None:
+    modes = {_p2_name(a): "report" for a in DEV_P2_ARMS}
+    modes["host-1600x1000"] = mode
+    done = gates["run"](
+        "--tier", "dev", GATE_JOBS="1", STUB_MODES=json.dumps(modes), STUB_P2_RED=_dev_red(),
+    )
+
+    assert done.returncode == 1, done.stdout
+    assert line in done.stdout
+    assert done.stdout.count("GATE FAILED: round Chrome build") == 1
+    assert done.stdout.rstrip().splitlines()[-1] == "## DEV TIER -- NOT A QUALIFICATION PASS (exit 1) ##"
 
 
 def test_known_bad_a_dev_round_with_a_failure_exits_1_and_still_says_dev(gates) -> None:
