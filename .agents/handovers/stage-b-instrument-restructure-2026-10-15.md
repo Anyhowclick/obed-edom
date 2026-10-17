@@ -7,6 +7,8 @@ and `alpha-b3to4-stall-2026-10-15.md`.
 
 ## Resume here
 
+**SUPERSEDED 2026-10-17:** resume from `stage-b-c2-integration-2026-10-17.md`. The sections below are history; the owner-decision log further down still applies.
+
 **Where things are** (`claude/stage-b-arch` @ `3cc337f5` + this handover, pushed)
 - Merged 2026-10-16: C2 offline validity, gate 4 historical inventory, the Chrome rule (any 155.x, one build per round;
   plan §4 amended), the Chrome 155.0.8059.80 requal record, **C1** (`33cb7729`), the MM-FEED diagnosis (`ab2553ea`) and
