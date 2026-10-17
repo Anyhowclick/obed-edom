@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from itertools import islice
 from typing import Any, Iterable, Iterator
 
@@ -41,6 +42,7 @@ PAGE_ERROR_NOTE_KINDS = re.compile(r"^player-build-error$")
 CARRY_COVER_NOTE_KINDS = re.compile(r"^(bridge-motion-start|bridge-clock)$")
 MM_FEED_NOTE_KINDS = re.compile(r"^(mm-feed-|feed-|poster-)")
 CARRY_COVER_TICKS = 4096
+SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 REFUSE_VIAS = frozenset({"stash", "remount", "src-clear", "removeAttribute", "reuse"})
 ZONE_FROM = frozenset({"pending", "armed", "released"})
 ZONE_TO = frozenset({"armed", "released", "retired"})
@@ -252,6 +254,15 @@ def _finite_nonnegative_or_null(value: Any) -> bool:
 
 def _string_list(value: Any) -> bool:
     return isinstance(value, list) and all(_non_empty_str(item) for item in value)
+
+
+def _sha256(value: Any) -> bool:
+    return isinstance(value, str) and SHA256_HEX.fullmatch(value) is not None
+
+
+def _exact_fields(value: dict[str, Any], expected: frozenset[str], kind: str, path: str) -> Iterator[str]:
+    if set(value) != expected:
+        yield f"{kind}:fields at {path}"
 
 
 def _run_validity_policy(value: Any, path: str) -> Iterator[str]:
@@ -1352,7 +1363,307 @@ def _counter_read(levels: Any, counter: Any, reason: Any, counter_layout: Any, p
         yield f"mmFeed.counterBinding at {path}"
 
 
-def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
+DEPARTURE_PIXEL_FIELDS = frozenset({
+    "entryId", "visit", "contextSerial", "decoderId", "atScene", "startMs", "hideMs", "firstDrawMs",
+    "roi", "frames", "references", "expectedTicks", "deliveredTicks", "missingTicks", "ambiguousFrames",
+    "exposedFrames",
+})
+DEPARTURE_PIXEL_FRAME_FIELDS = frozenset({"t", "tick", "sha256", "path", "distances"})
+DEPARTURE_PIXEL_DISTANCE_FIELDS = frozenset({"lastDecoder", "poster", "background"})
+DEPARTURE_PIXEL_PAIRWISE_FIELDS = frozenset({
+    "lastDecoder_poster", "lastDecoder_background", "poster_background",
+})
+PIXEL_VERDICT_FIELDS = frozenset({"verdict", "reason", "coverageComplete", "exposedFrameCount"})
+PIXEL_THRESHOLD_FIELDS = frozenset({"margin", "redMin", "provenance"})
+ONE_FRAME_POSTER_FIELDS = frozenset({
+    "fired", "entryId", "frameN", "rafTimestamp", "contextSerial", "firstDrawFrameIndex",
+})
+
+
+def _pixel_identity(value: Any) -> bool:
+    return _int(value) or _non_empty_str(value)
+
+
+def departure_pixels(value: Any, path: str = "departurePixels") -> Iterator[str]:
+    """One discovery-only departure pixel record from the frozen Stage B shape."""
+    if not isinstance(value, dict):
+        yield f"departurePixels:object at {path}"
+        return
+    yield from _exact_fields(value, DEPARTURE_PIXEL_FIELDS, "departurePixels", path)
+    yield from _fields(value, "departurePixels", path, {
+        "entryId": _pixel_identity,
+        "visit": _pixel_identity,
+        "contextSerial": _pixel_identity,
+        "decoderId": _pixel_identity,
+        "atScene": _pixel_identity,
+        "startMs": lambda v: _finite(v) and v >= 0,
+        "hideMs": lambda v: _finite(v) and v >= 0,
+        "firstDrawMs": lambda v: _finite(v) and v >= 0,
+        "roi": lambda v: isinstance(v, dict),
+        "frames": lambda v: isinstance(v, list),
+        "references": lambda v: isinstance(v, dict),
+        "expectedTicks": _count,
+        "deliveredTicks": _count,
+        "missingTicks": lambda v: isinstance(v, list),
+        "ambiguousFrames": _count,
+        "exposedFrames": _count,
+    })
+    hide_ms, first_draw_ms = value.get("hideMs"), value.get("firstDrawMs")
+    if _finite(hide_ms) and _finite(first_draw_ms) and hide_ms > first_draw_ms:
+        yield f"departurePixels:departure times not monotonic at {path}"
+    roi = value.get("roi")
+    if isinstance(roi, dict):
+        yield from _exact_fields(roi, frozenset({"x", "y", "w", "h"}), "departurePixels.roi", f"{path}.roi")
+        if not (all(_int(roi.get(key)) for key in ("x", "y", "w", "h"))
+                and roi.get("x", -1) >= 0 and roi.get("y", -1) >= 0
+                and roi.get("w", 0) > 0 and roi.get("h", 0) > 0):
+            yield f"departurePixels.roi:positive ints at {path}.roi"
+    previous_t = None
+    frames = value.get("frames") if isinstance(value.get("frames"), list) else []
+    for index, frame in enumerate(frames):
+        where = f"{path}.frames[{index}]"
+        if not isinstance(frame, dict):
+            yield f"departurePixels.frame:object at {where}"
+            continue
+        yield from _exact_fields(frame, DEPARTURE_PIXEL_FRAME_FIELDS, "departurePixels.frame", where)
+        yield from _fields(frame, "departurePixels.frame", where, {
+            "t": lambda v: _finite(v) and v >= 0,
+            "tick": _count,
+            "sha256": _sha256,
+            "path": _non_empty_str,
+            "distances": lambda v: isinstance(v, dict),
+        })
+        if _finite(frame.get("t")):
+            if previous_t is not None and frame["t"] < previous_t:
+                yield f"departurePixels.frame:t decreasing at {where}"
+            previous_t = frame["t"]
+        distances = frame.get("distances")
+        if isinstance(distances, dict):
+            yield from _exact_fields(
+                distances, DEPARTURE_PIXEL_DISTANCE_FIELDS, "departurePixels.frame.distances", f"{where}.distances",
+            )
+            for name in DEPARTURE_PIXEL_DISTANCE_FIELDS:
+                distance = distances.get(name)
+                if not (_finite(distance) and distance >= 0):
+                    yield f"departurePixels.frame.distance.{name} at {where}.distances"
+    references = value.get("references")
+    if isinstance(references, dict):
+        yield from _exact_fields(
+            references, frozenset({"lastDecoder", "poster", "background", "pairwise"}),
+            "departurePixels.references",
+            f"{path}.references",
+        )
+        for name in ("lastDecoder", "poster", "background"):
+            reference = references.get(name)
+            where = f"{path}.references.{name}"
+            expected = frozenset({"sha256", "provenance", "dstRect"}) if name == "poster" \
+                else frozenset({"sha256", "provenance"})
+            if not isinstance(reference, dict):
+                yield f"departurePixels.reference:object at {where}"
+                continue
+            yield from _exact_fields(reference, expected, "departurePixels.reference", where)
+            yield from _fields(reference, "departurePixels.reference", where, {
+                "sha256": _sha256,
+            })
+            provenance = reference.get("provenance")
+            if not isinstance(provenance, Mapping) or provenance.get("metric") != "mad":
+                yield f"departurePixels.reference.provenance.metric at {where}.provenance"
+            if name == "poster":
+                rect = reference.get("dstRect")
+                if not _box(rect, floor=0):
+                    yield f"departurePixels.reference.dstRect at {where}.dstRect"
+                elif set(rect) != {"x", "y", "w", "h"}:
+                    yield f"departurePixels.reference.dstRect:fields at {where}.dstRect"
+        pairwise = references.get("pairwise")
+        pairwise_path = f"{path}.references.pairwise"
+        if not isinstance(pairwise, dict):
+            yield f"departurePixels.references.pairwise:object at {pairwise_path}"
+        else:
+            yield from _exact_fields(
+                pairwise, DEPARTURE_PIXEL_PAIRWISE_FIELDS, "departurePixels.references.pairwise", pairwise_path,
+            )
+            for name in DEPARTURE_PIXEL_PAIRWISE_FIELDS:
+                distance = pairwise.get(name)
+                if not (_finite(distance) and distance >= 0):
+                    yield f"departurePixels.references.pairwise.{name} at {pairwise_path}"
+    missing_ticks = value.get("missingTicks")
+    valid_missing = isinstance(missing_ticks, list) and all(
+        _count(tick) for tick in missing_ticks
+    )
+    if isinstance(missing_ticks, list) and not valid_missing:
+        yield f"departurePixels.missingTicks:expected range at {path}.missingTicks"
+    if valid_missing and len(missing_ticks) != len(set(missing_ticks)):
+        yield f"departurePixels.missingTicks:duplicate at {path}.missingTicks"
+    expected_ticks = value.get("expectedTicks")
+    delivered_ticks = value.get("deliveredTicks")
+    if _count(expected_ticks) and _count(delivered_ticks) and valid_missing:
+        if delivered_ticks > expected_ticks:
+            yield f"departurePixels.deliveredTicks:exceeds expected at {path}.deliveredTicks"
+        if expected_ticks != delivered_ticks + len(missing_ticks):
+            yield f"departurePixels.tickAccounting at {path}"
+    critical_ticks = {
+        frame.get("tick") for frame in frames if isinstance(frame, dict)
+        and _finite(frame.get("t")) and _int(frame.get("tick"))
+        and _finite(hide_ms) and _finite(first_draw_ms) and hide_ms <= frame["t"] <= first_draw_ms
+    }
+    if _count(delivered_ticks) and delivered_ticks != len(critical_ticks):
+        yield f"departurePixels.deliveredTicks:frame mismatch at {path}.deliveredTicks"
+    if valid_missing and critical_ticks.intersection(missing_ticks):
+        yield f"departurePixels.missingTicks:delivered at {path}.missingTicks"
+    accounting_valid = _count(expected_ticks) and _count(delivered_ticks) and valid_missing \
+        and expected_ticks == delivered_ticks + len(missing_ticks) \
+        and delivered_ticks == len(critical_ticks) \
+        and not critical_ticks.intersection(missing_ticks)
+    if accounting_valid:
+        tick_ids = critical_ticks | set(missing_ticks)
+        if tick_ids and tick_ids != set(range(min(tick_ids), min(tick_ids) + expected_ticks)):
+            yield f"departurePixels.missingTicks:expected range at {path}.missingTicks"
+    exposed_frames = value.get("exposedFrames")
+    if _count(exposed_frames) and exposed_frames > len(frames):
+        yield f"departurePixels.exposedFrames:exceeds frames at {path}.exposedFrames"
+
+
+def pixel_verdict(value: Any, path: str = "pixelVerdict") -> Iterator[str]:
+    """The discovery scorer's evidence verdict. It is not a departure classification."""
+    if not isinstance(value, dict):
+        yield f"pixelVerdict:object at {path}"
+        return
+    yield from _exact_fields(value, PIXEL_VERDICT_FIELDS, "pixelVerdict", path)
+    yield from _fields(value, "pixelVerdict", path, {
+        "verdict": _bool_or_null,
+        "reason": _str_or_null,
+        "coverageComplete": lambda v: isinstance(v, bool),
+        "exposedFrameCount": _count,
+    })
+    verdict = value.get("verdict")
+    coverage = value.get("coverageComplete")
+    exposed = value.get("exposedFrameCount")
+    if verdict is True and (coverage is not True or exposed != 0):
+        yield f"pixelVerdict:true consistency at {path}"
+    if verdict is False and (coverage is not True or not (_count(exposed) and exposed > 0)):
+        yield f"pixelVerdict:false consistency at {path}"
+
+
+def pixel_thresholds(value: Any, path: str = "thresholds") -> Iterator[str]:
+    """Measured discovery thresholds and their non-empty derivation provenance."""
+    if not isinstance(value, dict):
+        yield f"pixelThresholds:object at {path}"
+        return
+    yield from _exact_fields(value, PIXEL_THRESHOLD_FIELDS, "pixelThresholds", path)
+    yield from _fields(value, "pixelThresholds", path, {
+        "margin": lambda v: _finite(v) and v > 0,
+        "redMin": lambda v: _finite(v) and v > 0,
+        "provenance": lambda v: isinstance(v, Mapping) and bool(v),
+    })
+
+
+def pixel_discovery_artifact(value: Any, path: str = "artifact") -> Iterator[str]:
+    """Validate the pixel record and verdict in their separate discovery envelope."""
+    if not isinstance(value, dict):
+        yield f"pixelDiscovery:object at {path}"
+        return
+    if "departurePixels" not in value:
+        yield f"pixelDiscovery.departurePixels:missing at {path}"
+    else:
+        yield from departure_pixels(value["departurePixels"], f"{path}.departurePixels")
+    if "pixelVerdict" not in value:
+        yield f"pixelDiscovery.pixelVerdict:missing at {path}"
+    else:
+        yield from pixel_verdict(value["pixelVerdict"], f"{path}.pixelVerdict")
+    thresholds = value.get("thresholds")
+    if "thresholds" not in value:
+        yield f"pixelDiscovery.thresholds:missing at {path}"
+    elif thresholds is None:
+        pixels = value.get("departurePixels")
+        verdict = value.get("pixelVerdict")
+        unsupplied = isinstance(verdict, dict) and verdict.get("verdict") is None \
+            and verdict.get("reason") == "thresholds not supplied" \
+            and verdict.get("exposedFrameCount") == 0 \
+            and isinstance(pixels, dict) and pixels.get("exposedFrames") == 0
+        if not unsupplied:
+            yield f"pixelDiscovery.thresholds:required at {path}"
+    else:
+        yield from pixel_thresholds(thresholds, f"{path}.thresholds")
+    pixels = value.get("departurePixels")
+    verdict = value.get("pixelVerdict")
+    if isinstance(pixels, dict) and isinstance(verdict, dict):
+        exposed_frames = pixels.get("exposedFrames")
+        verdict_count = verdict.get("exposedFrameCount")
+        verdict_value = verdict.get("verdict")
+        if verdict.get("coverageComplete") is True and not (
+                pixels.get("missingTicks") == []
+                and _count(pixels.get("expectedTicks"))
+                and pixels["expectedTicks"] > 0
+                and pixels.get("deliveredTicks") == pixels["expectedTicks"]):
+            yield f"pixelDiscovery:coverage accounting at {path}"
+        if (verdict_value is True or verdict_value is False) and pixels.get("ambiguousFrames") != 0:
+            yield f"pixelDiscovery:ambiguous frames at {path}"
+        if verdict.get("verdict") is True and exposed_frames != 0:
+            yield f"pixelDiscovery:true exposed frames at {path}"
+        if verdict.get("coverageComplete") is True \
+                and _count(exposed_frames) and _count(verdict_count) and exposed_frames != verdict_count:
+            yield f"pixelDiscovery:exposed frame count at {path}"
+
+
+def judged_mm_feed_artifact(value: Any, path: str = "artifact") -> Iterator[str]:
+    """Discovery pixel evidence is forbidden anywhere in a judged MM-FEED artifact."""
+    if not isinstance(value, dict):
+        yield f"judgedMmFeed:object at {path}"
+        return
+    stack: list[tuple[str, Any]] = [(path, value)]
+    while stack:
+        where, current = stack.pop()
+        if isinstance(current, dict):
+            for key, child in current.items():
+                child_path = f"{where}.{key}"
+                if key in ("departurePixels", "pixelVerdict"):
+                    yield f"judgedMmFeed.discoveryPixels at {child_path}"
+                if key == "instrumentVariant" and child == "one-frame-poster":
+                    yield f"judgedMmFeed.discoveryVariant at {child_path}"
+                if key == "oneFramePoster":
+                    yield f"judgedMmFeed.oneFramePoster at {child_path}"
+                stack.append((child_path, child))
+        elif isinstance(current, list):
+            stack.extend((f"{where}[{index}]", child) for index, child in enumerate(current))
+
+
+def _one_frame_poster(value: Any, path: str) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"mmFeed.oneFramePoster:object at {path}"
+        return
+    yield from _exact_fields(value, ONE_FRAME_POSTER_FIELDS, "mmFeed.oneFramePoster", path)
+    fired = value.get("fired")
+    if not isinstance(fired, bool):
+        yield f"mmFeed.oneFramePoster.fired at {path}"
+    if fired is True:
+        yield from _fields(value, "mmFeed.oneFramePoster", path, {
+            "entryId": _pixel_identity,
+            "frameN": _count,
+            "rafTimestamp": lambda v: _finite(v) and v >= 0,
+            "contextSerial": _pixel_identity,
+            "firstDrawFrameIndex": _count,
+        })
+        frame_n, first_draw = value.get("frameN"), value.get("firstDrawFrameIndex")
+        if _count(frame_n) and _count(first_draw) and frame_n >= first_draw:
+            yield f"mmFeed.oneFramePoster:frame order at {path}"
+    elif fired is False and any(value.get(key) is not None for key in (
+        "entryId", "frameN", "rafTimestamp", "contextSerial", "firstDrawFrameIndex",
+    )):
+        yield f"mmFeed.oneFramePoster:false detail at {path}"
+
+
+def _one_frame_poster_fired(value: Any) -> bool:
+    return isinstance(value, dict) and set(value) == ONE_FRAME_POSTER_FIELDS \
+        and value.get("fired") is True \
+        and _pixel_identity(value.get("entryId")) \
+        and _count(value.get("frameN")) \
+        and _finite(value.get("rafTimestamp")) and value["rafTimestamp"] >= 0 \
+        and _pixel_identity(value.get("contextSerial")) \
+        and _count(value.get("firstDrawFrameIndex")) \
+        and value["frameN"] < value["firstDrawFrameIndex"]
+
+
+def mm_feed_report(value: Any, path: str = "mmFeedEvidence", *, discovery: bool = False) -> Iterator[str]:
     """`mm_feed_instrument.INSTRUMENT_JS` report and its decoder/GL frame producers."""
     if not isinstance(value, dict):
         yield f"mmFeed:object at {path}"
@@ -1374,10 +1685,24 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
         yield f"mmFeed.mediaOverflow at {path}"
     if version == 3 and not _count(value.get("unplannedContextCount")):
         yield f"mmFeed.unplannedContextCount at {path}"
+    variant = value.get("instrumentVariant")
     if version == 3:
         yield from feed_hook_health(value.get("hookHealth"), f"{path}.hookHealth")
-        if "instrumentVariant" in value and value["instrumentVariant"] != "calibration-red":
+        if "instrumentVariant" in value and variant != "calibration-red" \
+                and not (discovery and variant == "one-frame-poster"):
             yield f"mmFeed.instrumentVariant at {path}"
+    if "oneFramePoster" in value:
+        yield from _one_frame_poster(value["oneFramePoster"], f"{path}.oneFramePoster")
+        if not discovery:
+            yield f"mmFeed.discoveryVariant at {path}"
+        if not _one_frame_poster_fired(value["oneFramePoster"]):
+            yield f"mmFeed.oneFramePoster:not fired at {path}.oneFramePoster"
+        if variant != "one-frame-poster":
+            yield f"mmFeed.oneFramePoster:stamp at {path}"
+    elif variant == "one-frame-poster":
+        yield f"mmFeed.oneFramePoster:missing at {path}"
+    if "departurePixels" in value or "pixelVerdict" in value:
+        yield f"mmFeed.discoveryPixels at {path}"
     if value.get("callbackCostP95Ms") is not None and not (_finite(value.get("callbackCostP95Ms")) and value["callbackCostP95Ms"] >= 0):
         yield f"mmFeed.callbackCostP95Ms at {path}"
     if strict_counter:

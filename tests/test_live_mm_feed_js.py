@@ -872,3 +872,14 @@ global.__obedMmFeedProbe.bootstrap({json.dumps({"entries": [probe_entry]}, separ
         mm_feed_instrument.instrument_variant("production")
     with pytest.raises(ValueError, match="anchor counts"):
         mm_feed_instrument.instrument_variant("calibration-red", "(function(){})();")
+
+
+def test_one_frame_poster_is_a_discovery_only_instrument_entry_point() -> None:
+    changed = mm_feed_instrument.instrument_variant("one-frame-poster")
+    assert changed != mm_feed_instrument.INSTRUMENT_JS
+    assert "var INSTRUMENT_VARIANT='one-frame-poster';" in changed
+    assert changed.count("var INSTRUMENT_VARIANT='one-frame-poster';") == 1
+    assert "one-frame-poster" not in mm_feed_instrument.INSTRUMENT_VARIANTS
+    assert mm_feed_instrument.DISCOVERY_INSTRUMENT_VARIANTS == ("one-frame-poster",)
+    assert "one-frame-poster" not in mm_feed_variants.VARIANTS
+    assert "one-frame-poster" not in (REPO / "scripts/run_gates.sh").read_text()
