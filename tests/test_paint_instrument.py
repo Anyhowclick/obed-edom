@@ -364,8 +364,15 @@ def test_a_control_record_or_paint_score_field_missing_is_inconclusive(change) -
 
 # ---------------------------------------------------------------- sampler_self_check, paint_census
 
-META = {"schema": 2, "rafTicks": 120, "overflow": 0, "errors": [], "lastTs": 120 * PERIOD, "prepaint": 120,
-        "ppMismatch": 0, "ppDuplicate": 0, "readCostMs": {"sum": 12.0, "max": 0.4}}
+META = {
+    "schema": 2, "rafTicks": 120, "overflow": 0, "errors": [], "lastTs": 120 * PERIOD, "prepaint": 120,
+    "ppMismatch": 0, "ppDuplicate": 0, "readCostMs": {"sum": 12.0, "max": 0.4},
+    "running": False, "startedAt": 0.0, "stoppedAt": 120 * PERIOD + 5,
+    "prepaintObserver": {
+        "installed": True, "active": False, "disconnected": True,
+        "callbacks": 120, "ignored": 0, "failures": 0,
+    },
+}
 
 
 def _duplicated(rows):
@@ -373,16 +380,29 @@ def _duplicated(rows):
 
 
 SELF_CHECKS = [
-    ("clean", _rows(), META, 120 * PERIOD + 5, None),
-    ("stale", _rows(), META, 120 * PERIOD + 5 * PERIOD, "sampler stopped"),
-    ("errors", _rows(), {**META, "errors": ["prepaint: boom"]}, 120 * PERIOD, "sampler errors"),
-    ("duplicate-rows", _duplicated(_rows()), META, 120 * PERIOD, "duplicate rows"),
-    ("no-pre-paint-reads", [dict(r, pp=None) for r in _rows()], META, 120 * PERIOD, "no pre-paint reads"),
+    ("clean", _rows(), META, META["stoppedAt"], None),
+    ("stale", _rows(), {**META, "stoppedAt": 120 * PERIOD + 5 * PERIOD}, 120 * PERIOD + 5 * PERIOD, "sampler stopped"),
+    ("errors", _rows(), {**META, "errors": ["prepaint: boom"], "stoppedAt": 120 * PERIOD}, 120 * PERIOD, "sampler errors"),
+    ("read-cost-accounting", _rows(), {**META, "readCostMs": {"sum": 1.0, "max": 2.0}}, META["stoppedAt"], "max exceeds sum"),
+    ("duplicate-rows", _duplicated(_rows()), {**META, "stoppedAt": 120 * PERIOD}, 120 * PERIOD, "duplicate rows"),
+    ("no-pre-paint-reads", [dict(r, pp=None) for r in _rows()], {**META, "stoppedAt": 120 * PERIOD}, 120 * PERIOD, "no pre-paint reads"),
     # Astra r1 #1: partial pre-paint coverage never vouches.
-    ("one-row-without-pp", _drop_pp(_rows()), {**META, "prepaint": 119}, 120 * PERIOD, "1 rows without a pre-paint read"),
+    ("one-row-without-pp", _drop_pp(_rows()), {
+        **META, "prepaint": 119, "stoppedAt": 120 * PERIOD,
+        "prepaintObserver": {**META["prepaintObserver"], "callbacks": 119},
+    }, 120 * PERIOD, "1 rows without a pre-paint read"),
     # Astra r1 #4: a consecutive prefix (the tail lost to a malformed drain) does not reconcile with the meta.
-    ("tail-not-retained", _rows()[:100], META, 120 * PERIOD, "100 rows retained against meta.rafTicks 120"),
-    ("tail-endpoint", _rows()[:100], {**META, "rafTicks": 100, "prepaint": 100}, 120 * PERIOD, "is not meta.lastTs"),
+    ("tail-not-retained", _rows()[:100], {**META, "stoppedAt": 120 * PERIOD}, 120 * PERIOD, "100 rows retained against meta.rafTicks 120"),
+    ("tail-endpoint", _rows()[:100], {
+        **META, "rafTicks": 100, "prepaint": 100, "stoppedAt": 120 * PERIOD,
+        "prepaintObserver": {**META["prepaintObserver"], "callbacks": 100},
+    }, 120 * PERIOD, "is not meta.lastTs"),
+    ("observer-not-disconnected", _rows(), {
+        **META, "prepaintObserver": {**META["prepaintObserver"], "active": True, "disconnected": False},
+    }, META["stoppedAt"], "meta.prepaintObserver.active"),
+    ("observer-accounting", _rows(), {
+        **META, "prepaintObserver": {**META["prepaintObserver"], "callbacks": 119},
+    }, META["stoppedAt"], "do not reconcile"),
 ]
 
 
@@ -413,6 +433,111 @@ def test_paint_census_labels_every_class_and_drops_none() -> None:
         ("scored", 10, 3), ("endOfShow", 30, 2), ("ended", 50, 3), ("unscored", 70, 2)]
     assert census["counts"] == {"scored": 1, "endOfShow": 1, "ended": 1, "unscored": 1}
     assert census["findings"][1]["reasons"] == {"detached": 2}
+
+
+def test_cost_recorder_accounts_union_exclusive_spans_and_flushes_the_last_frame() -> None:
+    script = r"""
+let clock = 0;
+const performance = {now(){ return clock; }};
+const document = {timeline: {currentTime: null}};
+const window = {};
+""" + pi.COST_RECORDER_JS + r"""
+const cost = window.__obedCost;
+cost.install('sampler.tick');
+cost.install('paint.prePaint');
+cost.install('feed.rvfc');
+cost.enter('sampler.tick');
+clock = 2;
+cost.enter('paint.prePaint');
+clock = 5;
+cost.leave('paint.prePaint');
+clock = 7;
+cost.leave('sampler.tick');
+document.timeline.currentTime = 16.667;
+clock = 8;
+cost.enter('sampler.tick');
+clock = 10;
+cost.leave('sampler.tick');
+clock = 11;
+cost.enter('feed.rvfc');
+clock = 14;
+cost.leave('feed.rvfc');
+document.timeline.currentTime = 33.334;
+clock = 40;
+cost.enter('sampler.tick');
+clock = 41;
+cost.enter('sampler.tick');
+clock = 46;
+cost.leave('sampler.tick');
+clock = 50;
+cost.leave('sampler.tick');
+const beforeStop = cost.read('frame.total', 0, 10);
+cost.stop();
+const full = cost.read();
+const page = cost.read('sampler.tick', 1, 1);
+const stable = JSON.stringify(full) === JSON.stringify(cost.read());
+console.log(JSON.stringify({api: Object.keys(cost).sort(), beforeStop, full, page, stable}));
+"""
+    out = json.loads(_node_stdout(script))
+    assert out["api"] == ["enter", "install", "leave", "read", "stop"]
+    assert out["beforeStop"]["frames"] == {"count": 2, "chunks": [[7, 5]]}
+    assert out["full"] == {
+        "version": 1,
+        "stopped": True,
+        "errors": [],
+        "hooks": {
+            "sampler.tick": {"installed": True, "count": 3, "chunks": [[4, 2, 10]]},
+            "paint.prePaint": {"installed": True, "count": 1, "chunks": [[3]]},
+            "feed.rvfc": {"installed": True, "count": 1, "chunks": [[3]]},
+        },
+        "frames": {"count": 3, "chunks": [[7, 5, 10]]},
+    }
+    assert out["page"]["hooks"]["sampler.tick"]["chunks"] == [[2]]
+    assert out["page"]["hooks"]["paint.prePaint"]["chunks"] == []
+    assert out["page"]["frames"]["chunks"] == []
+    assert out["stable"] is True
+
+
+def test_summarize_instrument_cost_uses_the_whole_capture_linear_p95_and_strict_budget() -> None:
+    recording = {
+        "version": 1,
+        "stopped": True,
+        "errors": [],
+        "hooks": {
+            "sampler.tick": {"installed": True, "count": 1300, "chunks": [[10.0] * 700, [1.0] * 600]},
+            "paint.prePaint": {"installed": True, "count": 2, "chunks": [[0.0, 10.0]]},
+            "feed.raf": {"installed": True, "count": 0, "chunks": []},
+        },
+        "frames": {"count": 1, "chunks": [[8.0]]},
+    }
+    applicable = {
+        "sampler.tick": True,
+        "paint.prePaint": True,
+        "feed.rvfc": False,
+        "feed.raf": True,
+        "frame.total": True,
+    }
+    summary = pi.summarize_instrument_cost(recording, applicable)
+    assert summary["sampler.tick"] == {
+        "applicable": True, "installed": True, "count": 1300,
+        "p95": 10.0, "max": 10.0, "overBudget": 700,
+    }
+    assert summary["paint.prePaint"]["p95"] == 9.5
+    assert summary["paint.prePaint"]["overBudget"] == 1
+    assert summary["feed.rvfc"] == {
+        "applicable": False, "installed": False, "count": 0,
+        "p95": None, "max": None, "overBudget": 0,
+    }
+    assert summary["feed.raf"] == {
+        "applicable": True, "installed": True, "count": 0,
+        "p95": None, "max": None, "overBudget": 0,
+    }
+    assert summary["frame.total"]["p95"] == 8.0
+    assert summary["frame.total"]["overBudget"] == 0
+
+    broken = pi.summarize_instrument_cost({**recording, "stopped": False}, applicable)
+    assert all(entry["count"] == 0 and entry["installed"] is False for entry in broken.values())
+    assert all(entry["p95"] is None and entry["max"] is None and entry["overBudget"] == 0 for entry in broken.values())
 
 
 # ---------------------------------------------------------------- JS in Node
@@ -476,10 +601,15 @@ let rafQ = [], micro = [];
 function requestAnimationFrame(cb){ rafQ.push(cb); return rafQ.length; }
 function queueMicrotask(cb){ micro.push(cb); }
 const ROs = [];
-class ResizeObserver { constructor(cb){ this.cb = cb; ROs.push(this); } observe(t){ this.target = t; this.last = t.style.width; } }
+class ResizeObserver {
+  constructor(cb){ this.cb = cb; ROs.push(this); }
+  observe(t){ this.target = t; this.last = t.style.width; this.connected = true; }
+  disconnect(){ this.connected = false; }
+}
 class CSSStyleSheet { replaceSync(text){ this.text = text; } }
 function render(){
   for (const ro of ROs) {
+    if (!ro.connected) continue;
     const w = ro.target.style.width;
     if (w === ro.last) continue;
     ro.last = w;
@@ -534,14 +664,15 @@ __SCENARIO__
 """
 
 
-def _run_js(scenario: str, control: str = "") -> dict[str, Any]:
-    fragments = pi.PAINT_READ_FN_JS + pi.PREPAINT_FN_JS
+def _run_js(scenario: str, control: str = "", *, cost: bool = False) -> dict[str, Any]:
+    fragments = (pi.COST_RECORDER_JS if cost else "") + pi.PAINT_READ_FN_JS + pi.PREPAINT_FN_JS
     script = HARNESS.replace("__FRAGMENTS__", fragments).replace("__SCENARIO__", control + "\n" + scenario)
     return json.loads(_node_stdout(script).strip().splitlines()[-1])
 
 
 _OUT = "console.log(JSON.stringify({rows: samples, meta: meta, writes: writes, " \
-       "record: window.__obedPaintControl__ ? window.__obedPaintControl__.record : null}));"
+       "record: window.__obedPaintControl__ ? window.__obedPaintControl__.record : null, " \
+       "cost: window.__obedCost ? window.__obedCost.read() : null}));"
 
 
 READS = [
@@ -621,6 +752,7 @@ for (let i = 1; i <= 12; i++) {
   if (i === 9) act(() => keynoteBody.removeChild(v));
   runFrame(i * 1000 / 60);
 }
+pre.stop();
 """ + _OUT)
     rows, meta = out["rows"], out["meta"]
     assert out["writes"] == []
@@ -630,6 +762,10 @@ for (let i = 1; i <= 12; i++) {
         if "pp" in row:
             assert (row["pp"]["seq"], row["pp"]["ts"]) == (row["seq"], row["ts"]) and row["pp"]["t"] >= row["t"]
     assert (meta["prepaint"], meta["ppMismatch"], meta["ppDuplicate"], meta["overflow"]) == (10, 1, 1, 1)
+    assert meta["prepaintObserver"] == {
+        "installed": True, "active": False, "disconnected": True,
+        "callbacks": 12, "ignored": 0, "failures": 0,
+    }
     # Frame 9 onwards: the decoder left the DOM; the WeakRef set still reports it, as detached.
     detached = [r["pp"]["videos"] for r in rows if r["seq"] >= 9]
     assert all(len(vs) == 1 and pi.painted_state(vs[0]) == ("unpainted", "detached") for vs in detached)
@@ -638,6 +774,25 @@ for (let i = 1; i <= 12; i++) {
     assert not check["ok"]
     assert {r.split(" = ")[0] for r in check["reasons"] if " = " in r} == {"meta.overflow", "meta.ppMismatch", "meta.ppDuplicate"}
     assert check["rowsWithoutPp"] == 1 and check["seqGaps"] == 1
+
+
+def test_prepaint_accounts_for_every_decoder_and_disconnects_on_teardown() -> None:
+    out = _run_js("""
+const a = video(7, 'movie-a.mov', {x: 100, y: 100, w: 400, h: 225});
+const b = video(8, 'movie-b.mov', {x: 600, y: 100, w: 400, h: 225});
+act(() => { keynoteBody.appendChild(a); keynoteBody.appendChild(b); });
+for (let i = 1; i <= 3; i++) runFrame(i * 1000 / 60);
+pre.stop();
+window.__obedCost.stop();
+""" + _OUT, cost=True)
+    assert [sorted(video["elId"] for video in row["pp"]["videos"]) for row in out["rows"]] == [[7, 8]] * 3
+    assert out["meta"]["prepaintObserver"] == {
+        "installed": True, "active": False, "disconnected": True,
+        "callbacks": 3, "ignored": 0, "failures": 0,
+    }
+    assert out["cost"]["hooks"]["paint.prePaint"]["installed"] is True
+    assert out["cost"]["hooks"]["paint.prePaint"]["count"] == 3
+    assert out["cost"]["errors"] == []
 
 
 CONTROL_SETUPS = {

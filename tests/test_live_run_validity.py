@@ -15,6 +15,15 @@ import live_run_validity as validity  # noqa: E402
 from obed_edom import managed_obs  # noqa: E402
 
 
+INSTRUMENT_COST_ROWS = json.loads((REPO / "tests/fixtures/instrument_cost_rows.json").read_text())
+
+
+@pytest.mark.parametrize("case", INSTRUMENT_COST_ROWS)
+def test_instrument_cost_hook_row_grammar(case):
+    assert set(case) == {"row", "wellFormed"}
+    assert validity._well_formed_hook(case["row"]) is case["wellFormed"]
+
+
 def baseline(host_kind: str) -> dict:
     row = validity.qualification(host_kind)
     assert row is not None
@@ -23,9 +32,9 @@ def baseline(host_kind: str) -> dict:
         "gitHead": "abc123",
         "browserVersion": {"product": "Chrome/155.0.8059.79"},
         "observations": {
-            "before": {"loadAverage": [1.0, 2.0, 3.0], "uptime": "up", "chromeCounts": {"owned": 1, "foreign": 0}},
-            "during": {"loadAverage": [2.0, 2.0, 3.0], "uptime": "up", "chromeCounts": {"owned": 1, "foreign": 0}},
-            "after": {"loadAverage": [1.0, 1.0, 2.0], "uptime": "up", "chromeCounts": {"owned": 0, "foreign": 0}},
+            "before": {"at": 1.0, "loadAverage": [1.0, 2.0, 3.0], "uptime": "up", "chromeCounts": {"owned": 1, "foreign": 0}},
+            "during": {"at": 2.0, "loadAverage": [2.0, 2.0, 3.0], "uptime": "up", "chromeCounts": {"owned": 1, "foreign": 0}},
+            "after": {"at": 3.0, "loadAverage": [1.0, 1.0, 2.0], "uptime": "up", "chromeCounts": {"owned": 0, "foreign": 0}},
         },
     }
     if row["engine"] == "cef":
@@ -42,7 +51,10 @@ def baseline(host_kind: str) -> dict:
         "hostKind": host_kind,
         "environment": environment,
         "instrumentCost": {
-            hook: {"count": 2, "p95": 1.5, "max": 2.0, "overBudget": 0}
+            hook: {
+                "applicable": True, "installed": True,
+                "count": 2, "p95": 1.5, "max": 2.0, "overBudget": 0,
+            }
             for hook in validity.REQUIRED_HOOKS
         },
         "samples": [],
@@ -59,6 +71,10 @@ def baseline(host_kind: str) -> dict:
         (validity.HOST_HEADLESS_CHROME, "over budget and missing", False, "cost: hook p95 exceeds"),
         (validity.HOST_HEADLESS_CHROME, "missing hook", None, "cost: required hooks are missing"),
         (validity.HOST_HEADLESS_CHROME, "zero call", None, "cadence: settled-cadence statistic is open"),
+        (validity.HOST_HEADLESS_CHROME, "inapplicable", None, "cadence: settled-cadence statistic is open"),
+        (validity.HOST_HEADLESS_CHROME, "all inapplicable", None, "cost: frame.total must be applicable"),
+        (validity.HOST_HEADLESS_CHROME, "uninstalled zero", None, "cost: applicable hooks were not installed"),
+        (validity.HOST_HEADLESS_CHROME, "missing applicability", None, "cost: malformed hook entries"),
         (validity.HOST_HEADLESS_CHROME, "zero call nonzero cost", None, "cost: malformed hook entries"),
         (validity.HOST_HEADLESS_CHROME, "diagnostics do not gate", None, "cadence: settled-cadence statistic is open"),
         (validity.HOST_HEADLESS_CHROME, "negative p95", None, "cost: malformed hook entries"),
@@ -83,6 +99,7 @@ def baseline(host_kind: str) -> dict:
         (validity.HOST_HEADLESS_CHROME, "unknown host", None, "qualification: unknown hostKind"),
         (validity.HOST_HEADLESS_CHROME, "missing host", None, "qualification: capture hostKind is missing"),
         (validity.HOST_HEADLESS_CHROME, "non-string host", None, "qualification: capture hostKind is malformed"),
+        (validity.HOST_HEADLESS_CHROME, "GL replay empty intervals", None, "cadence: GL intervals unavailable (GL replay)"),
     ],
 )
 def test_run_validity_matrix(host_kind, case, expected, reason):
@@ -90,33 +107,52 @@ def test_run_validity_matrix(host_kind, case, expected, reason):
     row = validity.qualification(host_kind)
     assert row is not None
     if case == "at budget":
-        capture["instrumentCost"][validity.REQUIRED_HOOKS[0]]["p95"] = 8.0
+        capture["instrumentCost"][validity.REQUIRED_HOOKS[0]].update(p95=8.0, max=8.0)
     elif case == "over budget":
-        capture["instrumentCost"][validity.REQUIRED_HOOKS[0]]["p95"] = 8.0001
+        capture["instrumentCost"][validity.REQUIRED_HOOKS[0]].update(p95=8.0001, max=8.0001)
     elif case == "extra over budget":
         capture["instrumentCost"]["feed.extra"] = {
+            "applicable": True, "installed": True,
             "count": 1, "p95": 8.0001, "max": 9.0, "overBudget": 1,
         }
     elif case == "over budget and missing":
-        capture["instrumentCost"][validity.REQUIRED_HOOKS[0]]["p95"] = 8.0001
+        capture["instrumentCost"][validity.REQUIRED_HOOKS[0]].update(p95=8.0001, max=8.0001)
         del capture["instrumentCost"][validity.REQUIRED_HOOKS[1]]
     elif case == "missing hook":
         del capture["instrumentCost"][validity.REQUIRED_HOOKS[1]]
     elif case == "zero call":
         capture["instrumentCost"][validity.REQUIRED_HOOKS[1]] = {
-            "count": 0, "p95": None, "max": 0, "overBudget": 0,
+            "applicable": True, "installed": True, "count": 0, "p95": None, "max": None, "overBudget": 0,
         }
+    elif case == "inapplicable":
+        capture["instrumentCost"]["feed.rvfc"] = {
+            "applicable": False, "installed": False, "count": 0, "p95": None, "max": None, "overBudget": 0,
+        }
+    elif case == "all inapplicable":
+        capture["instrumentCost"] = {
+            hook: {
+                "applicable": False, "installed": False,
+                "count": 0, "p95": None, "max": None, "overBudget": 0,
+            }
+            for hook in validity.REQUIRED_HOOKS
+        }
+    elif case == "uninstalled zero":
+        capture["instrumentCost"]["feed.rvfc"] = {
+            "applicable": True, "installed": False, "count": 0, "p95": None, "max": None, "overBudget": 0,
+        }
+    elif case == "missing applicability":
+        del capture["instrumentCost"]["feed.rvfc"]["applicable"]
     elif case == "zero call nonzero cost":
         capture["instrumentCost"][validity.REQUIRED_HOOKS[1]] = {
-            "count": 0, "p95": 1.0, "max": 1.0, "overBudget": 0,
+            "applicable": True, "installed": True, "count": 0, "p95": 1.0, "max": 1.0, "overBudget": 0,
         }
     elif case == "diagnostics do not gate":
-        capture["instrumentCost"][validity.REQUIRED_HOOKS[1]].update(max=1000.0, overBudget=9)
+        capture["instrumentCost"][validity.REQUIRED_HOOKS[1]].update(max=1000.0, overBudget=2)
     elif case == "negative p95":
         capture["instrumentCost"][validity.REQUIRED_HOOKS[1]]["p95"] = -1.0
     elif case == "negative count high p95":
         capture["instrumentCost"][validity.REQUIRED_HOOKS[1]] = {
-            "count": -1, "p95": 50.0, "max": 50.0, "overBudget": 0,
+            "applicable": True, "installed": True, "count": -1, "p95": 50.0, "max": 50.0, "overBudget": 0,
         }
     elif case == "huge p95":
         capture["instrumentCost"][validity.REQUIRED_HOOKS[1]]["p95"] = 10**1000
@@ -163,6 +199,8 @@ def test_run_validity_matrix(host_kind, case, expected, reason):
     elif case == "non-string host":
         capture["hostKind"] = []
         row = None
+    elif case == "GL replay empty intervals":
+        capture["glReplay"] = {"requested": "auto"}
 
     capture_before = copy.deepcopy(capture)
     row_before = copy.deepcopy(row)
@@ -174,7 +212,8 @@ def test_run_validity_matrix(host_kind, case, expected, reason):
     assert set(result["measured"]) == {"cost", "environment", "cadence"}
     assert all("ok" in result["measured"][name] for name in result["measured"])
     assert set(result["measured"]["cost"]) == {
-        "ok", "budgetP95Ms", "hooks", "missingHooks", "malformedHooks", "overBudgetHooks",
+        "ok", "budgetP95Ms", "hooks", "missingHooks", "malformedHooks", "uninstalledHooks",
+        "inapplicableHooks", "overBudgetHooks",
     }
     assert capture == capture_before
     assert row == row_before
@@ -195,8 +234,20 @@ def test_run_validity_matrix(host_kind, case, expected, reason):
         assert result["measured"]["environment"]["ok"] is None
     if case == "missing browser":
         assert result["measured"]["environment"]["chromeBuild"] is None
-    if case in {"at budget", "zero call", "diagnostics do not gate", "HeadlessChrome", "CEF product"}:
+    if case in {"at budget", "zero call", "inapplicable", "diagnostics do not gate", "HeadlessChrome", "CEF product"}:
         assert result["measured"]["cost"]["ok"] is True
+    if case == "uninstalled zero":
+        assert result["measured"]["cost"]["ok"] is None
+        assert result["measured"]["cost"]["uninstalledHooks"] == ["feed.rvfc"]
+    if case == "all inapplicable":
+        assert result["measured"]["cost"]["ok"] is None
+        assert result["measured"]["cost"]["inapplicableHooks"] == list(validity.REQUIRED_HOOKS)
+    if case == "GL replay empty intervals":
+        assert result["measured"]["cadence"]["glIntervals"] == []
+        tuple_result = validity.run_validity(capture, row, gl_intervals=())
+        assert tuple_result["ok"] is None
+        assert "cadence: GL intervals unavailable (GL replay)" in tuple_result["reasons"]
+        assert tuple_result["measured"]["cadence"]["glIntervals"] == ()
     if case == "over budget and missing":
         assert result["measured"]["cost"]["ok"] is False
     if case == "negative count high p95":
@@ -300,6 +351,19 @@ def test_cadence_measures_whole_settled_visits_with_gl_exclusions_and_fallback()
     assert malformed_gl["measured"]["cadence"]["visits"] is None
 
 
+def test_visible_gl_replay_keeps_the_frozen_unavailable_interval_reason() -> None:
+    capture = baseline(validity.HOST_HEADLESS_CHROME)
+    capture.update(scope={"kind": "visible"}, glReplay={"requested": "auto"})
+    del capture["samples"]
+
+    result = validity.run_validity(capture, validity.qualification(capture["hostKind"]))
+
+    assert result["ok"] is None
+    assert result["measured"]["cadence"]["visits"] is None
+    assert "cadence: GL intervals unavailable (GL replay)" in result["reasons"]
+    assert not any("samples are missing" in reason for reason in result["reasons"])
+
+
 def test_qualification_rows_do_not_drift_from_probe_or_managed_obs():
     import live_continuity_probe as probe
 
@@ -328,6 +392,4 @@ def test_qualification_rows_do_not_drift_from_probe_or_managed_obs():
     assert validity.CADENCE_POLICY_STATUS.startswith("OPEN:")
     assert validity.HOST_ROWS_POLICY_STATUS.startswith("OPEN:")
     assert validity.LOAD_POLICY_STATUS.startswith("OPEN:")
-    assert validity.REQUIRED_HOOKS_POLICY_STATUS == (
-        "proposed names; frozen with the F/P producers at C2 integration"
-    )
+    assert validity.REQUIRED_HOOKS_POLICY_STATUS == "frozen C2 accounting hooks"

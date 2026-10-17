@@ -32,6 +32,174 @@ FORCE_WRAP_WINDOW_AFTER_SEEK_MS = 1000.0
 Phases = dict[str, Any]
 CarryWindow = dict[str, Any]
 
+COST_RECORDER_JS = r"""
+(function(){
+  if (window.__obedCost) return true;
+  var VERSION = 1, CHUNK_SIZE = 256;
+  var stopped = false, errors = [], hooks = Object.create(null), stack = [];
+  var frames = store(), frameKey = null, frameTotal = 0, frameTouched = false;
+  var lastNow = performance.now();
+  function store(){ return {count: 0, chunks: []}; }
+  function fail(message){ if (errors.length < 50) errors.push(String(message)); }
+  function now(){
+    var value = performance.now();
+    if (typeof value !== 'number' || !isFinite(value)) { fail('performance.now is not finite'); return lastNow; }
+    return value;
+  }
+  function currentFrame(){
+    var timeline = document && document.timeline;
+    var value = timeline ? timeline.currentTime : null;
+    return typeof value === 'number' && isFinite(value) ? value : 0;
+  }
+  function append(target, value){
+    var index = target.count % CHUNK_SIZE;
+    if (index === 0) target.chunks.push(new Float64Array(CHUNK_SIZE));
+    target.chunks[target.chunks.length - 1][index] = value;
+    target.count++;
+  }
+  function flushFrame(){
+    if (!frameTouched) return;
+    append(frames, frameTotal);
+    frameTotal = 0;
+    frameTouched = false;
+  }
+  function advance(value){
+    var key = currentFrame();
+    if (frameKey === null) frameKey = key;
+    if (key !== frameKey) { flushFrame(); frameKey = key; }
+    var delta = value - lastNow;
+    if (!(delta >= 0) || !isFinite(delta)) { fail('clock moved backwards'); delta = 0; }
+    if (stack.length) {
+      frameTotal += delta;
+      frameTouched = true;
+      stack[stack.length - 1].exclusive += delta;
+    }
+    lastNow = value;
+  }
+  function hookOf(name){
+    return typeof name === 'string' && name && name !== 'frame.total' ? hooks[name] : null;
+  }
+  function install(name){
+    if (stopped) return false;
+    if (typeof name !== 'string' || !name) { fail('install requires a hook name'); return false; }
+    if (name === 'frame.total') return true;
+    if (!hooks[name]) hooks[name] = {installed: true, values: store()};
+    else hooks[name].installed = true;
+    return true;
+  }
+  function enter(name){
+    if (stopped) return false;
+    var hook = hookOf(name);
+    if (!hook || !hook.installed) { fail('enter of uninstalled hook ' + String(name)); return false; }
+    advance(now());
+    if (stack.length && stack[stack.length - 1].hook === name) {
+      stack[stack.length - 1].depth++;
+    } else {
+      stack.push({hook: name, exclusive: 0, depth: 1});
+    }
+    return true;
+  }
+  function leave(name){
+    if (stopped) return false;
+    advance(now());
+    if (!stack.length) { fail('leave without enter for ' + String(name)); return false; }
+    var span = stack[stack.length - 1];
+    if (span.hook !== name) { fail('unbalanced leave ' + String(name) + ', expected ' + span.hook); return false; }
+    if (span.depth > 1) { span.depth--; return true; }
+    stack.pop();
+    append(hooks[name].values, span.exclusive);
+    return true;
+  }
+  function stop(){
+    if (stopped) return true;
+    advance(now());
+    if (stack.length) fail('stop with unclosed hooks: ' + stack.map(function(span){ return span.hook; }).join(', '));
+    stack.length = 0;
+    flushFrame();
+    stopped = true;
+    return true;
+  }
+  function values(target, offset, n){
+    var start = typeof offset === 'number' && isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+    var size = typeof n === 'number' && isFinite(n) ? Math.max(0, Math.floor(n)) : target.count;
+    var end = Math.min(target.count, start + size), out = [];
+    for (var i = start; i < end; i++) {
+      var chunk = target.chunks[Math.floor(i / CHUNK_SIZE)];
+      out.push(chunk[i % CHUNK_SIZE]);
+    }
+    return out;
+  }
+  function read(name, offset, n){
+    var selected = arguments.length ? name : null;
+    var result = {version: VERSION, stopped: stopped, errors: errors.slice(), hooks: {}, frames: {count: frames.count, chunks: []}};
+    Object.keys(hooks).forEach(function(hook){
+      var source = hooks[hook];
+      result.hooks[hook] = {installed: source.installed, count: source.values.count, chunks: []};
+      if (selected === null || selected === hook) result.hooks[hook].chunks.push(values(source.values, offset, n));
+    });
+    if (selected === null || selected === 'frame.total') result.frames.chunks.push(values(frames, offset, n));
+    return result;
+  }
+  window.__obedCost = {install: install, enter: enter, leave: leave, stop: stop, read: read};
+  return true;
+})();
+"""
+
+
+def _linear_percentile(values: Sequence[float], percentile: float) -> float | None:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return None
+    rank = (len(ordered) - 1) * percentile / 100.0
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return ordered[low]
+    return ordered[low] + (ordered[high] - ordered[low]) * (rank - low)
+
+
+def summarize_instrument_cost(
+    recording: Mapping[str, Any], applicability: Mapping[str, bool], *, budget_ms: float = 8.0
+) -> dict[str, dict[str, Any]]:
+    """Summarize every recorded duration without truncating the capture."""
+    hooks = recording.get("hooks") if isinstance(recording, Mapping) else None
+    frames = recording.get("frames") if isinstance(recording, Mapping) else None
+    recording_complete = (
+        recording.get("version") == 1
+        and recording.get("stopped") is True
+        and recording.get("errors") == []
+    ) if isinstance(recording, Mapping) else False
+    out: dict[str, dict[str, Any]] = {}
+    for hook, applicable in applicability.items():
+        source = frames if hook == "frame.total" else hooks.get(hook) if isinstance(hooks, Mapping) else None
+        source_installed = hook == "frame.total" and isinstance(frames, Mapping)
+        if isinstance(source, Mapping) and hook != "frame.total":
+            source_installed = source.get("installed") is True
+        chunks = source.get("chunks") if isinstance(source, Mapping) else []
+        durations = [
+            float(value)
+            for chunk in chunks if isinstance(chunks, list) and isinstance(chunk, list)
+            for value in chunk
+            if _finite(value) is not None and float(value) >= 0
+        ] if isinstance(chunks, list) else []
+        declared = source.get("count") if isinstance(source, Mapping) else 0
+        complete = recording_complete and (
+            isinstance(declared, int) and not isinstance(declared, bool) and declared == len(durations)
+        )
+        measured = applicable is True and source_installed and complete
+        count = len(durations) if measured else 0
+        p95 = _linear_percentile(durations, 95.0) if measured else None
+        maximum = max(durations) if measured and durations else None
+        out[str(hook)] = {
+            "applicable": applicable is True,
+            "installed": measured,
+            "count": count,
+            "p95": p95,
+            "max": maximum,
+            "overBudget": sum(value > budget_ms for value in durations) if measured else 0,
+        }
+    return out
+
 
 def _finite(value: Any) -> float | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
@@ -532,7 +700,8 @@ PREPAINT_FN_JS = r"""
     if (!Array.isArray(meta.errors)) meta.errors = [];
     ['prepaint', 'ppMismatch', 'ppDuplicate'].forEach(function(k){ if (typeof meta[k] !== 'number') meta[k] = 0; });
     if (!meta.readCostMs) meta.readCostMs = {sum: 0, max: 0};
-    var refs = [], seen = new WeakSet(), currentSeq = null, currentTs = null, wide = false;
+    var refs = [], seen = new WeakSet(), currentSeq = null, currentTs = null, wide = false, active = false;
+    meta.prepaintObserver = {installed: false, active: false, disconnected: false, callbacks: 0, ignored: 0, failures: 0};
     function fail(where, e){ if (meta.errors.length < 50) meta.errors.push(where + ': ' + String(e && e.message || e)); }
     function track(v){ if (!seen.has(v)) { seen.add(v); refs.push(new WeakRef(v)); } }
     var host = document.createElement('div');
@@ -541,10 +710,12 @@ PREPAINT_FN_JS = r"""
     sentinel.style.cssText = 'display:block;width:1px;height:1px;';
     host.attachShadow({mode: 'closed'}).appendChild(sentinel);
     document.documentElement.appendChild(host);
-    new ResizeObserver(function(){
+    var observer = new ResizeObserver(function(){
       var t = performance.now();
+      if (window.__obedCost && typeof window.__obedCost.enter === 'function') window.__obedCost.enter('paint.prePaint');
+      meta.prepaintObserver.callbacks++;
       try {
-        if (currentSeq === null) return;
+        if (!active || currentSeq === null) { meta.prepaintObserver.ignored++; return; }
         var row = probe.samples.length ? probe.samples[probe.samples.length - 1] : null;
         if (!row || row.seq !== currentSeq) { meta.ppMismatch++; return; }
         if (row.pp) { meta.ppDuplicate++; return; }
@@ -559,20 +730,44 @@ PREPAINT_FN_JS = r"""
         row.pp = {seq: currentSeq, ts: currentTs, t: t, videos: videos, stageMap: stageMapOf(), stageBox: stageBox(), cover: coverUp()};
         meta.prepaint++;
       } catch (e) {
+        meta.prepaintObserver.failures++;
         fail('prepaint', e);
       } finally {
         var cost = performance.now() - t;
         meta.readCostMs.sum += cost;
         if (cost > meta.readCostMs.max) meta.readCostMs.max = cost;
+        if (window.__obedCost && typeof window.__obedCost.leave === 'function') window.__obedCost.leave('paint.prePaint');
       }
-    }).observe(sentinel);
+    });
+    observer.observe(sentinel);
+    active = true;
+    meta.prepaintObserver.installed = true;
+    meta.prepaintObserver.active = true;
+    if (window.__obedCost && typeof window.__obedCost.install === 'function') window.__obedCost.install('paint.prePaint');
     function toggle(seq, ts){
+      if (!active) return;
       currentSeq = seq;
       currentTs = ts;
       wide = !wide;
       sentinel.style.width = wide ? '2px' : '1px';
     }
-    return {toggle: toggle, track: track};
+    function start(){
+      if (active) return true;
+      observer.observe(sentinel);
+      active = true;
+      meta.prepaintObserver.active = true;
+      meta.prepaintObserver.disconnected = false;
+      return true;
+    }
+    function stop(){
+      if (!active) return true;
+      active = false;
+      observer.disconnect();
+      meta.prepaintObserver.active = false;
+      meta.prepaintObserver.disconnected = true;
+      return true;
+    }
+    return {toggle: toggle, track: track, start: start, stop: stop};
   }
 """
 
@@ -1270,12 +1465,32 @@ def sampler_self_check(
     reasons: list[str] = []
     if not isinstance(meta, dict):
         return {"ok": False, "reasons": ["sampler meta missing"], "rows": len(rows)}
+    if meta.get("schema") != SAMPLER_SCHEMA:
+        reasons.append(f"meta.schema {meta.get('schema')!r}, expected {SAMPLER_SCHEMA}")
+    if meta.get("running") is not False:
+        reasons.append("meta.running is not false after stop")
+    started_at, stopped_at = _finite(meta.get("startedAt")), _finite(meta.get("stoppedAt"))
+    if started_at is None:
+        reasons.append("meta.startedAt missing")
+    if stopped_at is None:
+        reasons.append("meta.stoppedAt missing")
+    elif started_at is not None and stopped_at < started_at:
+        reasons.append("meta.stoppedAt precedes meta.startedAt")
+    if stopped_at is not None and (_finite(read_now) is None or read_now != stopped_at):
+        reasons.append("self-check read time is not meta.stoppedAt")
     for key in ("overflow", "ppMismatch", "ppDuplicate"):
         value = meta.get(key)
         if not isinstance(value, int) or isinstance(value, bool):
             reasons.append(f"meta.{key} missing")
         elif value:
             reasons.append(f"meta.{key} = {value}")
+    read_cost = meta.get("readCostMs")
+    if not isinstance(read_cost, dict) or any(
+        _finite(read_cost.get(key)) is None or read_cost[key] < 0 for key in ("sum", "max")
+    ):
+        reasons.append("meta.readCostMs missing or malformed")
+    elif read_cost["max"] > read_cost["sum"]:
+        reasons.append("meta.readCostMs.max exceeds sum")
     errors = meta.get("errors")
     if not isinstance(errors, list):
         reasons.append("meta.errors missing")
@@ -1307,6 +1522,30 @@ def sampler_self_check(
             reasons.append(f"meta.{key} missing")
         elif value != retained:
             reasons.append(f"{retained} rows retained against meta.{key} {value}")
+    observer = meta.get("prepaintObserver")
+    observer_accounted = None
+    if not isinstance(observer, dict):
+        reasons.append("meta.prepaintObserver missing")
+    else:
+        for key, expected in (("installed", True), ("active", False), ("disconnected", True)):
+            if observer.get(key) is not expected:
+                reasons.append(f"meta.prepaintObserver.{key} is not {str(expected).lower()}")
+        counters = {}
+        for key in ("callbacks", "ignored", "failures"):
+            value = observer.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                reasons.append(f"meta.prepaintObserver.{key} missing")
+            else:
+                counters[key] = value
+        if len(counters) == 3:
+            outcomes = [meta.get(key) for key in ("prepaint", "ppMismatch", "ppDuplicate")]
+            if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in outcomes):
+                expected_callbacks = sum(outcomes) + counters["ignored"] + counters["failures"]
+                observer_accounted = counters["callbacks"] == expected_callbacks
+                if not observer_accounted:
+                    reasons.append(
+                        f"meta.prepaintObserver callbacks {counters['callbacks']} do not reconcile with {expected_callbacks} outcomes"
+                    )
     period = _period(rows)
     last_ts = meta.get("lastTs")
     stale_ms = round(read_now - last_ts, 3) if _num(last_ts) and _num(read_now) else None
@@ -1327,6 +1566,10 @@ def sampler_self_check(
         "periodMs": None if period is None else round(period, 3),
         "rafTicks": meta.get("rafTicks"),
         "prepaint": meta.get("prepaint"),
+        "startedAt": meta.get("startedAt"),
+        "stoppedAt": meta.get("stoppedAt"),
+        "prepaintObserver": observer,
+        "observerAccountingComplete": observer_accounted,
         "readCostMs": meta.get("readCostMs"),
     }
 
