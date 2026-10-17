@@ -630,7 +630,6 @@ def evidence(value: Any, path: str = "evidence") -> Iterator[str]:
 
 MM_FEED_CONTEXT_FIELDS = {
     "serial": _id, "id": _non_empty_str, "createdAt": _finite,
-    "firstDrawAt": lambda v: v is None or _finite(v),
     "closedAt": lambda v: v is None or _finite(v), "atScene": lambda v: v is None or _count(v),
     "lost": lambda v: isinstance(v, bool),
     "entryIds": lambda v: isinstance(v, list) and all(_non_empty_str(item) for item in v),
@@ -706,16 +705,18 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
     counter_layout = config.get("counterLayout") if isinstance(config, dict) else None
     counter_blocks = counter_layout.get("blockRects") if isinstance(counter_layout, dict) else None
     strict_counter = "sampling" in value or isinstance(config, dict) and "counterLayout" in config
-    if value.get("kind") != "mm-feed" or version not in (1, 2):
+    if value.get("kind") != "mm-feed" or version not in (1, 2, 3):
         yield f"mmFeed:version at {path}"
     lists = ("contexts", "frames", "media", "mediaDropped", "artwork", "errors", "killedOnce", "uploads", "claims", "standDowns", "departures")
-    if version == 2:
+    if version in (2, 3):
         lists = (*lists, "browserFrames", "handbacks")
     for key in lists:
         if not isinstance(value.get(key), list):
             yield f"mmFeed.{key}:list at {path}"
     if not _count(value.get("mediaOverflow")):
         yield f"mmFeed.mediaOverflow at {path}"
+    if version == 3 and not _count(value.get("unplannedContextCount")):
+        yield f"mmFeed.unplannedContextCount at {path}"
     if value.get("callbackCostP95Ms") is not None and not (_finite(value.get("callbackCostP95Ms")) and value["callbackCostP95Ms"] >= 0):
         yield f"mmFeed.callbackCostP95Ms at {path}"
     if strict_counter:
@@ -785,12 +786,19 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
         else:
             contexts_by_serial[context.get("serial")] = context
             yield from _fields(context, "mmFeed.context", where, MM_FEED_CONTEXT_FIELDS)
+            yield from _fields(context, "mmFeed.context", where, {
+                "firstDrawAt": lambda v: v is None or _finite(v),
+            })
+            if version == 3:
+                yield from _fields(context, "mmFeed.context", where, {
+                    "evidenceComplete": lambda v: isinstance(v, bool),
+                })
             if _finite(context.get("firstDrawAt")) and _finite(context.get("createdAt")) \
                     and context["firstDrawAt"] < context["createdAt"]:
                 yield f"mmFeed.context.firstDrawAt at {where}"
             if context.get("atScene") is None and (version != 2 or context.get("entryIds") != []):
                 yield f"mmFeed.context.atScene at {where}"
-            if version == 2 and not (context.get("closedFrameIndex") is None or _count(context.get("closedFrameIndex"))):
+            if version in (2, 3) and not (context.get("closedFrameIndex") is None or _count(context.get("closedFrameIndex"))):
                 yield f"mmFeed.context.closedFrameIndex at {where}"
     previous = None
     for index, frame in enumerate(value.get("frames") or []):
@@ -811,7 +819,7 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
             if version != 2 or not isinstance(context, dict) or context.get("atScene") is not None \
                     or context.get("entryIds") != [] or not empty:
                 yield f"mmFeed.frame.atScene at {where}"
-        if version == 2:
+        if version in (2, 3):
             yield from _fields(frame, "mmFeed.frame", where, {"frameIndex": _count, "frameTimestamp": _finite})
         if previous is not None and _finite(frame.get("t")) and frame["t"] < previous:
             yield f"mmFeed.frame:t decreasing at {where}"
@@ -877,6 +885,21 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                         "kind": lambda v: v in ("counter", "alpha"), "bestFrame": _count,
                         "matchDistance": lambda v: _finite(v) and v >= 0, "matchMargin": _finite,
                     })
+                    if "matches" in match:
+                        yield from _fields(match, "mmFeed.holdMatch", f"{rwhere}.holdMatch", {
+                            "targetFrame": lambda v: v is None or _count(v),
+                            "matches": lambda v: isinstance(v, list) and len(v) >= 2,
+                        })
+                        for mindex, measured in enumerate(match.get("matches") or []):
+                            mwhere = f"{rwhere}.holdMatch.matches[{mindex}]"
+                            if not isinstance(measured, dict):
+                                yield f"mmFeed.holdMatch.match:object at {mwhere}"
+                            else:
+                                yield from _fields(measured, "mmFeed.holdMatch.match", mwhere, {
+                                    "frame": _count, "poster": lambda v: isinstance(v, bool),
+                                    "distance": lambda v: _finite(v) and v >= 0,
+                                    "targetDistance": lambda v: v is None or _finite(v) and v >= 0,
+                                })
         for lindex, label in enumerate(frame.get("labels") or []):
             lwhere = f"{where}.labels[{lindex}]"
             if not isinstance(label, dict):
@@ -892,12 +915,13 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
             if not isinstance(rider, dict):
                 yield f"mmFeed.rider:object at {rwhere}"
             else:
-                yield from _fields(rider, "mmFeed.rider", rwhere, {
+                rider_fields = {
                     "entryId": _non_empty_str, "serial": _id, "atScene": _count, "instance": _non_empty_str,
                     "visible": lambda v: isinstance(v, bool), "opacityProduct": lambda v: _finite(v) and v >= 0,
                     "intersectsCanvas": lambda v: isinstance(v, bool),
                     "sourceRectError": lambda v: v is None or _finite(v) and v >= 0,
-                })
+                }
+                yield from _fields(rider, "mmFeed.rider", rwhere, rider_fields)
     for index, entry in enumerate(value.get("killedOnce") or []):
         where = f"{path}.killedOnce[{index}]"
         if not isinstance(entry, dict):
@@ -914,7 +938,7 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
             "serial": _id, "atScene": _count, "entryId": _non_empty_str, "instance": _non_empty_str, "elId": _id_or_null,
             "currentTime": lambda v: _finite(v) and v >= 0, "paused": lambda v: isinstance(v, bool),
         })
-        if version == 2:
+        if version in (2, 3):
             yield from _fields(entry, "mmFeed.media", where, {"generation": _id, "visit": _id})
         for key in ("presentedFrames", "mediaTime"):
             if key in entry and entry[key] is not None and not _finite(entry[key]):
@@ -954,15 +978,30 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                 yield f"mmFeed.{key}.entry:object at {path}.{key}[{index}]"
             else:
                 yield from _fields(entry, f"mmFeed.{key}.entry", f"{path}.{key}[{index}]", fields)
-                if version == 2 and key == "uploads":
+                if version in (2, 3) and key == "uploads":
                     yield from _fields(entry, "mmFeed.uploads.entry", f"{path}.{key}[{index}]", {
                         "frameIndex": _count, "frameTimestamp": _finite,
                     })
-                if version == 2 and key == "departures":
+                if version in (2, 3) and key == "departures":
                     yield from _fields(entry, "mmFeed.departures.entry", f"{path}.{key}[{index}]", {
                         "generation": _id, "visit": _id,
                     })
-    if version == 2:
+                if version == 3 and key in ("claims", "departures"):
+                    yield from _fields(entry, f"mmFeed.{key}.entry", f"{path}.{key}[{index}]", {
+                        "generation": _id_or_null if key == "claims" else _id,
+                        "visit": _id_or_null if key == "claims" else _id,
+                        "source": lambda v: v in (("claim",) if key == "claims" else ("pause", "context")),
+                        "decoder": lambda v: isinstance(v, dict) or (key == "claims" and v is None),
+                    })
+                    decoder = entry.get("decoder")
+                    if isinstance(decoder, dict):
+                        yield from _fields(decoder, "mmFeed.departure.decoder", f"{path}.{key}[{index}].decoder", {
+                            "instance": _str_or_null, "elId": _id_or_null,
+                            "visible": lambda v: isinstance(v, bool),
+                            "opacityProduct": lambda v: _finite(v) and v >= 0,
+                            "rect": lambda v: v is None or isinstance(v, dict),
+                        })
+    if version in (2, 3):
         for index, frame in enumerate(value.get("browserFrames") or []):
             where = f"{path}.browserFrames[{index}]"
             if not isinstance(frame, dict):
@@ -983,6 +1022,8 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
                 "lastUpload": lambda v: v is None or isinstance(v, dict),
                 "closedDom": lambda v: v is None or isinstance(v, dict),
             })
+            if version == 3:
+                yield from _fields(handback, "mmFeed.handback", where, {"generation": _id_or_null, "visit": _id})
             if isinstance(handback.get("closedDom"), dict):
                 yield from _fields(handback["closedDom"], "mmFeed.dom", f"{where}.closedDom", MM_FEED_DOM_FIELDS)
             for findex, presented in enumerate(handback.get("frames") or []):
@@ -1049,12 +1090,16 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
         yield f"feedVerdict.interval at {path}"
     if "notes" in value:
         yield from notes(value["notes"], f"{path}.notes", MM_FEED_NOTE_KINDS, module=True, readable=False)
-    strict_handback = value.get("evidenceVersion") == 2
+    strict_handback = value.get("evidenceVersion") in (2, 3)
     required = () if value.get("mode") == "unavailable" else ("feed", "rider", "labels", "artwork") if value.get("mode") == "continuous" else (
         "hold", "poster", "rider", "artwork"
     )
     if strict_handback and value.get("mode") != "unavailable":
         required = (*required, "handback")
+    if value.get("evidenceVersion") == 3 and value.get("mode") != "unavailable":
+        required = (*required, "departureExposure")
+        if value.get("mode") != "continuous":
+            required = (*required, "resume")
     if value.get("continuousExpected") is True and "feed" not in required:
         required = (*required, "feed")
     for key in required:
@@ -1075,6 +1120,8 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
     feed = value.get("feed")
     if isinstance(feed, dict) and "crossfade" in feed and not isinstance(feed["crossfade"], bool):
         yield f"feedVerdict.feed.crossfade at {path}"
+    if isinstance(feed, dict) and feed.get("counterLayout") is not None and not isinstance(feed["counterLayout"], dict):
+        yield f"feedVerdict.feed.counterLayout at {path}"
     for index, read in enumerate(feed.get("reads") or [] if isinstance(feed, dict) else []):
         where = f"{path}.feed.reads[{index}]"
         if not isinstance(read, dict):
@@ -1105,6 +1152,20 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
                 yield f"feedVerdict.hold.read.textureOrdinals at {where}"
         elif not _finite(read.get("matchMargin")):
             yield f"feedVerdict.hold.read.matchMargin at {where}"
+        if read.get("kind") == "alpha" and "matches" in read:
+            if not isinstance(read.get("matches"), list) or not read["matches"] \
+                    or read.get("targetFrame") is not None and not _count(read.get("targetFrame")):
+                yield f"feedVerdict.hold.read.matches at {where}"
+            for mindex, measured in enumerate(read.get("matches") or []):
+                mwhere = f"{where}.matches[{mindex}]"
+                if not isinstance(measured, dict):
+                    yield f"feedVerdict.hold.read.match:object at {mwhere}"
+                else:
+                    yield from _fields(measured, "feedVerdict.hold.read.match", mwhere, {
+                        "frame": _count, "poster": lambda v: isinstance(v, bool),
+                        "distance": lambda v: _finite(v) and v >= 0,
+                        "targetDistance": lambda v: v is None or _finite(v) and v >= 0,
+                    })
     for key, list_key in (("rider", "riders"), ("labels", "labels"), ("artwork", "reads")):
         record = value.get(key)
         if isinstance(record, dict) and not isinstance(record.get(list_key), list):
@@ -1122,6 +1183,79 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
             "adjacentFrames": lambda v: v is None or isinstance(v, bool),
             "canvasLingerMs": lambda v: v is None or _finite(v) and v >= 0,
         })
+    departure = value.get("departureExposure")
+    if isinstance(departure, dict):
+        identity = _id if departure.get("complete") is True else _id_or_null
+        yield from _fields(departure, "feedVerdict.departureExposure", f"{path}.departureExposure", {
+            "complete": lambda v: isinstance(v, bool), "entryId": _non_empty_str,
+            "serial": identity, "atScene": identity, "visit": identity, "generation": identity,
+            "decoder": lambda v: isinstance(v, dict), "context": lambda v: isinstance(v, dict),
+            "start": lambda v: isinstance(v, dict), "firstDraw": lambda v: isinstance(v, dict),
+            "ordering": lambda v: isinstance(v, bool), "intervalCoverage": lambda v: isinstance(v, bool),
+            "posterExposure": lambda v: v is None or isinstance(v, bool),
+            "preDrawVisibility": lambda v: isinstance(v, list)
+            and all(isinstance(item, bool) for item in v),
+            "hiddenWholePreDraw": lambda v: isinstance(v, bool),
+            "riders": lambda v: isinstance(v, list),
+        })
+        decoder = departure.get("decoder")
+        if isinstance(decoder, dict):
+            yield from _fields(decoder, "feedVerdict.departureExposure.decoder",
+                               f"{path}.departureExposure.decoder", {
+                                   "instance": _str_or_null, "elId": _id_or_null,
+                               })
+        context = departure.get("context")
+        if isinstance(context, dict):
+            yield from _fields(context, "feedVerdict.departureExposure.context",
+                               f"{path}.departureExposure.context", {
+                                   "serial": identity, "id": _str_or_null,
+                               })
+        start = departure.get("start")
+        if isinstance(start, dict):
+            yield from _fields(start, "feedVerdict.departureExposure.start",
+                               f"{path}.departureExposure.start", {
+                                   "t": lambda v: v is None or _finite(v),
+                                   "source": lambda v: v is None or v in ("pause", "context"),
+                                   "decoderVisible": lambda v: v is None or isinstance(v, bool),
+                                   "observedAt": lambda v: v is None or _finite(v),
+                                   "unobservedBeforeContextMs": lambda v: _finite(v) and v >= 0,
+                               })
+        first_draw = departure.get("firstDraw")
+        if isinstance(first_draw, dict):
+            yield from _fields(first_draw, "feedVerdict.departureExposure.firstDraw",
+                               f"{path}.departureExposure.firstDraw", {
+                                   "t": lambda v: v is None or _finite(v),
+                                   "frameN": _id_or_null,
+                               })
+        for index, rider in enumerate(departure.get("riders") or []):
+            where = f"{path}.departureExposure.riders[{index}]"
+            if not isinstance(rider, dict):
+                yield f"feedVerdict.departureExposure.rider:object at {where}"
+            else:
+                yield from _fields(rider, "feedVerdict.departureExposure.rider", where, {
+                    "visible": lambda v: isinstance(v, bool),
+                    "opacityProduct": lambda v: _finite(v) and v >= 0,
+                    "intersectsCanvas": lambda v: isinstance(v, bool),
+                })
+    resume = value.get("resume")
+    if isinstance(resume, dict):
+        yield from _fields(resume, "feedVerdict.resume", f"{path}.resume", {
+            "complete": lambda v: isinstance(v, bool), "mode": lambda v: v in ("departure", "standDown"),
+            "mediaOverflow": _count, "holdPauseMissing": lambda v: isinstance(v, bool),
+            "clockReadable": lambda v: isinstance(v, bool),
+            "clockStill": lambda v: v is None or isinstance(v, bool),
+        })
+        for key in ("pauseTime", "settleTime", "pauseCurrentTime", "settleCurrentTime",
+                    "pauseMediaTime", "firstAfterMediaTime", "frameDurationS", "clockToleranceS",
+                    "lastUploadedMediaTime"):
+            if key in resume and resume[key] is not None and not _finite(resume[key]):
+                yield f"feedVerdict.resume.{key} at {path}.resume"
+        for key in ("pauseFrame", "firstAfterFrame", "lastUploadedFrame"):
+            if key in resume and resume[key] is not None and not _count(resume[key]):
+                yield f"feedVerdict.resume.{key} at {path}.resume"
+        for key in ("seeked", "resumedFromZero", "successfulFeed", "departurePauseBeforeMove"):
+            if key in resume and not isinstance(resume[key], bool):
+                yield f"feedVerdict.resume.{key} at {path}.resume"
 
 
 HANDBACK_FIELDS = {"status": lambda v: v in ("ok", "inconclusive"), "reason": _str_or_null, "targetHash": _int,

@@ -20,6 +20,7 @@ SOURCE_RECT_TOLERANCE_PX = 1.0
 ALPHA_HOLD_MARGIN = 6.0
 # Provisional: re-bank from Phase 0 headless captures alongside ALPHA_POSTER_FLOOR.
 COUNTER_HOLD_MARGIN = 1.0
+RESUME_CLOCK_RESIDUAL_FRAMES = 0.25
 
 
 INSTRUMENT_JS = r"""
@@ -27,7 +28,7 @@ INSTRUMENT_JS = r"""
   'use strict';
   if(window.__obedMmFeedProbe)return;
   var READS=[0.25,0.5,0.75],SAMPLE_WIDTH=192,PATCH_UV=[[0.2,0.2],[0.5,0.2],[0.8,0.2],[0.2,0.5],[0.5,0.5],[0.8,0.5],[0.2,0.8],[0.5,0.8],[0.8,0.8]];
-  var S={config:null,entries:[],contexts:[],live:[],frames:[],browserFrames:[],handbacks:[],media:[],mediaOverflow:0,artwork:[],errors:[],tamper:null,killedOnce:[],forcedDecoders:{},uploads:[],claims:[],standDowns:[],departures:[],costs:[],cleanup:[],rafIds:[]};
+  var S={config:null,entries:[],contexts:[],live:[],frames:[],browserFrames:[],handbacks:[],media:[],mediaOverflow:0,artwork:[],errors:[],tamper:null,killedOnce:[],forcedDecoders:{},uploads:[],claims:[],standDowns:[],departures:[],costs:[],cleanup:[],rafIds:[],unplannedContextCount:0,nextContextSerial:0};
   var stopped=false,frozenReport=null;
   var originalGetContext=HTMLCanvasElement.prototype.getContext;
   var locationName=new WeakMap(),programUniforms=new WeakMap(),textureInfo=new WeakMap();
@@ -72,18 +73,23 @@ INSTRUMENT_JS = r"""
       rect:r?{x:r.x,y:r.y,w:r.width,h:r.height}:null}:null;
   }
   function moveFor(v){var state=decoderState.get(v);return state&&state.move||null}
+  function departureRead(v){var r=v&&v.getBoundingClientRect?v.getBoundingClientRect():null;return v?{instance:v.__obedInstance==null?null:String(v.__obedInstance),elId:v.__obedElId==null?null:v.__obedElId,visible:visible(v),opacityProduct:opacityProduct(v),rect:r?{x:r.x,y:r.y,w:r.width,h:r.height}:null}:null}
+  function beginVisit(entry){var es=entryState[entry.id]||{};es.visit=(es.visit||0)+1;es.ring=[];es.domFrames=[];es.artworkDone=false;es.serial=null;es.sourceActive=true;delete es.leafSize;entryState[entry.id]=es;var v=es.decoder,ds=v&&decoderState.get(v);if(ds&&ds.move&&ds.move.entryId===entry.id)ds.move=null;return es}
+  function ensureVisit(entry){var es=entryState[entry.id]||{};return es.sourceActive&&es.visit?es:beginVisit(entry)}
+  function updateVisitLifecycle(){var current=scene();entries().forEach(function(entry){var es=entryState[entry.id]||{};if(current===entry.atScene-1){if(!es.sourceActive)beginVisit(entry)}else es.sourceActive=false})}
+  function promotePreconfiguredContexts(){updateVisitLifecycle();S.live.forEach(function(pair){var G=pair[1];if(G.closed||G.planned||!G.beforeConfig)return;var atScene=resolveAtScene(),active=entriesAt(atScene),context=G.context;if(!active.length)return;G.planned=true;G.atScene=atScene;G.entries=active;context.evidenceComplete=false;context.atScene=atScene;context.entryIds=active.map(function(e){return e.id});S.contexts.push(context);active.forEach(function(e){var es=ensureVisit(e);es.serial=G.serial;var v=decoderForEntry(e),ds=v&&decoderState.get(v);if(ds)ds.move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,generation:ds.generation,visit:es.visit}})})}
   function mediaEvent(kind,v,extra){
     var move=moveFor(v),state=decoderState.get(v),current=scene();
     if(kind==='pause'&&v.__obedPosterHeld&&!(move&&move.atScene===current+1)){var pendingMoves=entries().filter(function(e){return e.atScene===current+1&&
         (sameId(v.__obedInstance,e.objectId)||sameId(v.__obedInstance,e.dstObjectId))});
-      if(pendingMoves.length===1){var next=entryState[pendingMoves[0].id]||{};move={serial:null,atScene:pendingMoves[0].atScene,
-        entryId:pendingMoves[0].id,objectId:pendingMoves[0].objectId,generation:state&&state.generation,visit:(next.visit||0)+1}}
+      if(pendingMoves.length===1){var next=ensureVisit(pendingMoves[0]);move={serial:null,atScene:pendingMoves[0].atScene,
+        entryId:pendingMoves[0].id,objectId:pendingMoves[0].objectId,generation:state&&state.generation,visit:next.visit}}
       else if(pendingMoves.length>1)move={serial:null,atScene:current+1,entryId:null,generation:state&&state.generation,visit:null}}
     if(move&&move.atScene!==current&&move.atScene!==current+1)move=null;
     if(!move){var candidates=entries().filter(function(e){return (e.atScene===current||e.atScene===current+1)&&
         (sameId(v.__obedInstance,e.objectId)||sameId(v.__obedInstance,e.dstObjectId))});
-      if(candidates.length===1){var pending=entryState[candidates[0].id]||{};move={serial:null,atScene:candidates[0].atScene,
-        entryId:candidates[0].id,generation:state&&state.generation,visit:(pending.visit||0)+(current===candidates[0].atScene-1?1:0)}}}
+      if(candidates.length===1){var pending=current===candidates[0].atScene-1?ensureVisit(candidates[0]):entryState[candidates[0].id]||{};move={serial:null,atScene:candidates[0].atScene,
+        entryId:candidates[0].id,generation:state&&state.generation,visit:pending.visit||null}}}
     if(!move)return;if(S.media.length>=20000){S.mediaOverflow++;return}
     S.media.push(Object.assign({kind:kind,t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,
       generation:move.generation==null&&state?state.generation:move.generation,visit:move.visit==null?(entryState[move.entryId]||{}).visit:move.visit,
@@ -92,7 +98,7 @@ INSTRUMENT_JS = r"""
       mediaTime:v.__obedMediaTime==null?null:v.__obedMediaTime},extra||{}));
     if(kind==='pause'&&v.__obedPosterHeld&&move.entryId)S.departures.push({t:performance.now(),serial:move.serial,atScene:move.atScene,entryId:move.entryId,
       objectId:move.objectId||null,generation:move.generation==null&&state?state.generation:move.generation,
-      visit:move.visit==null?(entryState[move.entryId]||{}).visit:move.visit});
+      visit:move.visit==null?(entryState[move.entryId]||{}).visit:move.visit,source:'pause',decoder:departureRead(v)});
   }
   var ownedPause=function(){if(!stopped)mediaEvent('pause',this);return originalPause.apply(this,arguments)};
   var ownedPlay=function(){if(!stopped)mediaEvent('play',this);return originalPlay.apply(this,arguments)};
@@ -110,7 +116,7 @@ INSTRUMENT_JS = r"""
           if(scene()===e.atScene){var dom=domRead(v,e),stamp=frameTime(),domFrame={now:now,t:performance.now(),frameIndex:browserFrame(stamp),
             frameTimestamp:stamp,mediaTime:meta.mediaTime,presentedFrames:meta.presentedFrames,dom:dom};
             var domFrames=entryState[id].domFrames;domFrames.push(domFrame);if(domFrames.length>12)domFrames.shift();
-            S.handbacks.forEach(function(handback){if(handback.entryId===id&&handback.decoder===v&&!handback.complete&&!handback.timedOut&&domFrame.frameIndex>=handback.closedFrameIndex){
+            S.handbacks.forEach(function(handback){if(handback.entryId===id&&handback.decoder===v&&handback.visit===entryState[id].visit&&!handback.complete&&!handback.timedOut&&domFrame.frameIndex>=handback.closedFrameIndex){
               handback.frames.push(domFrame);if(handback.frames.length>=3)handback.complete=true}})}
           var current=scene(),move=state.move,moveLive=move&&move.entryId===id&&S.live.some(function(pair){return pair[1].serial===move.serial&&pair[1].frame});if(!size||!(current===e.atScene-1||moveLive))return;try{if(!sampled){patches=sample(v,{size:size,state:state,layout:S.config&&S.config.counterLayout});sampled=true}var ring=entryState[id].ring;ring.push({frame:meta.presentedFrames,mediaTime:meta.mediaTime,patches:patches});if(ring.length>18)ring.shift()}catch(x){noteError('rVFC sample',x)}});
         S.costs.push(performance.now()-costStart);if(S.costs.length>1000)S.costs.shift();
@@ -252,14 +258,16 @@ INSTRUMENT_JS = r"""
     gl.__obedMmFeedProbe=true;
     var atScene=resolveAtScene();S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1])});
     var active=entriesAt(atScene),O={},G={unit:gl.TEXTURE0,bindings:{},program:null,flip:false,premultiply:false,
-      frame:null,serial:S.contexts.length+1,regularUploads:0,atScene:atScene,entries:active,closed:false};
+      frame:null,serial:++S.nextContextSerial,regularUploads:0,atScene:atScene,entries:active,closed:false,planned:active.length>0,beforeConfig:!S.config};
     ['texImage2D','activeTexture','bindTexture','pixelStorei','useProgram','getUniformLocation','uniform1f','uniformMatrix4fv','clear','drawArrays','drawElements'].forEach(function(n){O[n]=gl[n]});
-    var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),firstDrawAt:null,closedAt:null,closedFrameIndex:null,atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id})};G.context=contextRecord;
-    S.contexts.push(contextRecord);S.live.push([gl,G]);
-    active.forEach(function(e){var es=entryState[e.id];es.visit=(es.visit||0)+1;es.serial=G.serial;
+    var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),firstDrawAt:null,closedAt:null,closedFrameIndex:null,atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id}),evidenceComplete:G.planned};G.context=contextRecord;
+    if(G.planned)S.contexts.push(contextRecord);else S.unplannedContextCount++;S.live.push([gl,G]);
+    active.forEach(function(e){var es=ensureVisit(e);es.serial=G.serial;
       [S.claims,S.standDowns].forEach(function(stream){stream.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial})});
       var v=decoderForEntry(e),ds=v&&decoderState.get(v);[S.media,S.departures].forEach(function(stream){stream.forEach(function(row){
         if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene&&row.visit===es.visit&&ds&&row.generation===ds.generation)row.serial=G.serial})});
+      var attributed=[S.claims,S.standDowns,S.departures].some(function(stream){return stream.some(function(row){return row.entryId===e.id&&row.atScene===atScene&&row.serial===G.serial})});
+      if(!attributed&&v&&ds)S.departures.push({t:contextRecord.createdAt,serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,generation:ds.generation,visit:es.visit,source:'context',decoder:departureRead(v)});
       if(v){armDecoder(v,e);decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,
         generation:decoderState.get(v).generation,visit:es.visit}}});
     gl.activeTexture=function(u){if(stopped)return O.activeTexture.apply(gl,arguments);G.unit=u;return O.activeTexture.apply(gl,arguments)};
@@ -279,13 +287,14 @@ INSTRUMENT_JS = r"""
       if(texture){var previous=textureInfo.get(texture)||{},poster=previous.poster,ordinal=previous.ordinal,size=previous.size;
         if(!isVideo){ordinal=++G.regularUploads;var planned=G.entries.filter(function(e){return [e.feed&&e.feed.from,e.feed&&e.feed.to].some(function(p){return p&&p.upload===ordinal})})[0];if(src&&planned)try{poster=sample(src,{size:[w,h],state:entryState[planned.id],layout:S.config&&S.config.counterLayout})}catch(e){noteError('poster sample',e)}}
         if(!isVideo)size=[w,h];var info={serial:G.serial,ordinal:ordinal,size:size,uploadedSize:isVideo?[w,h]:null,flip:G.flip,premultiply:G.premultiply,poster:poster,video:isVideo,presentedFrames:src&&src.__obedPresentedFrames,mediaTime:src&&src.__obedMediaTime};textureInfo.set(texture,info);
-        if(isVideo)S.uploads.push({serial:G.serial,atScene:G.atScene,t:performance.now(),frameN:G.frame&&G.frame.n,
+        if(isVideo&&G.planned)S.uploads.push({serial:G.serial,atScene:G.atScene,t:performance.now(),frameN:G.frame&&G.frame.n,
           frameIndex:G.frame&&G.frame.frameIndex,frameTimestamp:G.frame&&G.frame.frameTimestamp,textureOrdinal:ordinal,
           presentedFrames:info.presentedFrames,mediaTime:info.mediaTime})}
       return O.texImage2D.apply(gl,arguments);
     };
     gl.clear=function(){
       if(stopped)return O.clear.apply(gl,arguments);
+      if(!G.planned)return O.clear.apply(gl,arguments);
       if(G.frame){collectRiders(gl,G);finishFrame(gl,G)}
       var stamp=frameTime();G.frame={serial:G.serial,atScene:G.atScene,n:S.frames.length+1,t:performance.now(),frameTime:stamp,
         frameIndex:browserFrame(stamp),frameTimestamp:stamp,draws:0,uploads:0,rows:[],labels:[],riders:[],
@@ -294,6 +303,7 @@ INSTRUMENT_JS = r"""
     };
     function draw(name,args){
       if(stopped)return O[name].apply(gl,args);
+      if(!G.planned)return O[name].apply(gl,args);
       if(!G.frame){var unframed=O[name].apply(gl,args);if(contextRecord.firstDrawAt===null)contextRecord.firstDrawAt=performance.now();return unframed}
       var F=G.frame,draw=++F.draws,u=G.program?(programUniforms.get(G.program)||{}):{},table=G.entries[0]&&G.entries[0].draws&&G.entries[0].draws.draws||[],drawFact=table.filter(function(r){return r.draw===draw})[0];
       if(drawFact&&u.MVPMatrix)F.quads[draw]=quad(u.MVPMatrix,gl.drawingBufferWidth,gl.drawingBufferHeight,drawFact.layerSize);
@@ -330,8 +340,8 @@ INSTRUMENT_JS = r"""
     var later=laterQuads(F,row.draw),candidates=[],anyInside=false,anyClear=false,sampleSize=tex.uploadedSize||textureSize;
     PATCH_UV.forEach(function(uv){var safe=safeUv(uv,m,layerSize,sampleSize,tex.flip,later,gl.drawingBufferWidth,gl.drawingBufferHeight,row.quad);if(!safe.inside)return;anyInside=true;if(safe.covered)return;anyClear=true;
       var key=keyFor(uv),video=row._reference.vectors[key],poster=tex._poster&&tex._poster.vectors[key],dSep=distance(video,poster);
-      if(video&&finite(dSep))candidates.push({uv:uv,video:video,poster:poster,dSep:dSep})});
-    candidates.sort(function(a,b){return b.dSep-a.dSep});for(var i=0;i<candidates.length;i++){candidates[i].final=vectorFromGl(gl,m,layerSize,sampleSize,candidates[i].uv,tex.flip);if(candidates[i].final)return {patchInside:true,coveredByLaterDraw:false,choice:candidates[i]}}
+      if(video)candidates.push({uv:uv,video:video,poster:poster,dSep:dSep})});
+    candidates.sort(function(a,b){return (finite(b.dSep)?b.dSep:-1)-(finite(a.dSep)?a.dSep:-1)});for(var i=0;i<candidates.length;i++){candidates[i].final=vectorFromGl(gl,m,layerSize,sampleSize,candidates[i].uv,tex.flip);if(candidates[i].final)return {patchInside:true,coveredByLaterDraw:false,choice:candidates[i]}}
     return {patchInside:anyInside,coveredByLaterDraw:anyInside&&!anyClear};
   }
   function counterSafe(gl,F,row,m,size,flip,textureSize){
@@ -340,10 +350,11 @@ INSTRUMENT_JS = r"""
       inside=inside&&cell.every(function(p){return insideGrow(p,row.quad,0)});covered=covered||later.some(function(q){return overlapsGrow(cell,q,2)})}
     return {inside:inside,covered:covered};
   }
-  function holdMatch(entry,row,choice){
-    var candidates=(entryState[entry.id]&&entryState[entry.id].ring||[]).map(function(ref){return {frame:ref.frame,vector:choice&&ref.patches&&ref.patches.vectors[keyFor(choice.uv)]}}).filter(function(x){return x.vector});
-    if(choice&&choice.poster)candidates.push({frame:0,vector:choice.poster});var scored=candidates.map(function(x){return {frame:x.frame,distance:distance(choice&&choice.final,x.vector)}}).filter(function(x){return finite(x.distance)}).sort(function(a,b){return a.distance-b.distance});
-    return scored.length>=2?{kind:'alpha',bestFrame:scored[0].frame,matchDistance:scored[0].distance,matchMargin:scored[1].distance-scored[0].distance}:null;
+  function holdTarget(entry,G){var expected=[entry.feed&&entry.feed.from,entry.feed&&entry.feed.to].filter(function(x){return x&&Number.isInteger(x.upload)}).map(function(x){return x.upload}),uploaded=S.uploads.filter(function(row){return row.serial===G.serial&&row.atScene===G.atScene&&expected.indexOf(row.textureOrdinal)>=0&&Number.isInteger(row.presentedFrames)});if(uploaded.length)return uploaded[uploaded.length-1].presentedFrames;var pauses=S.media.filter(function(row){return row.serial===G.serial&&row.entryId===entry.id&&row.kind==='pause'&&Number.isInteger(row.presentedFrames)});return pauses.length?pauses[pauses.length-1].presentedFrames:null}
+  function holdMatch(entry,row,choice,G){
+    var candidates=(entryState[entry.id]&&entryState[entry.id].ring||[]).map(function(ref){return {frame:ref.frame,vector:choice&&ref.patches&&ref.patches.vectors[keyFor(choice.uv)],poster:false}}).filter(function(x){return x.vector});
+    if(choice&&choice.poster)candidates.push({frame:0,vector:choice.poster,poster:true});var targetFrame=holdTarget(entry,G),target=candidates.filter(function(x){return !x.poster&&x.frame===targetFrame}).slice(-1)[0];var scored=candidates.map(function(x){return {frame:x.frame,poster:x.poster,distance:distance(choice&&choice.final,x.vector),targetDistance:target?distance(target.vector,x.vector):null}}).filter(function(x){return finite(x.distance)}).sort(function(a,b){return a.distance-b.distance});
+    return scored.length>=2?{kind:'alpha',bestFrame:scored[0].frame,matchDistance:scored[0].distance,matchMargin:scored[1].distance-scored[0].distance,targetFrame:targetFrame,matches:scored}:null;
   }
   function holdCounterMatch(entry,row,value){
     var candidates=(entryState[entry.id]&&entryState[entry.id].ring||[]).map(function(ref){return {frame:ref.frame,counter:ref.patches&&ref.patches.counter}}).filter(function(x){return Number.isInteger(x.counter)});
@@ -356,11 +367,12 @@ INSTRUMENT_JS = r"""
     F.rows.forEach(function(row){var entry=G.entries.filter(function(e){return e.id===row.entryId})[0],tex=row.textures[0],m=row._matrix;
       if(!entry||!tex||!m){row.feedRead={patchInside:false,coveredByLaterDraw:false,kind:null,late:true};delete row._reference;return}
       var counterSafeRead=counterSafe(gl,F,row,m,row._layerSize,tex.flip,tex.uploadedSize||tex.size),counter=row._reference&&row._reference.counter;
+      var holding=row.decoder&&row.decoder.paused===true;
       if(counter!==null&&counter!==undefined){var finalCounter=counterFromGl(gl,m,row._layerSize,tex.uploadedSize||tex.size,tex.flip,S.config&&S.config.counterLayout);row.feedRead={patchInside:counterSafeRead.inside,coveredByLaterDraw:counterSafeRead.covered,kind:'counter',
-        counter:finalCounter.counter,counterLevels:finalCounter.levels,counterReason:finalCounter.reason,referenceCounter:counter,referenceLevels:row._reference.levels,referenceReason:row._reference.reason};row.holdMatch=holdCounterMatch(entry,row,finalCounter.counter)}
+        counter:finalCounter.counter,counterLevels:finalCounter.levels,counterReason:finalCounter.reason,referenceCounter:counter,referenceLevels:row._reference.levels,referenceReason:row._reference.reason};if(holding)row.holdMatch=holdCounterMatch(entry,row,finalCounter.counter)}
       else{var selected=bestGeneric(gl,F,row),choice=selected.choice;row.feedRead={patchInside:selected.patchInside,coveredByLaterDraw:selected.coveredByLaterDraw,kind:'alpha',
         dVideo:choice?distance(choice.final,choice.video):null,dPoster:choice?distance(choice.final,choice.poster):null,dSep:choice?choice.dSep:null,
-        referenceCounter:counter,referenceLevels:row._reference&&row._reference.levels||[],referenceReason:row._reference&&row._reference.reason||'source'};row.holdMatch=choice&&choice.final?holdMatch(entry,row,choice):null}
+        referenceCounter:counter,referenceLevels:row._reference&&row._reference.levels||[],referenceReason:row._reference&&row._reference.reason||'source'};if(holding)row.holdMatch=choice&&choice.final?holdMatch(entry,row,choice,G):null}
       delete row._reference;row.textures.forEach(function(t){if(t)delete t._poster});delete row._matrix;delete row._layerSize;
     });
     F.under.forEach(function(read){var after=pixelPatch(gl,read.under.rect),row=labelStats(read,after,laterQuads(F,read.draw));if(row)F.labels.push(row)});F.under=[];
@@ -375,9 +387,9 @@ INSTRUMENT_JS = r"""
   function finishContext(G,stamp,index){
     if(G.closed)return;G.closed=true;stamp=finite(stamp)?stamp:frameTime();index=Number.isInteger(index)?index:browserFrame(stamp);
     if(G.context){G.context.closedAt=stamp;G.context.closedFrameIndex=index}
-    G.entries.forEach(function(entry){var v=decoderForEntry(entry),uploads=S.uploads.filter(function(row){return row.serial===G.serial&&row.atScene===G.atScene});
+    G.entries.forEach(function(entry){var v=decoderForEntry(entry),ds=v&&decoderState.get(v),es=entryState[entry.id]||{},uploads=S.uploads.filter(function(row){return row.serial===G.serial&&row.atScene===G.atScene});
       var prior=(entryState[entry.id].domFrames||[]).filter(function(row){return row.frameIndex>=index}).slice(0,3);
-      S.handbacks.push({entryId:entry.id,serial:G.serial,atScene:G.atScene,entry:entry,decoder:v,closedAt:stamp,closedFrameIndex:index,
+      S.handbacks.push({entryId:entry.id,serial:G.serial,atScene:G.atScene,visit:es.visit||null,generation:ds&&ds.generation||null,entry:entry,decoder:v,closedAt:stamp,closedFrameIndex:index,
         closedDom:v?domRead(v,entry):null,frames:prior,complete:prior.length>=3,timedOut:false,deadline:performance.now()+1000,lastUpload:uploads.length?uploads[uploads.length-1]:null})});
     if(S.tamper&&S.tamper.kind==='after-feed'&&S.tamper.applied!==true&&G.atScene===S.tamper.atScene){S.tamper.failed=true;S.tamper.reason='target move context finished without a trigger'}
   }
@@ -397,7 +409,7 @@ INSTRUMENT_JS = r"""
     S.config=JSON.parse(JSON.stringify(config||{}));S.tamper=S.config.tamper?{kind:S.config.tamper,atScene:Number.isInteger(S.config.tamperScene)?S.config.tamperScene:null,applied:false}:null;
     S.entries=(Array.isArray(S.config.entries)?S.config.entries:[]).map(function(source){var e=JSON.parse(JSON.stringify(source)),planned=JSON.stringify(e.feed),row=planRow(e),runtime=row&&row.feed&&typeof row.feed==='object'?JSON.parse(JSON.stringify(row.feed)):null;e.planObjectId=row?row.src.objectId:e.objectId;e.planDstObjectId=row&&row.dst?row.dst.objectId:e.dstObjectId;e.feed=runtime;if(S.tamper&&S.tamper.kind==='ordinal'&&(!Number.isInteger(S.tamper.atScene)||e.atScene===S.tamper.atScene)&&planned!==JSON.stringify(runtime))S.tamper.applied=true;return e});
     entries().forEach(function(e){entryState[e.id]={ring:[],domFrames:[],visit:0};var v=decoderFor(e.planObjectId);if(v)armDecoder(v,e)});
-    S.live.forEach(function(pair){var G=pair[1],atScene=resolveAtScene(),active=entriesAt(atScene),context=S.contexts.filter(function(c){return c.serial===G.serial})[0];G.atScene=atScene;G.entries=active;if(context){context.atScene=atScene;context.entryIds=active.map(function(e){return e.id})}active.forEach(function(e){entryState[e.id].serial=G.serial;var v=decoderForEntry(e),ds=v&&decoderState.get(v);if(ds)ds.move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,generation:ds.generation,visit:entryState[e.id].visit}})});
+    promotePreconfiguredContexts();
     installKillSwitch();
     if(S.tamper&&S.tamper.kind==='after-feed')schedule(afterFeedTamper);
     return true;
@@ -432,7 +444,7 @@ INSTRUMENT_JS = r"""
   function armSeam(){
     var feed=window.__OBED_P2_PRESERVE__&&window.__OBED_P2_PRESERVE__.feed;if(!feed||feed.__obedMmFeedProbe)return;
     feed.__obedMmFeedProbe=true;var claim=feed.claim,stand=feed.onStandDown;
-    if(typeof claim==='function'){var ownedClaim=function(objectId){if(stopped)return claim.apply(feed,arguments);var result=claim.apply(feed,arguments),entry=entryForObject(objectId),v=decoderFor(objectId),move=v&&moveFor(v);S.claims.push({objectId:objectId,entryId:entry&&entry.id,serial:move&&entry&&move.atScene===entry.atScene?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),claimed:result===true});return result};feed.claim=ownedClaim;S.cleanup.push(function(){if(feed.claim===ownedClaim)feed.claim=claim})}
+    if(typeof claim==='function'){var ownedClaim=function(objectId){if(stopped)return claim.apply(feed,arguments);var result=claim.apply(feed,arguments),entry=entryForObject(objectId),v=decoderFor(objectId),move=v&&moveFor(v),ds=v&&decoderState.get(v),es=entry&&(scene()===entry.atScene-1?ensureVisit(entry):entryState[entry.id]);S.claims.push({objectId:objectId,entryId:entry&&entry.id,serial:move&&entry&&move.atScene===entry.atScene?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),claimed:result===true,generation:ds&&ds.generation||null,visit:es&&es.visit||null,source:'claim',decoder:departureRead(v)});return result};feed.claim=ownedClaim;S.cleanup.push(function(){if(feed.claim===ownedClaim)feed.claim=claim})}
     if(typeof stand==='function'){var ownedStand=function(objectId,reason){if(stopped)return stand.apply(feed,arguments);var v=decoderFor(objectId),move=v&&moveFor(v),result=stand.apply(feed,arguments),entry=entryForObject(objectId);S.standDowns.push({objectId:objectId,entryId:entry&&entry.id,serial:move&&entry&&move.atScene===entry.atScene?move.serial:null,atScene:entry&&entry.atScene,t:performance.now(),reason:reason==null?null:String(reason),accepted:result===true});return result};feed.onStandDown=ownedStand;S.cleanup.push(function(){if(feed.onStandDown===ownedStand)feed.onStandDown=stand})}
     S.cleanup.push(function(){if(feed.__obedMmFeedProbe===true)delete feed.__obedMmFeedProbe});
   }
@@ -441,7 +453,7 @@ INSTRUMENT_JS = r"""
       opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})}
   function riderTick(stamp){
     if(stopped)return;
-    var frameStamp=frameTime(),index=browserFrame(frameStamp);armSeam();installKillSwitch();entries().forEach(function(e){decoderForEntry(e)});
+    var frameStamp=frameTime(),index=browserFrame(frameStamp);armSeam();installKillSwitch();updateVisitLifecycle();entries().forEach(function(e){decoderForEntry(e)});
     S.live.forEach(function(pair){collectRiders(pair[0],pair[1])});
     S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G);if(!canvas||!canvas.isConnected)finishContext(G,frameStamp,index)});
     S.handbacks.forEach(function(h){if(!h.complete&&!h.timedOut&&performance.now()>=h.deadline)h.timedOut=true});settledArtwork();schedule(riderTick);
@@ -465,8 +477,8 @@ INSTRUMENT_JS = r"""
     if(frozenReport)return frozenReport;
     S.live.forEach(function(pair){if(pair[1].frame){collectRiders(pair[0],pair[1]);finishFrame(pair[0],pair[1])}});S.handbacks.forEach(function(h){if(!h.complete&&!h.timedOut&&performance.now()>=h.deadline)h.timedOut=true});
     var samplingEntries={};Object.keys(entryState).forEach(function(id){var ring=entryState[id].ring||[],latest=ring.length&&ring[ring.length-1],patches=latest&&latest.patches;samplingEntries[id]={references:ring.length,latestFrame:latest?latest.frame:null,latestCounter:patches?patches.counter:null,latestLevels:patches&&Array.isArray(patches.levels)?patches.levels:[],latestReason:patches?patches.reason:null}});
-    var result={kind:'mm-feed',version:2,config:S.config,sampling:{width:SAMPLE_WIDTH,referenceCapacity:18,entries:samplingEntries},contexts:S.contexts,frames:S.frames.slice().sort(function(a,b){return a.t-b.t}),media:S.media.filter(function(row){return row.serial!==null}),mediaDropped:droppedMedia(),mediaOverflow:S.mediaOverflow,artwork:S.artwork,errors:S.errors,
-      browserFrames:S.browserFrames,handbacks:S.handbacks.map(function(h){return {entryId:h.entryId,serial:h.serial,atScene:h.atScene,closedAt:h.closedAt,
+    var result={kind:'mm-feed',version:3,config:S.config,sampling:{width:SAMPLE_WIDTH,referenceCapacity:18,entries:samplingEntries},contexts:S.contexts.slice().sort(function(a,b){return a.serial-b.serial}),unplannedContextCount:S.unplannedContextCount,frames:S.frames.slice().sort(function(a,b){return a.t-b.t}),media:S.media.filter(function(row){return row.serial!==null}),mediaDropped:droppedMedia(),mediaOverflow:S.mediaOverflow,artwork:S.artwork,errors:S.errors,
+      browserFrames:S.browserFrames,handbacks:S.handbacks.map(function(h){return {entryId:h.entryId,serial:h.serial,atScene:h.atScene,visit:h.visit,generation:h.generation,closedAt:h.closedAt,
         closedFrameIndex:h.closedFrameIndex,closedDom:h.closedDom,frames:h.frames,complete:h.complete,timedOut:h.timedOut,lastUpload:h.lastUpload}}),
       uploads:S.uploads,claims:S.claims,standDowns:S.standDowns,departures:S.departures,callbackCostP95Ms:p95(S.costs),module:moduleRead(),tamper:S.tamper,killedOnce:S.killedOnce};
     stopped=true;if(typeof cancelAnimationFrame==='function')S.rafIds.splice(0).forEach(function(id){try{cancelAnimationFrame(id)}catch(e){}});S.cleanup.splice(0).forEach(function(clean){try{clean()}catch(e){}});
@@ -474,7 +486,7 @@ INSTRUMENT_JS = r"""
     S.live=[];S.entries=[];S.handbacks=[];S.cleanup=[];S.rafIds=[];S.forcedDecoders={};entryState={};decoderState=new WeakMap();locationName=new WeakMap();programUniforms=new WeakMap();textureInfo=new WeakMap();frozenReport=deepFreeze(JSON.parse(JSON.stringify(result)));return frozenReport;
   }
   schedule(riderTick);
-  window.__obedMmFeedProbe={version:2,bootstrap:bootstrap,configure:configure,sample:sample,decodeCounter:decodeCounter,report:report};
+  window.__obedMmFeedProbe={version:3,bootstrap:bootstrap,configure:configure,sample:sample,decodeCounter:decodeCounter,report:report};
 })();
 """
 
@@ -508,6 +520,15 @@ def verdict_records(
     if not isinstance(report, dict):
         return {}
     entries = list(entries)
+    version = report.get("version", 1)
+    if version not in (1, 2, 3):
+        return {
+            entry["id"]: {
+                "mode": "unavailable", "reason": f"unsupported feed evidence version {version!r}",
+                "continuousExpected": continuous_expected,
+            }
+            for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        }
     tamper = report.get("tamper")
     if isinstance(tamper, dict) and tamper.get("kind") and tamper.get("applied") is not True:
         return {
@@ -548,6 +569,7 @@ def verdict_records(
             handbacks=handbacks, browser_frames=browser_frames, continuous_expected=continuous_expected,
             media_overflow=media_overflow,
             media_dropped=media_dropped,
+            planned_serials={candidate["serial"] for candidate in moves},
         ) for move in moves]
         if len(visits) == 1:
             records[entry_id] = visits[0]
@@ -558,24 +580,42 @@ def verdict_records(
     return records
 
 
+def _entry_counter_layout(report: dict[str, Any], expected: list[dict[str, Any]]) -> dict[str, Any] | None:
+    config = report.get("config")
+    layout = config.get("counterLayout") if isinstance(config, dict) else None
+    source = layout.get("sourceSize") if isinstance(layout, dict) else None
+    if not isinstance(source, list) or len(source) != 2 or not all(_finite(value) and value > 0 for value in source):
+        return None
+    source_aspect = source[0] / source[1]
+    for side in expected:
+        size = side.get("size")
+        if isinstance(size, list) and len(size) == 2 and all(_finite(value) and value > 0 for value in size) \
+                and abs(size[0] / size[1] / source_aspect - 1) <= .01:
+            return layout
+    return None
+
+
 def _visit_record(
     report: dict[str, Any], entry: dict[str, Any], move: dict[str, Any], frames: list[dict[str, Any]],
     media_rows: list[dict[str, Any]], artwork_rows: list[dict[str, Any]], uploads: list[dict[str, Any]],
     claims: list[dict[str, Any]], stand_downs: list[dict[str, Any]], departures: list[dict[str, Any]], *,
     handbacks: list[dict[str, Any]], browser_frames: list[dict[str, Any]],
     continuous_expected: bool, media_overflow: Any, media_dropped: list[dict[str, Any]],
+    planned_serials: set[int],
 ) -> dict[str, Any]:
     entry_id, serial, at_scene = entry["id"], move.get("serial"), entry.get("atScene")
     object_id = entry.get("objectId")
+    belongs_to_other_visit = lambda row: row.get("serial") in planned_serials and row.get("serial") != serial
     move_frames = [f for f in frames if f.get("serial") == serial and f.get("atScene") == at_scene
                    and _finite(f.get("n")) and _finite(f.get("t")) and isinstance(f.get("rows"), list)]
     related_frames = [f for f in frames if f.get("atScene") == at_scene and (
-        f.get("serial") == serial or any(
+        f.get("serial") == serial or not belongs_to_other_visit(f) and any(
             isinstance(r, dict) and (r.get("entryId") == entry_id or r.get("objectId") == object_id)
             for r in (f.get("rows") if isinstance(f.get("rows"), list) else [])
         )
     )]
-    frames_complete = bool(move_frames) and len(move_frames) == len(related_frames) and all(
+    frames_complete = move.get("evidenceComplete") is not False and bool(move_frames) \
+        and len(move_frames) == len(related_frames) and all(
         isinstance(f.get("labels"), list) and isinstance(f.get("riders"), list)
         and isinstance(f.get("labelExpected"), list)
         and all(isinstance(r, dict) and isinstance(r.get("entryId"), str) for r in f["rows"])
@@ -587,7 +627,7 @@ def _visit_record(
     rows_by_frame = [[r for r in f["rows"] if isinstance(r, dict) and r.get("entryId") == entry_id]
                      for f in move_frames]
     rows = [r for group in rows_by_frame for r in group]
-    usable = move.get("lost") is False
+    usable = move.get("lost") is False and move.get("evidenceComplete") is not False
     planned = entry.get("feed") if isinstance(entry.get("feed"), dict) else {}
     expected = [v for v in (planned.get("from"), planned.get("to")) if isinstance(v, dict)]
     expected_ordinals = {v.get("upload") for v in expected if isinstance(v.get("upload"), int)}
@@ -598,9 +638,12 @@ def _visit_record(
     interval = None
     first_t = min((f["t"] for f in move_frames if _finite(f.get("t"))), default=None)
     matching = lambda row: row.get("entryId") == entry_id or (row.get("entryId") is None and row.get("objectId") == object_id)
-    related_claims = [r for r in claims if matching(r) and r.get("atScene") == at_scene]
-    related_stands = [r for r in stand_downs if matching(r) and r.get("atScene") == at_scene]
+    related_claims = [r for r in claims if matching(r) and r.get("atScene") == at_scene
+                      and not belongs_to_other_visit(r)]
+    related_stands = [r for r in stand_downs if matching(r) and r.get("atScene") == at_scene
+                      and not belongs_to_other_visit(r)]
     related_departures = [r for r in departures if r.get("atScene") == at_scene
+                          and not belongs_to_other_visit(r)
                           and (matching(r) or not isinstance(r.get("entryId"), str))]
     claims_complete = all(r.get("entryId") == entry_id and r.get("serial") == serial for r in related_claims)
     stands_complete = all(r.get("entryId") == entry_id and r.get("serial") == serial for r in related_stands)
@@ -620,7 +663,10 @@ def _visit_record(
         mode, reason = "departure", None
     else:
         mode, reason = "unavailable", "the core feed seam did not identify a feed or departure mode"
-    related_uploads = [r for r in uploads if r.get("atScene") == at_scene and r.get("textureOrdinal") in expected_ordinals]
+    if move.get("evidenceComplete") is False:
+        mode, reason = "unavailable", "context became planned without complete evidence"
+    related_uploads = [r for r in uploads if r.get("atScene") == at_scene
+                       and not belongs_to_other_visit(r) and r.get("textureOrdinal") in expected_ordinals]
     uploads_complete = all(r.get("serial") == serial and _finite(r.get("frameN")) and _finite(r.get("t"))
                            for r in related_uploads)
     entry_uploads = [r for r in related_uploads if r.get("serial") == serial]
@@ -669,6 +715,7 @@ def _visit_record(
     first_draw = next((frame for frame in move_frames
                        if isinstance(frame.get("draws"), int) and not isinstance(frame["draws"], bool)
                        and frame["draws"] > 0), None)
+    first_draw_index = move_frames.index(first_draw) if first_draw in move_frames else None
     first_draw_at = move.get("firstDrawAt")
     pre_draw_ms = float(first_draw_at) - float(move_frames[0]["t"]) \
         if first_draw is not None and _finite(first_draw_at) and first_draw_at >= first_draw["t"] else None
@@ -690,6 +737,85 @@ def _visit_record(
     rider_coverage = bool(move_frames) \
         and all(isinstance(f.get("draws"), int) and not isinstance(f["draws"], bool) and f["draws"] >= 0 for f in move_frames) \
         and all(len(group) == 1 and _rider_readable(group[0]) for group in rider_rows)
+    departure_exposure = None
+    if report.get("version") == 3:
+        identity_rows = entry_departures or [row for row in entry_claims if row.get("claimed") is True]
+        identity_row = identity_rows[0] if len(identity_rows) == 1 else None
+        pause_departures = [row for row in entry_departures if row.get("source") == "pause" and _finite(row.get("t"))]
+        pause_start = min(pause_departures, key=lambda row: row["t"], default=None)
+        created_at = move.get("createdAt")
+        start_t = min(float(created_at), float(pause_start["t"])) \
+            if _finite(created_at) and isinstance(pause_start, dict) and pause_start["t"] < created_at \
+            else created_at
+        start_source = "pause" if isinstance(pause_start, dict) and start_t == pause_start["t"] else "context"
+        start_identity = pause_start if start_source == "pause" else identity_row
+        start_decoder = start_identity.get("decoder") if isinstance(start_identity, dict) else None
+        context_visit_rows = [
+            row for row in (*media_rows, *handbacks)
+            if row.get("entryId") == entry_id and row.get("serial") == serial
+            and row.get("atScene") == at_scene
+        ]
+        context_visits = {
+            row["visit"] for row in context_visit_rows
+            if isinstance(row.get("visit"), int) and not isinstance(row.get("visit"), bool)
+        }
+        identity_matches_context_visit = len(context_visits) <= 1 and (
+            not context_visits or isinstance(start_identity, dict)
+            and start_identity.get("visit") in context_visits
+        )
+        through_first = rider_rows[:first_draw_index + 1] if isinstance(first_draw_index, int) else []
+        first_draw_t = move.get("firstDrawAt")
+        visibility_rows = [group for frame, group in zip(
+            move_frames[:pre_draw_frames], rider_rows[:pre_draw_frames], strict=True,
+        ) if _finite(start_t) and start_t <= frame["t"]]
+        departure_rider_groups = through_first[pre_draw_frames:] if exempt else through_first
+        ordering = bool(
+            _finite(start_t) and _finite(created_at) and _finite(first_draw_t)
+            and start_t <= first_draw_t and created_at <= first_draw_t
+        )
+        coverage = bool(
+            move.get("evidenceComplete") is True and first_draw is not None
+            and all(len(group) == 1 and _rider_readable(group[0]) for group in visibility_rows)
+            and all(len(group) == 1 and _rider_readable(group[0]) for group in departure_rider_groups)
+            and isinstance(start_identity, dict)
+            and isinstance(start_identity.get("decoder"), dict)
+            and isinstance(start_identity.get("visit"), int) and not isinstance(start_identity.get("visit"), bool)
+            and isinstance(start_identity.get("generation"), int)
+            and not isinstance(start_identity.get("generation"), bool)
+            and identity_matches_context_visit
+        )
+        visibility = [group[0]["visible"] for group in visibility_rows if len(group) == 1
+                      and isinstance(group[0].get("visible"), bool)]
+        hidden_whole = bool(visibility) and all(visible is False for visible in visibility)
+        visible_then_hidden = any(
+            visible is True and any(later is False for later in visibility[index + 1:])
+            for index, visible in enumerate(visibility)
+        )
+        observed_start = next((frame.get("t") for frame in move_frames[:pre_draw_frames]
+                               if _finite(frame.get("t")) and _finite(start_t) and frame["t"] >= start_t), None)
+        unobserved_before_context_ms = float(created_at) - float(start_t) \
+            if _finite(created_at) and _finite(start_t) and created_at > start_t else 0.0
+        departure_exposure = {
+            "complete": departures_complete and coverage and ordering,
+            "entryId": entry_id, "serial": serial, "atScene": at_scene,
+            "visit": start_identity.get("visit") if isinstance(start_identity, dict) else None,
+            "generation": start_identity.get("generation") if isinstance(start_identity, dict) else None,
+            "decoder": {
+                "instance": start_decoder.get("instance") if isinstance(start_decoder, dict) else None,
+                "elId": start_decoder.get("elId") if isinstance(start_decoder, dict) else None,
+            },
+            "context": {"serial": serial, "id": move.get("id")},
+            "start": {"t": start_t, "source": start_source,
+                      "decoderVisible": visibility[0] if visibility else None,
+                      "observedAt": observed_start,
+                      "unobservedBeforeContextMs": unobserved_before_context_ms},
+            "firstDraw": {"t": first_draw_t, "frameN": first_draw.get("n") if isinstance(first_draw, dict) else None},
+            "ordering": ordering, "intervalCoverage": coverage,
+            "posterExposure": visible_then_hidden,
+            "preDrawVisibility": visibility,
+            "hiddenWholePreDraw": hidden_whole,
+            "riders": [row for group in departure_rider_groups for row in group],
+        }
     labels = [r for f in move_frames for r in f.get("labels") or [] if isinstance(r, dict) and r.get("entryId") == entry_id]
     expected_labels = sum(
         1 for f in move_frames for r in f.get("labelExpected") or []
@@ -701,7 +827,7 @@ def _visit_record(
         for f in move_frames
     )
     last_t = max((f["t"] for f in move_frames if _finite(f.get("t"))), default=None)
-    related_media = [r for r in media_rows if r.get("atScene") == at_scene
+    related_media = [r for r in media_rows if r.get("atScene") == at_scene and not belongs_to_other_visit(r)
                      and (r.get("entryId") == entry_id or not isinstance(r.get("entryId"), str))]
     media_complete = not any(r.get("atScene") == at_scene and isinstance(r.get("count"), int)
                              and not isinstance(r.get("count"), bool) and r["count"] > 0 for r in media_dropped) \
@@ -741,6 +867,7 @@ def _visit_record(
             "seeked": any(r.get("kind") == "seeking" and pause["t"] <= r.get("t", -math.inf) <= resume["t"] for r in media),
             "resumedFromZero": after.get("mediaTime", 1) <= 0,
         })
+    resume_record = dict(poster)
     window_frames = move_frames if mode != "standDown" or stand is None else [f for f in move_frames if _finite(f.get("t")) and f["t"] >= stand["t"]]
     held_frames = [
         (frame, [row for row in frame.get("rows") or []
@@ -777,6 +904,7 @@ def _visit_record(
     feed = {
         **common, "complete": frames_complete and uploads_complete and claims_complete,
         "mode": mode, "crossfade": isinstance(planned.get("to"), dict),
+        "counterLayout": _entry_counter_layout(report, expected),
         "reads": feed_reads, "presentedFrames": presented,
         "framesFed": len(move_uploads), "continuousCoverage": mode == "continuous" and bool(wanted_frame_ns)
         and wanted_frame_ns <= fed_frame_ns,
@@ -787,24 +915,29 @@ def _visit_record(
     hold = {
         **common, "complete": frames_complete and uploads_complete and media_complete and stands_complete
         and departures_complete, "mode": "standDown" if mode == "standDown" else "departure", "reads": hold_reads,
+        "evidenceVersion": report.get("version", 1),
         "lastPresentedBeforeDeparture": pause.get("presentedFrames") if pause else None, "lastUploadedFrame": last_upload,
         "successfulFeed": bool(entry_uploads), "advancedDecoder": advanced, "reuploadAfterStandDown": reupload,
         "mediaOverflow": media_overflow,
     }
-    related_artwork = [r for r in artwork_rows if r.get("atScene") == at_scene
+    related_artwork = [r for r in artwork_rows if r.get("atScene") == at_scene and not belongs_to_other_visit(r)
                        and (r.get("entryId") == entry_id or not isinstance(r.get("entryId"), str))]
-    artwork_complete = all(r.get("entryId") == entry_id and r.get("serial") == serial
-                           and isinstance(r.get("artworkAbove"), bool)
-                           for r in related_artwork)
+    artwork_complete = usable and all(r.get("entryId") == entry_id and r.get("serial") == serial
+                                      and isinstance(r.get("artworkAbove"), bool)
+                                      for r in related_artwork)
     artwork = [r for r in related_artwork if r.get("entryId") == entry_id and r.get("serial") == serial]
     visit_handbacks = [r for r in handbacks if r.get("entryId") == entry_id and r.get("serial") == serial
                        and r.get("atScene") == at_scene]
     handback = _handback_record(
         visit_handbacks[0] if len(visit_handbacks) == 1 else None,
         media, last_upload_row, move, browser_frames, source_fps=entry.get("sourceFps"),
+        evidence_version=report.get("version", 1),
     )
+    if move.get("evidenceComplete") is False:
+        handback["complete"] = False
     poster["complete"] = frames_complete and media_complete and departures_complete
-    return {
+    resume_record["complete"] = poster["complete"]
+    result = {
         "mode": mode, "reason": reason, "evidenceVersion": report.get("version", 1), **common,
         "continuousExpected": continuous_expected,
         "feed": feed, "rider": {"riders": riders, "coverage": rider_coverage, "complete": frames_complete,
@@ -814,10 +947,14 @@ def _visit_record(
             "labels": labels, "expected": expected_labels,
             "coverage": label_coverage, "complete": frames_complete,
         },
-        "hold": hold, "poster": poster, "artwork": {"reads": artwork, "complete": artwork_complete},
+        "hold": hold, "poster": poster, "resume": resume_record,
+        "artwork": {"reads": artwork, "complete": artwork_complete},
         "handback": handback,
         "module": report.get("module"),
     }
+    if departure_exposure is not None:
+        result["departureExposure"] = departure_exposure
+    return result
 
 
 def _rider_readable(row: Any) -> bool:
@@ -867,6 +1004,7 @@ def _source_frame_duration(
 def _handback_record(
     handback: dict[str, Any] | None, media: list[dict[str, Any]], last_upload: dict[str, Any] | None,
     move: dict[str, Any], browser_frames: list[dict[str, Any]], *, source_fps: Any = None,
+    evidence_version: Any = 1,
 ) -> dict[str, Any]:
     mapping_complete = bool(browser_frames) and all(
         row.get("index") == index and _finite(row.get("timestamp"))
@@ -889,9 +1027,12 @@ def _handback_record(
     )
     duration_source = "fps" if _finite(source_fps) and source_fps > 0 else "rvfc"
     duration = _source_frame_duration(media, created_at=move.get("createdAt"), source_fps=source_fps)
+    identity_complete = evidence_version != 3 or isinstance(handback, dict) \
+        and isinstance(handback.get("generation"), int) and not isinstance(handback.get("generation"), bool) \
+        and isinstance(handback.get("visit"), int) and not isinstance(handback.get("visit"), bool)
     return {
         "complete": bool(isinstance(handback, dict) and handback.get("complete") is True and not handback.get("timedOut")
-                         and isinstance(frames, list) and len(frames) >= 3),
+                         and isinstance(frames, list) and len(frames) >= 3 and identity_complete),
         "timedOut": handback.get("timedOut") if isinstance(handback, dict) else None,
         "frameMappingComplete": mapping_complete,
         "lastUpload": {
@@ -952,6 +1093,8 @@ def score_feed_live(record: Any, *, continuous_expected: bool = True, alpha_floo
             else:
                 return finish(None, "a counter read is undecodable", reads=reads)
         elif kind == "alpha":
+            if isinstance(record.get("counterLayout"), dict) and read.get("referenceCounter") is None:
+                return finish(None, "counter-deck decoder reference fell back to Alpha distances", reads=reads)
             if not _finite(read.get("dVideo")) or not _finite(read.get("dPoster")) or not _finite(read.get("dSep")):
                 return finish(None, "an Alpha distance is unreadable", reads=reads)
             if read["dSep"] < alpha_floor:
@@ -1099,6 +1242,54 @@ def score_labels_over_feed(record: Any) -> dict[str, Any]:
     return _verdict(True, labels=checks)
 
 
+def score_departure_exposure(record: Any) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return _verdict(None, "departure-exposure evidence is missing")
+    detail = {
+        "entryId": record.get("entryId"), "serial": record.get("serial"), "atScene": record.get("atScene"),
+        "visit": record.get("visit"), "generation": record.get("generation"),
+        "decoder": record.get("decoder"), "context": record.get("context"),
+        "start": record.get("start"), "firstDraw": record.get("firstDraw"),
+        "ordering": record.get("ordering"), "intervalCoverage": record.get("intervalCoverage"),
+        "preDrawVisibility": record.get("preDrawVisibility"),
+    }
+    identity_readable = isinstance(record.get("entryId"), str) and bool(record["entryId"]) \
+        and all(isinstance(record.get(key), int) and not isinstance(record.get(key), bool)
+                for key in ("serial", "atScene", "visit", "generation")) \
+        and all(isinstance(record.get(key), dict) for key in ("decoder", "context", "start", "firstDraw"))
+    if record.get("complete") is not True or record.get("ordering") is not True \
+            or record.get("intervalCoverage") is not True or not identity_readable:
+        return _verdict(None, "the attributed departure interval is incomplete or unordered", **detail)
+    if not isinstance(record.get("posterExposure"), bool):
+        return _verdict(None, "source-poster exposure is unreadable", **detail)
+    riders = record.get("riders")
+    if not isinstance(riders, list) or not riders or not all(_rider_readable(row) for row in riders):
+        return _verdict(None, "the departure rider interval is unreadable", **detail)
+    offenders = [row for row in riders if _rider_offender(row)]
+    if offenders:
+        return _verdict(False, "a visible rider composited above the authored labels before the first GL draw",
+                        posterExposure=record["posterExposure"], offenders=offenders[:10], **detail)
+    visibility = record.get("preDrawVisibility")
+    hidden_whole = record.get("hiddenWholePreDraw") is True or (
+        isinstance(visibility, list) and bool(visibility)
+        and all(value is False for value in visibility)
+    )
+    first_visible = next((index for index, value in enumerate(visibility)
+                          if value is True), None) if isinstance(visibility, list) else None
+    leading_hidden = isinstance(first_visible, int) and any(
+        value is False for value in visibility[:first_visible]
+    )
+    if hidden_whole or leading_hidden:
+        reason = "decoder hidden for the whole pre-draw interval: pending owner classification" \
+            if hidden_whole else "decoder hidden before the first visible pre-draw frame: pending owner classification"
+        return _verdict(None,
+                        reason,
+                        posterExposure=False, offenders=[], **detail)
+    exposed = record["posterExposure"]
+    reason = "the source poster was exposed before the first GL draw" if exposed else None
+    return _verdict(not exposed, reason, posterExposure=exposed, offenders=[], **detail)
+
+
 def score_hold_frame(record: Any) -> dict[str, Any]:
     if not isinstance(record, dict):
         return _verdict(None, "hold-frame evidence is missing")
@@ -1124,6 +1315,7 @@ def score_hold_frame(record: Any) -> dict[str, Any]:
         return _verdict(None, "the held target or its first/middle/last reads are missing")
     if {read.get("phase") for read in reads if isinstance(read, dict)} != {"first", "middle", "last"}:
         return _verdict(None, "the held reads do not cover first, middle, and last draw")
+    neighbourhoods: list[dict[str, Any]] = []
     for read in reads:
         if not isinstance(read, dict) or not isinstance(read.get("bestFrame"), int) \
                 or read.get("kind") not in ("alpha", "counter", "texture"):
@@ -1137,12 +1329,66 @@ def score_hold_frame(record: Any) -> dict[str, Any]:
             continue
         if not _finite(read.get("matchMargin")):
             return _verdict(None, "a held-frame match is unreadable", reads=reads)
-        required = ALPHA_HOLD_MARGIN if read["kind"] == "alpha" else COUNTER_HOLD_MARGIN
-        if read["matchMargin"] < required:
-            return _verdict(None, "a held-frame match is ambiguous", reads=reads)
+        if read["kind"] == "counter":
+            if read["matchMargin"] < COUNTER_HOLD_MARGIN:
+                return _verdict(None, "a held-frame match is ambiguous", reads=reads)
+            if read["bestFrame"] != target:
+                return _verdict(False, "the GL canvas retained a different counter frame", reads=reads)
+            continue
+        measured = read.get("matches")
+        if measured is not None:
+            if not isinstance(measured, list) or not measured or read.get("targetFrame") != target or not all(
+                isinstance(row, dict) and isinstance(row.get("frame"), int)
+                and isinstance(row.get("poster"), bool) and _finite(row.get("distance"))
+                and _finite(row.get("targetDistance")) for row in measured
+            ):
+                return _verdict(None, "the Alpha hold neighbourhood is unreadable", reads=reads)
+            candidates = [row for row in measured if not row["poster"]]
+            posters = [row for row in measured if row["poster"]]
+            if len(posters) != 1:
+                return _verdict(None, "the Alpha hold poster measurement is missing or ambiguous", reads=reads)
+            if posters[0]["targetDistance"] < ALPHA_HOLD_MARGIN:
+                return _verdict(None, "the Alpha hold poster is indistinguishable from the target", reads=reads)
+            if not any(row["frame"] == target and abs(row["targetDistance"]) < 1e-9 for row in candidates):
+                return _verdict(None, "the Alpha hold target is absent from its measured neighbourhood", reads=reads)
+            near = [row for row in candidates if row["targetDistance"] < ALPHA_HOLD_MARGIN]
+            distinguishable = [posters[0], *(row for row in candidates
+                                             if row["targetDistance"] >= ALPHA_HOLD_MARGIN)]
+            if not near or not distinguishable:
+                return _verdict(None, "the Alpha hold neighbourhood is unreadable", reads=reads)
+            near_distance = min(row["distance"] for row in near)
+            distinguishable_distance = min(row["distance"] for row in distinguishable)
+            separation = distinguishable_distance - near_distance
+            if separation < ALPHA_HOLD_MARGIN:
+                if -separation >= ALPHA_HOLD_MARGIN:
+                    return _verdict(False, "the GL canvas retained the poster or a distinguishable frame",
+                                    mode=mode, targetFrame=target,
+                                    matchedFrames=[r.get("bestFrame") for r in reads],
+                                    exactness="neighbourhood", neighbourhood=neighbourhoods,
+                                    interval=feed_interval(record) or record.get("interval"))
+                return _verdict(None, "the Alpha hold neighbourhood is not separated from other frames", reads=reads)
+            neighbourhood = sorted({row["frame"] - target for row in near})
+            neighbourhoods.append({
+                "phase": read["phase"], "offsets": neighbourhood, "matchMargin": read["matchMargin"],
+                "separation": separation,
+                "targetMargins": [{"offset": row["frame"] - target, "margin": row["targetDistance"]}
+                                  for row in candidates],
+            })
+        else:
+            if read["matchMargin"] < ALPHA_HOLD_MARGIN:
+                return _verdict(None, "a held-frame match is ambiguous", reads=reads)
+            if read["bestFrame"] == 0:
+                return _verdict(False, "the GL canvas retained the source poster", reads=reads)
+            if read["bestFrame"] == target:
+                neighbourhoods.append({"phase": read["phase"], "offsets": [0],
+                                       "matchMargin": read["matchMargin"], "legacy": True})
+            else:
+                return _verdict(False, "the GL canvas retained a distinguishable frame", reads=reads)
     matches = [read["bestFrame"] for read in reads]
-    return _verdict(all(frame == target for frame in matches), "the GL canvas did not retain the exact target frame" if any(frame != target for frame in matches) else None,
+    return _verdict(True,
                     mode=mode, targetFrame=target, matchedFrames=matches,
+                    exactness="neighbourhood" if any(read.get("kind") == "alpha" for read in reads) else "exact",
+                    neighbourhood=neighbourhoods,
                     interval=feed_interval(record) or record.get("interval"))
 
 
@@ -1154,7 +1400,8 @@ def score_poster_hold(record: Any) -> dict[str, Any]:
     if record.get("mediaOverflow") not in (0, None):
         return _verdict(None, "the media event buffer overflowed")
     if record.get("holdPauseMissing") is True:
-        return _verdict(False if record.get("clockStill") is False else None, "the move-anchored hold pause is missing")
+        return _verdict(False if record.get("clockStill") is False else None,
+                        "the move-anchored hold pause is missing")
     if record.get("clockReadable") is False:
         return _verdict(None, "a decoder read is missing from the hold window")
     if record.get("clockStill") is False:
@@ -1193,10 +1440,20 @@ def score_poster_hold(record: Any) -> dict[str, Any]:
     if frame_step <= 0:
         return _verdict(False, "the decoder did not present the held-plus-one frame")
     source_steps = round(media_step / frame_duration)
-    if media_step <= 0 or source_steps != frame_step \
-            or abs(media_step - source_steps * frame_duration) > frame_duration / 2:
-        return _verdict(False, "the post-resume media time did not continue from the held frame", exactHeldPlusOne=False)
-    resumed_from_pause = frame_step == 1
+    continuity_detail = {
+        "exactHeldPlusOne": frame_step == 1,
+        "resumedFromPausePlusOne": frame_step == 1,
+        "resumptionDiscontinuity": frame_step - 1 if frame_step > 1 else 0,
+    }
+    if media_step <= 0 or source_steps <= 0:
+        return _verdict(False, "the post-resume media time did not continue from the held frame",
+                        **continuity_detail)
+    if abs(media_step / frame_duration - source_steps) > RESUME_CLOCK_RESIDUAL_FRAMES:
+        return _verdict(None, "the post-resume media and presented clocks are inconsistent",
+                        **continuity_detail)
+    if source_steps < frame_step:
+        return _verdict(False, "the post-resume media time did not continue from the held frame",
+                        **continuity_detail)
     if mode != "standDown" and mode != "departure":
         return _verdict(None, f"unknown poster-hold mode {mode!r}")
     last_upload = record.get("lastUploadedFrame")
@@ -1205,11 +1462,64 @@ def score_poster_hold(record: Any) -> dict[str, Any]:
         return _verdict(None, "the last uploaded frame is unreadable")
     if mode == "standDown" and successful_feed and record["pauseFrame"] < last_upload:
         return _verdict(None, "the pause frame precedes the retained upload")
-    discontinuity = frame_step > 1
-    return _verdict(True, mode=mode, exactHeldPlusOne=resumed_from_pause if not discontinuity else False,
-                    resumedFromPausePlusOne=resumed_from_pause,
-                    resumptionDiscontinuity=(frame_step - 1 if discontinuity else 0),
-                    resumedFromFrame=base_frame)
+    return _verdict(True, mode=mode, resumedFromFrame=base_frame,
+                    resumeFrameAdvance=frame_step, resumeSourceAdvance=source_steps,
+                    **continuity_detail)
+
+
+def score_resume(record: Any) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        return _verdict(None, "resume evidence is missing")
+    if record.get("complete") is not True:
+        return _verdict(None, "the resume producer stream is partial or unattributed")
+    if record.get("mediaOverflow") not in (0, None):
+        return _verdict(None, "the media event buffer overflowed")
+    required = (
+        "pauseMediaTime", "firstAfterMediaTime", "frameDurationS", "pauseCurrentTime",
+        "settleCurrentTime", "clockToleranceS",
+    )
+    if not all(_finite(record.get(key)) for key in required) or not all(
+        isinstance(record.get(key), int) and not isinstance(record.get(key), bool)
+        for key in ("pauseFrame", "firstAfterFrame")
+    ):
+        return _verdict(None, "the resume endpoints are unreadable")
+    if record.get("clockReadable") is not True:
+        return _verdict(None, "the resume clock is unreadable")
+    frame_duration, tolerance = record["frameDurationS"], record["clockToleranceS"]
+    if frame_duration <= 0 or tolerance < 0 or tolerance >= frame_duration / 2:
+        return _verdict(None, "the resume frame duration or tolerance is unreadable")
+    if record.get("clockStill") is not True \
+            or abs(record["settleCurrentTime"] - record["pauseCurrentTime"]) > tolerance:
+        return _verdict(False, "the hold clock is inconsistent before resume", report=False)
+    if record.get("seeked") is not False or record.get("resumedFromZero") is True:
+        return _verdict(False, "the decoder sought or restarted before resume", report=False)
+    base_frame = record.get("lastUploadedFrame") if record.get("successfulFeed") is True else record["pauseFrame"]
+    base_media_time = record.get("lastUploadedMediaTime") if record.get("successfulFeed") is True \
+        else record["pauseMediaTime"]
+    if not isinstance(base_frame, int) or isinstance(base_frame, bool) or not _finite(base_media_time):
+        return _verdict(None, "the held resume target is unreadable")
+    frame_step = record["firstAfterFrame"] - base_frame
+    media_step = record["firstAfterMediaTime"] - base_media_time
+    source_steps = round(media_step / frame_duration)
+    detail = {
+        "mode": record.get("mode"), "resumedFromFrame": base_frame,
+        "pauseFrame": record["pauseFrame"], "firstAfterFrame": record["firstAfterFrame"],
+        "presentedAdvance": frame_step, "sourceAdvance": source_steps,
+        "dropSize": source_steps - frame_step,
+        "exactHeldPlusOne": frame_step == 1 and source_steps == 1,
+    }
+    if frame_step <= 0 or media_step <= 0 or source_steps <= 0:
+        return _verdict(False, "the decoder did not advance at resume", report=False, **detail)
+    if abs(media_step / frame_duration - source_steps) > RESUME_CLOCK_RESIDUAL_FRAMES:
+        return _verdict(None, "the resume clocks are inconsistent", report=False, **detail)
+    if source_steps < frame_step:
+        return _verdict(False, "the resume clocks are inconsistent", report=False, **detail)
+    drop = source_steps - frame_step
+    if drop == 0:
+        return _verdict(True, report=False, **detail)
+    if drop == 1:
+        return _verdict(True, "report: one source frame was skipped at resume", report=True, **detail)
+    return _verdict(False, "two or more source frames were skipped at resume", report=False, **detail)
 
 
 def score_artwork_above(record: Any) -> dict[str, Any]:
