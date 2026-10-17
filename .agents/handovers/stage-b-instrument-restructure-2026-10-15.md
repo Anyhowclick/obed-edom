@@ -87,6 +87,10 @@ trashing any): `stage-b-coord` (merges), `funny-pasteur-751a72` (coordinator, `c
   - Saves about 35 s of wall time per round.
 
 ## Owner decisions (2026-10-15/16/17)
+- 2026-10-17: positives that hide the decoder in every pre-draw frame (10 entries: Alpha b6to7/b7to8 feed-on and feed-off-2s;
+  D7/D7s b1to2/b2to3; 15–32 ms before the first GL draw; C4-F r1 report) — **measure pixels first**: no `departureExposure`
+  registration for them until a round captures what is painted across hide → first draw. Last decoder frame → True;
+  poster/background → a real 1–2 frame flash, filed as a player follow-up.
 - 2026-10-17: C5 host-feed rows: (1) feed-on `holdFrame` must be an explicit present verdict record of `None` — a missing
   field is MISMATCH (P emits it at C4 integration); (2) REPORT-only observations (`entryColdStart`, the one-frame resume skip)
   never change an arm's class: the arm stays MATCH and the observations print as `REPORT:` lines.
