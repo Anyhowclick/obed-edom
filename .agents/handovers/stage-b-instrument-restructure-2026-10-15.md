@@ -42,6 +42,27 @@ and `alpha-b3to4-stall-2026-10-15.md`.
   - merge now, and fold the 9 Alpha arms into C4-F (hold, resume off-by-one, no-pause, ordinal reads) and C5-G (control scope, Alpha from-only re-registration).
 - The C10 audit is done (`c10-audit-record.md`), with no pin edits. The C4-F and C5-G Sol briefs are ready to launch in parallel.
 
+**2026-10-17 evening: C2-integration checkpoint, phase 1 landed** on `claude/stage-b-c4c5` @ `f4cf7dc2` (not yet in
+stage-b-arch). Plan r3 `.agents/plans/keynote_live_continuity_stage_b_c2_integration.plan.md` (owner-approved).
+- Streams, each Sol high with Opus 5.5 high review to READY:
+  - P-a `58174a93`: C4/C5 wiring;
+  - F `e50a16ee`: feed cost hooks and contracts;
+  - V `9edb2d70`: recorder, cost/validity and the canonical cost-row grammar, with fixture `tests/fixtures/instrument_cost_rows.json`;
+  - G-a `74eb8e6a`: resume rows and departure-early-hide discovery;
+  - O-a `7aee6698`: import switch;
+  - co-landing fixup `f4cf7dc2`.
+- Targeted tests: 3274 passed outside the sandbox on Node 16.0.
+- Coordinator choices this phase (reversible):
+  - the cost-row grammar (zero calls → None stats; not applicable ⇒ not installed);
+  - every REPORT line prints regardless of class;
+  - P calls the feed `report()` before `__obedCost.stop()`;
+  - a malformed hookHealth stays report-wide.
+- Every full round now ends with one pending RECORDED arm (departure-early-hide), so rounds need `--allow-record` until the owner classifies the departure pixels.
+- NEXT:
+  - phase 2, P-b: validity on every judged artifact; F/V/O co-lands; G's build round pass; V's sampler_self_check co-lands with P-b's prepaint start/stop; visible holders get `scope.kind = visible`.
+  - phase 3, P-c: pixel discovery.
+  - Then full suites plus the pre-5a integration round, then merge to stage-b-arch.
+
 **OPEN, due before gate 5a (owner 2026-10-16):** C1's feed-control colours and holdMatch/poster positive/red separation,
 and the D1 counter-policy obligations (D7 crossfade/from-only; a positive GL counter decode now exists on the strip2 D7
 feed-on arms). C1 gate 2 timing passed (`c1-gate2-record.md`).
