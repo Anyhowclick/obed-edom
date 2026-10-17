@@ -126,15 +126,11 @@ import gate_checks  # noqa: E402
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
 import mm_feed_variants  # noqa: E402
 import paint_instrument  # noqa: E402
+from paint_instrument import COST_RECORDER_JS  # noqa: E402
 import binary_counter_movie  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
 from live_evidence_contract import stage_map_valid  # noqa: E402
-
-try:
-    COST_RECORDER_JS = paint_instrument.COST_RECORDER_JS
-except AttributeError:
-    COST_RECORDER_JS = None
 
 FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
 ORIGINAL_INDEX = fixture("p2-recovery") / "html-adversarial/html-unmodified/index.html"
@@ -1791,8 +1787,7 @@ def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tupl
 
 
 def instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tuple[str, ...]:
-    recorder = (COST_RECORDER_JS,) if isinstance(COST_RECORDER_JS, str) and COST_RECORDER_JS else ()
-    return (*recorder, *feed_instrument_pre_navigation_scripts(facts))
+    return (COST_RECORDER_JS, *feed_instrument_pre_navigation_scripts(facts))
 
 
 def drive_and_sample(

@@ -53,6 +53,7 @@ def _load_probe_module():
 
 probe = _load_probe_module()
 import gate_checks as checks  # noqa: E402
+import paint_instrument  # noqa: E402
 from obed_edom import devtools_port  # noqa: E402
 from obed_edom.devtools_port import DevToolsEndpoint  # noqa: E402
 
@@ -65,6 +66,10 @@ SCALED_STAGE_MAP_4_3 = {"s": 4 / 3, "sy": 4 / 3, "ox": 0.0, "oy": 0.0, "offsetWi
 LETTERBOXED_STAGE_MAP_5_6 = {"s": 5 / 6, "sy": 5 / 6, "ox": 0.0, "oy": 50.0, "offsetWidth": 1920, "offsetHeight": 1080}
 
 _UNSET = object()
+
+
+def test_instrument_pre_navigation_scripts_always_includes_cost_recorder() -> None:
+    assert probe.instrument_pre_navigation_scripts(None) == (paint_instrument.COST_RECORDER_JS,)
 
 
 def _screen_rect(authored: dict[str, float], stage_map: dict[str, Any]) -> dict[str, float]:

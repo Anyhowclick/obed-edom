@@ -49,9 +49,6 @@ import gate_checks  # noqa: E402
 import live_continuity_probe as lcp  # noqa: E402
 import loop_fixture  # noqa: E402
 
-if not hasattr(lcp, "instrument_pre_navigation_scripts"):
-    lcp.instrument_pre_navigation_scripts = lambda facts: ("recorder", *lcp.feed_instrument_pre_navigation_scripts(facts))
-
 import managed_obs_qualify as q  # noqa: E402
 from obed_edom import live_runtime, managed_obs, placement_probe  # noqa: E402
 from obed_edom.fixture_paths import fixture  # noqa: E402

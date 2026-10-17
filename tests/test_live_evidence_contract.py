@@ -618,41 +618,9 @@ def test_feed_hook_health_contract_rejects_false_complete_and_uninstalled_accoun
     ]
 
 
-_EMBEDDED_INSTRUMENT_COST_ROWS = json.loads(r"""
-[
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":true},
-  {"row":{"applicable":true,"installed":true,"count":2,"p95":1.5,"max":2.0,"overBudget":2},"wellFormed":true},
-  {"row":{"applicable":true,"installed":true,"count":0,"p95":null,"max":null,"overBudget":0},"wellFormed":true},
-  {"row":{"applicable":false,"installed":false,"count":0,"p95":null,"max":null,"overBudget":0},"wellFormed":true},
-  {"row":{"applicable":true,"installed":false,"count":0,"p95":null,"max":null,"overBudget":0},"wellFormed":true},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":0,"extra":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0},"wellFormed":false},
-  {"row":{"applicable":1,"installed":true,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":1,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":true,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":-1,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":true},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":-1},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":0,"p95":0,"max":null,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":0,"p95":null,"max":0.0,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":0,"p95":null,"max":null,"overBudget":1},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":null,"max":1,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":1,"max":null,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":-1,"max":1,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":-1,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":2,"max":1,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":1e400,"max":1e400,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":true,"count":1,"p95":0,"max":0,"overBudget":2},"wellFormed":false},
-  {"row":{"applicable":false,"installed":true,"count":0,"p95":null,"max":null,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":false,"installed":false,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":false},
-  {"row":{"applicable":true,"installed":false,"count":1,"p95":0,"max":0,"overBudget":0},"wellFormed":false}
-]
-""")
-
-
 def _instrument_cost_rows() -> list[dict[str, Any]]:
     shared = REPO / "tests/fixtures/instrument_cost_rows.json"
-    return json.loads(shared.read_text()) if shared.exists() else _EMBEDDED_INSTRUMENT_COST_ROWS
+    return json.loads(shared.read_text())
 
 
 def test_instrument_cost_contract_matches_the_canonical_hook_row_grammar() -> None:
