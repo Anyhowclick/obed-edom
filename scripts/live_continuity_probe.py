@@ -130,6 +130,16 @@ from paint_instrument import COST_RECORDER_JS  # noqa: E402
 import binary_counter_movie  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
+from live_run_validity import (  # noqa: E402
+    HOST_HEADLESS_CHROME,
+    HOST_MANAGED_OBS_25,
+    HOST_MANAGED_OBS_30,
+    HOST_QUALIFIED_CHROME_ATTACH,
+    QUALIFICATIONS,
+    REQUIRED_HOOKS,
+    qualification,
+    run_validity,
+)
 from live_evidence_contract import stage_map_valid  # noqa: E402
 
 FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
@@ -223,17 +233,9 @@ FEED_CONTROL: dict[str, Any] = {}
 MM_FEED_REQUEST = "auto"
 MM_OPACITY_REQUEST = "auto"
 FEED_DWELL_S: float | None = None
+INSTRUMENT_VARIANT: str | None = None
+PAINT_SCORER_MIN_FPS = sys.float_info.min
 
-HOST_HEADLESS_CHROME = "headless Chrome"
-HOST_QUALIFIED_CHROME_ATTACH = "qualified Chrome attach"
-HOST_MANAGED_OBS_25 = "managed OBS 25"
-HOST_MANAGED_OBS_30 = "managed OBS 30"
-HOST_KINDS = (
-    HOST_HEADLESS_CHROME,
-    HOST_QUALIFIED_CHROME_ATTACH,
-    HOST_MANAGED_OBS_25,
-    HOST_MANAGED_OBS_30,
-)
 # Pass G (goTo autoplay repair): (fromOriginalOrdinal, toOriginalOrdinal) pairs.
 GOTO_MATRIX: tuple[tuple[int, int], ...] = ((1, 2), (1, 3), (1, 4), (3, 1), (4, 3))
 # 8 shots with a nominal margin over the >=360ms floor `spacing_ok` checks on the measured timestamps.
@@ -431,7 +433,9 @@ SAMPLER_JS = r"""
     } catch (e) { return null; }
   }
 """ + STAGE_MAP_FN_JS + paint_instrument.PAINT_READ_FN_JS + paint_instrument.PREPAINT_FN_JS + r"""
-  var meta = {schema: 2, rafTicks: 0, overflow: 0, errors: [], lastTs: null, running: false, startedAt: null, stoppedAt: null};
+  var meta = {schema: 2, rafTicks: 0, overflow: 0, errors: [], lastTs: null, running: false, startedAt: null, stoppedAt: null,
+              samplerCost: {installAttempts: 0, installed: false, callbacks: 0, enterCount: 0, leaveCount: 0, active: 0,
+                            accountingComplete: false}};
   var frameSeq = 0, frameTs = null, prepaint = null;
   function tick(){
     var t = performance.now();
@@ -473,8 +477,15 @@ SAMPLER_JS = r"""
   }
   function frame(ts){
     if (!meta.running) return;
-    probe.raf = requestAnimationFrame(frame);
+    var recorder = window.__obedCost, entered = false;
+    meta.samplerCost.callbacks++;
+    if (recorder && typeof recorder.enter === 'function') {
+      entered = recorder.enter('sampler.tick') === true;
+      if (entered) { meta.samplerCost.enterCount++; meta.samplerCost.active++; }
+      else if (meta.errors.length < 50) meta.errors.push('sampler.tick enter failed');
+    }
     try {
+      probe.raf = requestAnimationFrame(frame);
       frameSeq++;
       frameTs = document.timeline.currentTime;
       meta.rafTicks++;
@@ -485,6 +496,12 @@ SAMPLER_JS = r"""
       prepaint.toggle(frameSeq, frameTs);
     } catch (e) {
       if (meta.errors.length < 50) meta.errors.push('frame: ' + String(e && e.message || e));
+    } finally {
+      if (entered) {
+        meta.samplerCost.active--;
+        if (recorder.leave('sampler.tick') === true) meta.samplerCost.leaveCount++;
+        else if (meta.errors.length < 50) meta.errors.push('sampler.tick leave failed');
+      }
     }
   }
   function resetMeta(){
@@ -492,7 +509,9 @@ SAMPLER_JS = r"""
       var value = meta[k];
       if (typeof value === 'number') meta[k] = 0;
       else if (Array.isArray(value)) value.length = 0;
-      else if (value && typeof value === 'object') Object.keys(value).forEach(function(j){ if (typeof value[j] === 'number') value[j] = 0; });
+      else if (value && typeof value === 'object') Object.keys(value).forEach(function(j){
+        if (j !== 'installAttempts' && typeof value[j] === 'number') value[j] = 0;
+      });
     });
     meta.schema = 2;
     meta.lastTs = null;
@@ -501,9 +520,15 @@ SAMPLER_JS = r"""
   window.__obedContinuityProbe__ = {samples: samples, meta: meta};
   var probe = window.__obedContinuityProbe__;
   try { prepaint = installPrepaint(probe); } catch (e) { window.__obedContinuityProbe__ = null; throw e; }
+  meta.samplerCost.installAttempts++;
+  if (window.__obedCost && typeof window.__obedCost.install === 'function') {
+    meta.samplerCost.installed = window.__obedCost.install('sampler.tick') === true;
+    if (!meta.samplerCost.installed) meta.errors.push('sampler.tick install failed');
+  }
   probe.start = function(){
     if (meta.running) return true;
     resetMeta();
+    prepaint.start();
     meta.running = true;
     meta.startedAt = performance.now();
     probe.raf = requestAnimationFrame(frame);
@@ -512,8 +537,12 @@ SAMPLER_JS = r"""
   probe.stop = function(){
     if (probe.raf != null) cancelAnimationFrame(probe.raf);
     probe.raf = null;
+    prepaint.stop();
     if (meta.running) meta.stoppedAt = performance.now();
     meta.running = false;
+    meta.samplerCost.accountingComplete = meta.samplerCost.installed && meta.samplerCost.active === 0
+      && meta.samplerCost.callbacks === meta.samplerCost.enterCount
+      && meta.samplerCost.enterCount === meta.samplerCost.leaveCount;
     return true;
   };
   probe.drain = function(maxRows){ return samples.splice(0, maxRows); };
@@ -852,6 +881,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Probe-only feed module variant; from-only leaves the destination texture baked",
     )
     parser.add_argument(
+        "--instrument-variant", choices=mm_feed_instrument.INSTRUMENT_VARIANTS, default=None,
+        help="Probe-only feed instrument calibration variant",
+    )
+    parser.add_argument(
         "--feed-dwell", choices=(2.0, 5.0, 12.0), type=float, default=None,
         help="Exact-frame arm source dwell in seconds",
     )
@@ -871,6 +904,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         or args.gl_replay != "off" or args.gl_force_fail is not None or args.force_wrap is not None
         or args.rescore is not None or args.skip_arms or args.carry_cover or args.carry_cover_null or args.burst_poke
         or args.feed_tamper is not None or args.hold_upload_kill_switch or args.feed_variant is not None
+        or args.instrument_variant is not None
     ):
         parser.error("--paint-control runs on its own in launch mode (optionally with --viewport, --fixture, "
                      "--original-index and --artifact)")
@@ -883,7 +917,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.strip is not None or args.only_pass is not None or args.attach or args.gl_replay != "off"
             or args.gl_force_fail is not None or args.force_wrap is not None or args.rescore is not None
             or args.skip_arms or args.burst_poke or args.feed_tamper is not None or args.hold_upload_kill_switch
-            or args.feed_variant is not None
+            or args.feed_variant is not None or args.instrument_variant is not None
         ):
             parser.error("--carry-cover runs on its own (optionally with --core-variant or --carry-cover-null, "
                          "--viewport, --fixture, --original-index and --artifact)")
@@ -910,7 +944,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--force-wrap runs on its own (no --pass, --gl-force-fail or --rescore)")
     if args.rescore is not None and (args.gl_force_fail is not None or args.only_pass is not None):
         parser.error("--rescore runs on its own (no --pass or --gl-force-fail)")
-    if (args.feed_tamper is not None or args.hold_upload_kill_switch or args.feed_variant is not None) and (
+    if (
+        args.feed_tamper is not None or args.hold_upload_kill_switch or args.feed_variant is not None
+        or args.instrument_variant is not None
+    ) and (
         red_arm or args.only_pass is not None or args.gl_force_fail is not None or args.force_wrap is not None
         or args.rescore is not None or args.gl_replay != "off"
     ):
@@ -1782,7 +1819,10 @@ def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tupl
         "killHoldUpload": FEED_CONTROL.get("killHoldUpload", False),
         "counterLayout": counter_layout_for(facts),
     }
-    source = mm_feed_instrument.INSTRUMENT_JS + "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
+    source = mm_feed_instrument.INSTRUMENT_JS
+    if INSTRUMENT_VARIANT is not None:
+        source = mm_feed_instrument.instrument_variant(INSTRUMENT_VARIANT, source)
+    source += "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
     return (source,)
 
 
@@ -1790,10 +1830,326 @@ def instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tuple[str
     return (COST_RECORDER_JS, *feed_instrument_pre_navigation_scripts(facts))
 
 
+def instrument_applicability(kind: str, facts: Mapping[str, Any] | None = None) -> dict[str, bool]:
+    feed = bool(feed_specs_for(dict(facts) if facts is not None else None))
+    sampler = kind in {"capture-arm", "pass-g", "paint-control", "carry-cover"}
+    prepaint = kind in {"capture-arm", "pass-g", "paint-control"}
+    return {
+        "sampler.tick": sampler,
+        "paint.prePaint": prepaint,
+        "feed.rvfc": feed,
+        "feed.raf": feed,
+        "feed.draw": feed,
+        "frame.total": True,
+    }
+
+
+def read_instrument_cost_recording(transport: Any, page_size: int = 256) -> dict[str, Any]:
+    head = transport.evaluate(
+        "(function(){var c=window.__obedCost;return c&&typeof c.read==='function'?c.read('__meta__',0,0):null;})()"
+    )
+    if not isinstance(head, dict):
+        return {"version": None, "stopped": False, "errors": ["cost recorder is not installed"], "hooks": {}, "frames": {}}
+    recording = copy.deepcopy(head)
+    hooks = recording.get("hooks") if isinstance(recording.get("hooks"), dict) else {}
+    recording["hooks"] = hooks
+    frames = recording.get("frames") if isinstance(recording.get("frames"), dict) else {}
+    recording["frames"] = frames
+    for hook in (*hooks, "frame.total"):
+        target = frames if hook == "frame.total" else hooks[hook]
+        if not isinstance(target, dict):
+            target = {"count": None, "chunks": []}
+            if hook == "frame.total":
+                recording["frames"] = target
+                frames = target
+            else:
+                hooks[hook] = target
+        count = target.get("count") if isinstance(target, dict) else None
+        target["chunks"] = []
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            continue
+        offset = 0
+        while offset < count:
+            page = transport.evaluate(
+                "(function(){var c=window.__obedCost;return c&&typeof c.read==='function'?c.read("
+                + json.dumps(hook) + f",{offset},{page_size}):null;}})()"
+            )
+            source = page.get("frames") if hook == "frame.total" and isinstance(page, dict) else (
+                (page.get("hooks") or {}).get(hook) if isinstance(page, dict) else None
+            )
+            chunks = source.get("chunks") if isinstance(source, dict) else None
+            values = chunks[0] if isinstance(chunks, list) and len(chunks) == 1 and isinstance(chunks[0], list) else None
+            if not values:
+                recording.setdefault("errors", []).append(f"cost read stopped at {hook}[{offset}] of {count}")
+                break
+            target["chunks"].append(values)
+            offset += len(values)
+    return recording
+
+
+def finalize_instrument_cost(
+    transport: Any, kind: str, facts: Mapping[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    stopped = transport.evaluate(
+        "(function(){var c=window.__obedCost;return !!(c&&typeof c.stop==='function'&&c.stop()===true);})()"
+    )
+    recording = read_instrument_cost_recording(transport)
+    if stopped is not True:
+        recording.setdefault("errors", []).append("cost recorder stop failed")
+    summary = paint_instrument.summarize_instrument_cost(recording, instrument_applicability(kind, facts))
+    errors = contract.first_errors(contract.instrument_cost(summary))
+    if errors:
+        raise RuntimeError(_contract_reason(errors))
+    return summary
+
+
+def reconcile_instrument_accounting(
+    capture: dict[str, Any], kind: str, facts: Mapping[str, Any] | None = None,
+) -> None:
+    cost = capture.get("instrumentCost")
+    if not isinstance(cost, dict):
+        return
+    if contract.first_errors(contract.instrument_cost(cost)):
+        return
+    applicability = instrument_applicability(kind, facts)
+    problems: dict[str, str] = {}
+    sampler = capture.get("sampler")
+    meta = sampler.get("meta") if isinstance(sampler, Mapping) else None
+    if kind in {"capture-arm", "pass-g", "paint-control"}:
+        sampler_health = meta.get("samplerCost") if isinstance(meta, Mapping) else None
+        sampler_row = cost.get("sampler.tick")
+        if not (
+            isinstance(sampler_health, Mapping) and sampler_health.get("accountingComplete") is True
+            and isinstance(sampler_row, Mapping) and sampler_row.get("count") == sampler_health.get("callbacks")
+        ):
+            problems["sampler.tick"] = "sampler callback accounting is incomplete"
+        observer = meta.get("prepaintObserver") if isinstance(meta, Mapping) else None
+        prepaint_row = cost.get("paint.prePaint")
+        if not (
+            isinstance(observer, Mapping) and isinstance(prepaint_row, Mapping)
+            and observer.get("active") is False and observer.get("disconnected") is True
+            and isinstance(observer.get("callbacks"), int)
+            and prepaint_row.get("count") == observer.get("callbacks")
+        ):
+            problems["paint.prePaint"] = "pre-paint callback accounting is incomplete"
+    elif kind == "carry-cover":
+        read = capture.get("read")
+        health = read.get("health") if isinstance(read, Mapping) else None
+        sampler_row = cost.get("sampler.tick")
+        if not (
+            isinstance(health, Mapping) and health.get("accountingComplete") is True
+            and isinstance(sampler_row, Mapping) and sampler_row.get("count") == health.get("callbacks")
+        ):
+            problems["sampler.tick"] = "carry-cover callback accounting is incomplete"
+    if bool(feed_specs_for(dict(facts) if facts is not None else None)):
+        producer = _feed_producer(capture)
+        health = producer.get("hookHealth") if isinstance(producer, Mapping) else None
+        hooks = health.get("hooks") if isinstance(health, Mapping) else None
+        feed_complete = isinstance(health, Mapping) and health.get("accountingComplete") is True
+        for hook in ("feed.rvfc", "feed.raf", "feed.draw"):
+            row = cost.get(hook)
+            hook_health = hooks.get(hook) if isinstance(hooks, Mapping) else None
+            if not feed_complete or not (
+                isinstance(hook_health, Mapping) and isinstance(row, Mapping)
+                and row.get("count") == hook_health.get("callbackCount")
+            ):
+                problems[hook] = "feed callback accounting is incomplete"
+    for hook, problem in problems.items():
+        if applicability.get(hook) is not True or not isinstance(cost.get(hook), dict):
+            continue
+        cost[hook].update(installed=False, count=0, p95=None, max=None, overBudget=0)
+    capture["instrumentAccounting"] = {"complete": not problems, "problems": problems}
+
+
+def gl_intervals_for(capture: Mapping[str, Any], facts: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
+    gl = capture.get("glReplay")
+    requested = gl.get("requested") if isinstance(gl, Mapping) else gl
+    continuity = capture.get("continuity")
+    runtime = continuity.get("glReplay") if isinstance(continuity, Mapping) else None
+    if requested == "auto" or isinstance(runtime, Mapping) and runtime.get("mode") == "injected":
+        return None
+    specs = feed_specs_for(dict(facts) if facts is not None else None)
+    if specs:
+        intervals: list[dict[str, Any]] = []
+        for spec in specs:
+            scored = capture.get(spec["id"])
+            if not isinstance(scored, Mapping):
+                verdicts = capture.get("verdicts")
+                scored = verdicts.get(spec["id"]) if isinstance(verdicts, Mapping) else None
+            under = scored.get("underArtwork") if isinstance(scored, Mapping) else None
+            interval = under.get("interval") if isinstance(under, Mapping) else None
+            start = _finite_number(interval.get("start")) if isinstance(interval, Mapping) else None
+            end = _finite_number(interval.get("end")) if isinstance(interval, Mapping) else None
+            if start is None or end is None or end < start:
+                return None
+            intervals.append({"start": start, "end": end})
+        return intervals
+    return []
+
+
+def capture_run_validity(capture: Mapping[str, Any], facts: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    host_kind = capture.get("hostKind")
+    return run_validity(
+        capture,
+        qualification(host_kind) if isinstance(host_kind, str) else None,
+        gl_intervals=gl_intervals_for(capture, facts),
+    )
+
+
+def artifact_run_validity(holders: Mapping[str, Any]) -> dict[str, Any]:
+    retained: dict[str, Any] = {}
+    reasons: list[str] = []
+    statuses: list[bool | None] = []
+    host_kinds: list[Any] = []
+    for name, holder in holders.items():
+        host_kind = holder.get("hostKind") if isinstance(holder, Mapping) else None
+        validity = holder.get("runValidity") if isinstance(holder, Mapping) else None
+        host_kinds.append(host_kind)
+        retained[str(name)] = copy.deepcopy(validity)
+        status = validity.get("ok") if isinstance(validity, Mapping) and "ok" in validity else object()
+        if status is not True and status is not False and status is not None:
+            statuses.append(None)
+            reasons.append(f"{name}: runValidity is missing or malformed")
+            continue
+        statuses.append(status)
+        reasons.extend(f"{name}: {reason}" for reason in validity.get("reasons") or [])
+    homogeneous = bool(host_kinds) and len(set(host_kinds)) == 1 and isinstance(host_kinds[0], str)
+    if not homogeneous:
+        reasons.append("holders do not share one hostKind")
+        statuses.append(None)
+    ok = False if False in statuses else True if statuses and all(status is True for status in statuses) else None
+    builds = [
+        (((retained.get(str(name)) or {}).get("measured") or {}).get("environment") or {}).get("chromeBuild")
+        for name in holders
+    ]
+    chrome_build = (
+        builds[0] if builds and builds[0] is not None and all(build == builds[0] for build in builds) else None
+    )
+    return {
+        "ok": ok,
+        "reasons": reasons,
+        "policy": {"hostKind": host_kinds[0] if homogeneous else None},
+        "measured": {"environment": {"chromeBuild": chrome_build}},
+        "holders": retained,
+    }
+
+
+def _merge_contract_errors(target: dict[str, Any], errors: Sequence[str]) -> None:
+    existing = target.get("contractErrors") if isinstance(target.get("contractErrors"), list) else []
+    target["contractErrors"] = list(dict.fromkeys([*existing, *errors]))
+
+
+def _invalidate_holder_validity(holder: dict[str, Any], errors: Sequence[str]) -> None:
+    _merge_contract_errors(holder, errors)
+    validity = holder.get("runValidity")
+    if not isinstance(validity, Mapping):
+        return
+    invalid = copy.deepcopy(dict(validity))
+    invalid["ok"] = False if validity.get("ok") is False else None
+    reasons = list(invalid.get("reasons")) if isinstance(invalid.get("reasons"), list) else []
+    reason = _contract_reason(list(errors))
+    if reason not in reasons:
+        reasons.append(reason)
+    invalid["reasons"] = reasons
+    holder["runValidity"] = invalid
+
+
+def _validity_holder_contract_errors(holder: Any, path: str, *, attach: bool) -> list[str]:
+    if not hasattr(contract, "validity_holder"):
+        return []
+    return contract.first_errors(contract.validity_holder(holder, path, attach=attach))
+
+
+def _artifact_validity_contract_errors(value: Any) -> list[str]:
+    if not hasattr(contract, "artifact_run_validity"):
+        return []
+    return contract.first_errors(contract.artifact_run_validity(value, "runValidity"))
+
+
+def publish_artifact_run_validity(result: dict[str, Any], holders: Mapping[str, Any]) -> None:
+    report_errors: list[str] = []
+    for name, holder in holders.items():
+        errors = _validity_holder_contract_errors(holder, str(name), attach=name == "attach")
+        if not errors:
+            continue
+        if isinstance(holder, dict):
+            _invalidate_holder_validity(holder, errors)
+        else:
+            report_errors.extend(errors)
+    if report_errors:
+        _merge_contract_errors(result, report_errors)
+    host_kinds = [holder.get("hostKind") if isinstance(holder, Mapping) else None for holder in holders.values()]
+    if host_kinds and all(isinstance(host, str) and host == host_kinds[0] for host in host_kinds):
+        aggregate = artifact_run_validity(holders)
+        errors = _artifact_validity_contract_errors(aggregate)
+        if errors:
+            _merge_contract_errors(result, errors)
+            result.pop("runValidity", None)
+        else:
+            result["runValidity"] = aggregate
+    else:
+        result.pop("runValidity", None)
+
+
+def artifact_validity_holders(kind: str, result: Mapping[str, Any]) -> dict[str, Any]:
+    if kind == "full":
+        skipped = set(result.get("skippedArms") or [])
+        arms = result.get("arms") if isinstance(result.get("arms"), Mapping) else {}
+        ground_truth = result.get("groundTruth") if isinstance(result.get("groundTruth"), Mapping) else {}
+        required_arms = [name for name in ("A", "B") if name not in skipped]
+        if "C" not in skipped and ("C" in arms or "bridgeScene" in ground_truth):
+            required_arms.append("C")
+        holders = {f"arms.{name}": arms.get(name) for name in required_arms}
+        visible = result.get("visible") if isinstance(result.get("visible"), Mapping) else {}
+        required_visible = [name for name in ("V", "Voff") if name not in skipped]
+        gl = result.get("glReplay")
+        if isinstance(gl, Mapping) and gl.get("requested") == "auto":
+            required_visible.append("Vgl")
+        holders.update({f"visible.{name}": visible.get(name) for name in required_visible})
+        if "attach" not in skipped:
+            holders["attach"] = result.get("attach")
+        return holders
+    if kind == "arm":
+        return {"arm": result.get("arm")}
+    if kind == "pass-g":
+        matrix = result.get("matrix")
+        if isinstance(matrix, Sequence) and not isinstance(matrix, (str, bytes)):
+            holders = {}
+            for arm in ("armed", "nullControl"):
+                destinations = destinations_of(result.get(arm))
+                for index, case in enumerate(matrix):
+                    destination = destinations[index] if index < len(destinations) else None
+                    holders[f"{arm}.destination.{index}"] = destination
+                    if arm == "armed" and isinstance(case, Sequence) and len(case) == 3:
+                        holders[f"{arm}.leg.{index}"] = (
+                            destination.get("advanceCarry") if isinstance(destination, Mapping) else None
+                        )
+            return holders
+        holders = {
+            f"{arm}.destination.{index}": destination
+            for arm in ("armed", "nullControl")
+            for index, destination in enumerate(destinations_of(result.get(arm)))
+        }
+        holders.update({
+            f"{arm}.leg.{index}": destination["advanceCarry"]
+            for arm in ("armed", "nullControl")
+            for index, destination in enumerate(destinations_of(result.get(arm)))
+            if isinstance(destination.get("advanceCarry"), Mapping)
+        })
+        return holders
+    if kind == "carry-cover":
+        return {
+            f"bridge.{bridge.get('boundary', index)}": bridge.get("capture")
+            for index, bridge in enumerate(result.get("bridges") or [])
+        }
+    raise ValueError(f"unknown artifact validity kind {kind!r}")
+
+
 def drive_and_sample(
     player: LiveOutputHost, *, observer: Callable[[int], None] | None = None,
     carry_into: Collection[int] = (),
     feed_facts: dict[str, Any] | None = None, feed_sink: dict[str, Any] | None = None,
+    cost_sink: dict[str, Any] | None = None,
     feed_continuous_expected: bool = True,
 ) -> list[dict[str, Any]]:
     """Advance through every original slide in order (on P2: 2 is the 1->2 magic move, 3 the
@@ -1836,14 +2192,17 @@ def drive_and_sample(
             observer(ordinal)
     time.sleep(POST_ADVANCE_SETTLE_S)
     transport.evaluate(SAMPLER_STOP_JS)
-    if feed_sink is not None and feed_specs:
+    if feed_specs:
         report = transport.evaluate("window.__obedMmFeedProbe.report()")
-        feed_sink.update({
-            "producer": report,
-            "verdicts": mm_feed_instrument.verdict_records(
-                report, feed_specs, continuous_expected=feed_continuous_expected,
-            ),
-        })
+        if feed_sink is not None:
+            feed_sink.update({
+                "producer": report,
+                "verdicts": mm_feed_instrument.verdict_records(
+                    report, feed_specs, continuous_expected=feed_continuous_expected,
+                ),
+            })
+    if cost_sink is not None:
+        cost_sink["instrumentCost"] = finalize_instrument_cost(transport, "capture-arm", feed_facts)
     return drain_samples(transport)
 
 
@@ -2714,7 +3073,7 @@ def carry_paint(
     samples: list[dict[str, Any]], element_id: Any, asset: str, window: dict[str, float],
     boundary_scene: float, src_rect: dict[str, float], dst_rect: dict[str, float], *,
     transition_scene: float | None, rect_tolerance: float, wrap_times: Sequence[float] = (),
-    segment: tuple[float, float] | None = None,
+    segment: tuple[float, float] | None = None, min_fps: float = PAINT_SCORER_MIN_FPS,
 ) -> dict[str, Any]:
     """`paint_instrument.score_paint` over a carry's window (`wrap_times`: the classified loop wraps). The slot is the source rect before
     the move, the destination on move-complete and after rows, and on a bridge's move rows the
@@ -2746,7 +3105,7 @@ def carry_paint(
         samples, element_id, asset,
         start=start, end=end,
         slot_of=slot_of, stage_box_of=stage_box_of, rect_tolerance=rect_tolerance, iou_min=INSTANCE_IOU_MIN,
-        max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES, min_fps=CARRY_COVER_MIN_FPS,
+        max_gap_frames=CARRY_COVER_MAX_GAP_FRAMES, min_fps=min_fps,
         unreadable_of=lambda row: phase_unreadable(row, transition_scene, source), wrap_times=wrap_times,
     )
 
@@ -2762,6 +3121,7 @@ def carry_paint_outside_gl(
         return carry_paint(
             samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
             transition_scene=transition_scene, rect_tolerance=rect_tolerance, wrap_times=wrap_times,
+            min_fps=PAINT_SCORER_MIN_FPS,
         )
     gl_segments = carry_window_data.get("glSegments") or {}
     segments = gl_segments.get(element_id, gl_segments.get(str(element_id), []))
@@ -2769,26 +3129,11 @@ def carry_paint_outside_gl(
         carry_paint(
             samples, element_id, asset, window, boundary_scene, src_rect, dst_rect,
             transition_scene=transition_scene, rect_tolerance=rect_tolerance,
-            wrap_times=wrap_times, segment=(segment["start"], segment["end"]),
+            wrap_times=wrap_times, segment=(segment["start"], segment["end"]), min_fps=PAINT_SCORER_MIN_FPS,
         )
         for segment in segments if segment["end"] >= segment["start"]
         and any(segment["start"] <= row.get("t", -math.inf) <= segment["end"] for row in samples)
     ]
-    for row in scored:
-        reasons = row.get("reasons") or []
-        coverage = row.get("coverage") if isinstance(row.get("coverage"), dict) else {}
-        if row.get("status") == "inconclusive" and reasons and all(
-            reason.startswith("coverage: cadence ") for reason in reasons
-        ) and coverage.get("seqGaps") == 0 and not any(
-            row.get(key) for key in (
-                "unobserved", "unreadable", "unpaintedFrames", "partialFrames",
-                "doubleFrames", "substituteFrames",
-            )
-        ):
-            row.update(
-                status="ok", verdict=True, reasons=[], settledCadenceReportOnly=reasons,
-                coverage={**coverage, "ok": True, "reasons": [], "settledCadenceReportOnly": reasons},
-            )
     applicable = [row for row in scored if row.get("status") != "n/a"]
     if not applicable:
         return {"status": "inconclusive", "verdict": None, "reasons": ["no pre/post GL paint segment"],
@@ -4494,7 +4839,7 @@ def score_arm(
         spec.setdefault("alias", None)
     for key in (
         "sampleCount", "unplannedWraps", "stageMapInvalidCount", "stageMap", "stageFit", "verdicts",
-        "paintCensus", "feedVerdicts", "entryColdStart",
+        "paintCensus", "feedVerdicts", "entryColdStart", "instrumentAccounting", "runValidity",
     ):
         result.pop(key, None)
     for spec in specs:
@@ -4510,6 +4855,8 @@ def score_arm(
         scored = {spec["id"]: _contract_inconclusive(errors) for spec in specs}
         result.update(with_aliases(scored, specs))
         result["verdicts"] = verdict_table(result, specs)
+        reconcile_instrument_accounting(result, "capture-arm", facts_copy)
+        result["runValidity"] = capture_run_validity(result, facts_copy)
         return result
     result["samples"] = samples
     result["sampleSpace"] = "authored"
@@ -4558,6 +4905,8 @@ def score_arm(
     if producer is not None or "feedEvidence" in capture or "feedVerdicts" in capture:
         result["feedVerdicts"] = {spec["id"]: scored[spec["id"]] for spec in specs}
     result["paintCensus"] = arm_paint_census(samples, result, specs)
+    reconcile_instrument_accounting(result, "capture-arm", facts_copy)
+    result["runValidity"] = capture_run_validity(result, facts_copy)
     return result
 
 
@@ -4638,7 +4987,7 @@ def capture_arm(
     """Collect one full-deck arm. `instrumentCost`, when added in C2, is `{hook: {count, p95, max, overBudget}}`."""
     if not isinstance(continuous_expected, bool):
         raise TypeError("continuous_expected must be a bool")
-    if host_kind not in HOST_KINDS:
+    if host_kind not in QUALIFICATIONS:
         raise ValueError(f"unknown host kind {host_kind!r}")
     if not isinstance(environment, Mapping):
         raise TypeError("environment must be a mapping")
@@ -4672,7 +5021,8 @@ def capture_arm(
     observations["before"] = environment_observation()
     raw_samples = drive_and_sample(
         player, observer=observe, carry_into=carry_destination_players(dict(facts)),
-        feed_facts=dict(facts), feed_sink=feed, feed_continuous_expected=continuous_expected,
+        feed_facts=dict(facts), feed_sink=feed, cost_sink=capture,
+        feed_continuous_expected=continuous_expected,
     )
     observations["after"] = environment_observation()
     transport = player._require_transport()
@@ -4728,16 +5078,20 @@ def run_arm(
     return result
 
 
-def launch_attach_chrome(profile: Path) -> subprocess.Popen:
-    """Chrome picks its own debugging port (`--remote-debugging-port=0`); `wait_devtools_active_port` reads it."""
-    profile.mkdir(parents=True, exist_ok=True)
-    args = [
+def attach_chrome_arguments(profile: Path) -> list[str]:
+    return [
         str(CHROME), "--headless=new", "--remote-debugging-port=0",
         "--remote-debugging-address=127.0.0.1", f"--user-data-dir={profile}",
         f"--window-size={VIEWPORT_WIDTH},{VIEWPORT_HEIGHT + _HEIGHT_PAD}",
         "--force-device-scale-factor=1", "--autoplay-policy=no-user-gesture-required",
         "--no-first-run", "--no-default-browser-check", "--mute-audio",
     ]
+
+
+def launch_attach_chrome(profile: Path) -> subprocess.Popen:
+    """Chrome picks its own debugging port (`--remote-debugging-port=0`); `wait_devtools_active_port` reads it."""
+    profile.mkdir(parents=True, exist_ok=True)
+    args = attach_chrome_arguments(profile)
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -4785,7 +5139,25 @@ def force_exact_viewport(port: int, width: int, height: int, proc: subprocess.Po
             "id": 1, "method": "Emulation.setDeviceMetricsOverride",
             "params": {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
         }))
-        ws.recv(timeout=5)
+        metrics_response = json.loads(ws.recv(timeout=5))
+        if metrics_response.get("error") or not isinstance(metrics_response.get("result"), dict):
+            raise SystemExit(f"attach Chrome refused device metrics: {metrics_response!r}")
+        ws.send(json.dumps({
+            "id": 2, "method": "Runtime.evaluate",
+            "params": {
+                "expression": "({innerWidth:innerWidth,innerHeight:innerHeight,devicePixelRatio:devicePixelRatio})",
+                "returnByValue": True,
+            },
+        }))
+        readback_response = json.loads(ws.recv(timeout=5))
+        readback = (((readback_response.get("result") or {}).get("result") or {}).get("value"))
+        expected = {"innerWidth": width, "innerHeight": height, "devicePixelRatio": 1}
+        if readback != expected:
+            raise SystemExit(f"attach Chrome viewport read-back {readback!r}, expected {expected!r}")
+        setattr(proc, "_obed_attach_provenance", {
+            "deviceMetricsResponse": metrics_response,
+            "viewportReadback": readback,
+        })
     except BaseException:
         ws.close()
         raise
@@ -4801,12 +5173,14 @@ def attach_chrome(profile: Path, record: dict[str, Any]) -> Iterator[int]:
     if profile.exists():
         shutil.rmtree(profile)
     chrome_proc = launch_attach_chrome(profile)
+    record["environmentProvenance"] = {"launchArguments": attach_chrome_arguments(profile)}
     try:
         viewport_hold = None
         try:
             endpoint = wait_devtools_active_port(profile, chrome_proc)
             wait_for_cdp(endpoint, chrome_proc)
             viewport_hold = force_exact_viewport(endpoint.port, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, chrome_proc)
+            record["environmentProvenance"].update(getattr(chrome_proc, "_obed_attach_provenance", {}))
             yield endpoint.port
         finally:
             if viewport_hold is not None:
@@ -4849,9 +5223,12 @@ def run_attach_arm(
                 )
                 computed_background = transport.evaluate("getComputedStyle(document.documentElement).backgroundColor")
                 result["transparentBackground"] = {"plan": bool(plan_transparent), "computedBackground": computed_background}
+                environment = static_environment(player, HOST_HEADLESS_CHROME)
+                if isinstance(result.get("environmentProvenance"), Mapping):
+                    environment["attach"] = copy.deepcopy(result["environmentProvenance"])
                 capture = capture_arm(
-                    player, attach_facts, continuous_expected=False, host_kind=HOST_QUALIFIED_CHROME_ATTACH,
-                    environment=static_environment(player, HOST_QUALIFIED_CHROME_ATTACH),
+                    player, attach_facts, continuous_expected=False, host_kind=HOST_HEADLESS_CHROME,
+                    environment=environment,
                 )
                 result.update(score_arm(capture, attach_facts, expected_stage))
             finally:
@@ -5425,7 +5802,15 @@ def run_visible_pass(
     would perturb the rAF sampler's clock, which is why this is a separate pass and
     not an arm."""
     force_viewport(*viewport)
-    result: dict[str, Any] = {"pass": name, "status": "ok", "viewport": {"width": viewport[0], "height": viewport[1]}}
+    result: dict[str, Any] = {
+        "pass": name,
+        "status": "ok",
+        "viewport": {"width": viewport[0], "height": viewport[1]},
+        "hostKind": HOST_HEADLESS_CHROME,
+        "scope": {"kind": "visible", "pass": name},
+        "glReplay": {"requested": gl_replay},
+        "samples": [],
+    }
     player = LiveOutputHost(
         export_root, slides, headless=True, gl_replay=gl_replay,
         pre_navigation_scripts=instrument_pre_navigation_scripts(None),
@@ -5434,6 +5819,8 @@ def run_visible_pass(
         instances = slide_instances_of(plan)
         player.start()
         result["continuity"] = player.output["continuity"]
+        result["environment"] = static_environment(player, HOST_HEADLESS_CHROME)
+        observations = result["environment"]["observations"] = {"before": environment_observation()}
         player.execute("show")
         transport = player._require_transport()
         transport.evaluate(ENSURE_PLAYING_JS)
@@ -5444,6 +5831,9 @@ def run_visible_pass(
             evidence=visible_evidence_writer(evidence_dir, name), expectations=expectations,
             rescore=rescore, after_slide=after_slide,
         )
+        observations["during"] = environment_observation()
+        result["instrumentCost"] = finalize_instrument_cost(transport, "visible")
+        observations["after"] = environment_observation()
     except Exception as exc:  # noqa: BLE001 - a pass that cannot be scored is an error, never a verdict
         result["status"] = "error"
         result["error"] = str(exc)
@@ -5459,6 +5849,7 @@ def run_visible_pass(
         None if any(slide.get("verdict") is None for slide in scored)
         else bool(scored) and all(slide.get("verdict") is True for slide in scored)
     )
+    result["runValidity"] = capture_run_validity(result)
     return result
 
 
@@ -6458,13 +6849,18 @@ def run_goto_destination(
     expected_scene_id: str | None, character_rect: dict[str, float] | None,
     armed: bool, require_no_consumption: bool, advance_to: int | None = None, click_builds: bool | None = None,
     auto_kinds: Sequence[str] | None = None, leg_specs: Sequence[dict[str, Any]] = (), continuity: Any = None,
-    host_kind: str, continuous_expected: bool,
+    host_kind: str, continuous_expected: bool, gl_replay: str = "off",
 ) -> dict[str, Any]:
     """One goTo, driven for real through `LiveOutputHost.execute`, scored with the same
     `visible_slide_record` the V/Voff passes use -- never a re-derived scorer. With
     `advance_to`, the destination is then advanced across its carry, scored per frame as an
     advance leg (`run_advance_leg`, `leg_specs`) and then as a settled slide the same way."""
     reasons: list[str] = []
+    transport = player._require_transport()
+    environment = static_environment(player, host_kind)
+    observations = environment["observations"] = {"before": environment_observation()}
+    drain_samples(transport)
+    transport.evaluate(SAMPLER_START_JS)
     player.execute("goTo", from_ordinal)
     # `execute("goTo")`'s own returned observation is not settled when the autoplay repair is
     # disarmed (it is the bare digit/Enter ack); check the requested slide only AFTER settling.
@@ -6488,7 +6884,6 @@ def run_goto_destination(
         player, slide, instances, viewport, scorer=_scorers()[1], evidence=evidence,
         expectations=expectations, offsets_ms=G_BURST_OFFSETS_MS,
     )
-    transport = player._require_transport()
     video_count = transport.evaluate("document.querySelectorAll('video').length")
     live_expected = any(item.get("expect") == LIVE for item in record.get("expectedRects") or [])
     video_ok = True if not live_expected else (video_count > 0 if _is_count(video_count) else None)
@@ -6525,11 +6920,17 @@ def run_goto_destination(
         if no_consumption.get("verdict") is not True:
             reasons.append(f"no-consumption check for destination {to_ordinal}: {no_consumption}")
 
+    observations["during"] = environment_observation()
+    transport.evaluate(SAMPLER_STOP_JS)
+    raw = drain_samples(transport)
+    observations["after"] = environment_observation()
+    sampler = sampler_record(transport, raw)
+
     advanced = advance_carry = None
     if advance_to is not None:
         advance_carry = run_advance_leg(
             player, to_ordinal, advance_to, leg_specs, continuity,
-            host_kind=host_kind, continuous_expected=continuous_expected,
+            host_kind=host_kind, continuous_expected=continuous_expected, gl_replay=gl_replay,
         )
         if advance_carry.get("verdict") is not True:
             reasons.append(f"advance leg {to_ordinal}->{advance_to}: {advance_carry.get('error') or advance_carry.get('reasons')}")
@@ -6552,6 +6953,10 @@ def run_goto_destination(
         "sourceReached": source_reached, "destinationReached": destination_reached,
         "staticControl": static_control, "autoPlay": telemetry, "noConsumption": no_consumption,
         "baseVerdict": base_verdict, "verdict": verdict, "reasons": reasons,
+        "samples": raw, "sampleSpace": "screen", "sampler": sampler, "continuity": copy.deepcopy(continuity),
+        "continuousExpected": continuous_expected, "hostKind": host_kind, "environment": environment,
+        "scope": {"kind": "pass-g-destination", "fromOrdinal": from_ordinal, "toOrdinal": to_ordinal},
+        "glReplay": {"requested": gl_replay},
     }
     if advanced is not None:
         result.update(advanceTo=advance_to, advanced=advanced, advanceCarry=advance_carry)
@@ -6560,7 +6965,7 @@ def run_goto_destination(
 
 def run_advance_leg(
     player: LiveOutputHost, from_ordinal: int, to_ordinal: int, specs: Sequence[dict[str, Any]], continuity: Any,
-    *, host_kind: str, continuous_expected: bool,
+    *, host_kind: str, continuous_expected: bool, gl_replay: str = "off",
 ) -> dict[str, Any]:
     """Pass G's per-frame advance leg: the session's stopped sampler restarts on the settled
     source, the advance crosses the carry, and every expected-True carry of that boundary
@@ -6569,8 +6974,14 @@ def run_advance_leg(
     verdict of the leg inconclusive (plan §3.8: the leg reaches `dst` without passing it), reported
     and never green or red."""
     if not specs:
-        return {"specs": [], "verdicts": {}, "sampler": None, "verdict": None,
-                "error": f"no expected-True carry matches the advance {from_ordinal}->{to_ordinal}"}
+        capture = {
+            "specs": [], "verdicts": {}, "sampler": None, "verdict": None,
+            "error": f"no expected-True carry matches the advance {from_ordinal}->{to_ordinal}",
+            "hostKind": host_kind, "scope": {"kind": "advance-leg", "fromOrdinal": from_ordinal, "toOrdinal": to_ordinal},
+            "continuity": copy.deepcopy(continuity), "glReplay": {"requested": gl_replay},
+        }
+        capture["runValidity"] = capture_run_validity(capture, {"verdicts": []})
+        return capture
     transport = player._require_transport()
     environment = static_environment(player, host_kind)
     observations = environment["observations"] = {"before": environment_observation()}
@@ -6590,6 +7001,7 @@ def run_advance_leg(
         "evidence": {}, "continuousExpected": continuous_expected, "hostKind": host_kind,
         "environment": environment,
         "scope": {"kind": "advance-leg", "fromOrdinal": from_ordinal, "toOrdinal": to_ordinal},
+        "glReplay": {"requested": gl_replay},
     }
     arm = score_arm(capture, {"verdicts": list(specs)}, {})
     rows = arm["samples"]
@@ -6614,14 +7026,18 @@ def run_advance_leg(
         reasons.append(problem)
     if reached is not True:
         reasons.append(f"advance did not reach slide {to_ordinal} (reached={reached!r})")
-    return {
+    result = {
         "specs": list(specs), "verdicts": scored, "sampler": sampler, "endOfShow": end_of_show,
         "reached": reached, "reasons": reasons, "scope": arm["scope"], "hostKind": arm["hostKind"],
         "continuousExpected": arm["continuousExpected"], "environment": arm["environment"],
+        "samples": arm["samples"], "sampleSpace": arm["sampleSpace"], "continuity": arm["continuity"],
+        "glReplay": arm["glReplay"],
         "verdict": combine_verdicts(
             *(scored[spec["id"]].get("verdict") for spec in specs), reached, None if problem is not None else True,
         ),
     }
+    result["runValidity"] = capture_run_validity(result, {"verdicts": list(specs)})
+    return result
 
 
 def destinations_of(entry: Any) -> list[dict[str, Any]]:
@@ -6691,6 +7107,7 @@ def _run_goto_arm(
     matrix: Sequence[Sequence[int]] = GOTO_MATRIX, click_builds: bool | None = None,
     auto_kinds: Sequence[str] | None = None, carry_specs: Sequence[dict[str, Any]] = (),
     pre_navigation_scripts: Sequence[str], host_kind: str, continuous_expected: bool,
+    facts: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One armed or null-control goTo session: start, warm up, drive every `matrix` case (an
     advance leg, scored per frame against the matching `carry_specs`, only when armed), stop.
@@ -6707,12 +7124,11 @@ def _run_goto_arm(
             shown = warm_up_for_screenshots(player)
             result["continuity"] = player.output["continuity"]
             result["outputVisible"] = shown.output_visible
-            if armed:
-                transport = player._require_transport()
-                transport.evaluate(SAMPLER_JS)
-                transport.evaluate(SAMPLER_STOP_JS)
-            result["destinations"] = [
-                run_goto_destination(
+            transport = player._require_transport()
+            transport.evaluate(SAMPLER_JS + "\n;" + SAMPLER_STOP_JS)
+            destinations = []
+            for from_ordinal, to_ordinal, *advance in matrix:
+                destinations.append(run_goto_destination(
                     player, from_ordinal, to_ordinal, slides, instances, viewport,
                     expectations=expectations, evidence=evidence,
                     expected_scene_id=onset_scene_id if to_ordinal == GOTO_CONSUMPTION_CHECK_TO else None,
@@ -6720,14 +7136,73 @@ def _run_goto_arm(
                     require_no_consumption=armed and to_ordinal == GOTO_CONSUMPTION_CHECK_TO,
                     advance_to=advance[0] if armed and advance else None, click_builds=click_builds,
                     auto_kinds=auto_kinds, continuity=result["continuity"],
-                    host_kind=host_kind, continuous_expected=continuous_expected,
+                    host_kind=host_kind, continuous_expected=continuous_expected, gl_replay=gl_replay,
                     leg_specs=[
                         spec for spec in carry_specs
                         if advance and (spec["fromPlayer"] + 1, spec["toPlayer"] + 1) == (to_ordinal, advance[0])
                     ],
-                )
-                for from_ordinal, to_ordinal, *advance in matrix
+                ))
+            result["destinations"] = destinations
+            feed_specs = feed_specs_for(dict(facts) if facts is not None else None)
+            if feed_specs:
+                result["feedEvidence"] = {"producer": transport.evaluate("window.__obedMmFeedProbe.report()")}
+            instrument_cost = finalize_instrument_cost(transport, "pass-g", facts)
+            sampled_holders = [
+                holder
+                for destination in destinations
+                for holder in (destination, destination.get("advanceCarry"))
+                if isinstance(holder, Mapping)
             ]
+            sampler_health = [
+                ((holder.get("sampler") or {}).get("meta") or {}).get("samplerCost")
+                for holder in sampled_holders
+            ]
+            observer_health = [
+                ((holder.get("sampler") or {}).get("meta") or {}).get("prepaintObserver")
+                for holder in sampled_holders
+            ]
+            accounting = {
+                "instrumentCost": instrument_cost,
+                "sampler": {"meta": {
+                    "samplerCost": {
+                        "callbacks": sum(row.get("callbacks", 0) for row in sampler_health if isinstance(row, Mapping)),
+                        "accountingComplete": bool(sampler_health) and all(
+                            isinstance(row, Mapping) and row.get("accountingComplete") is True for row in sampler_health
+                        ),
+                    },
+                    "prepaintObserver": {
+                        "callbacks": sum(row.get("callbacks", 0) for row in observer_health if isinstance(row, Mapping)),
+                        "active": False if observer_health and all(
+                            isinstance(row, Mapping) and row.get("active") is False for row in observer_health
+                        ) else None,
+                        "disconnected": True if observer_health and all(
+                            isinstance(row, Mapping) and row.get("disconnected") is True for row in observer_health
+                        ) else None,
+                    },
+                }},
+                "feedEvidence": copy.deepcopy(result.get("feedEvidence")),
+            }
+            reconcile_instrument_accounting(accounting, "pass-g", facts)
+            instrument_cost = accounting["instrumentCost"]
+            for destination in destinations:
+                destination["instrumentCost"] = copy.deepcopy(instrument_cost)
+                destination["instrumentAccounting"] = copy.deepcopy(accounting["instrumentAccounting"])
+                destination["runValidity"] = capture_run_validity(destination, facts)
+                leg = destination.get("advanceCarry")
+                if isinstance(leg, dict):
+                    leg["instrumentCost"] = copy.deepcopy(instrument_cost)
+                    leg["instrumentAccounting"] = copy.deepcopy(accounting["instrumentAccounting"])
+                    leg["runValidity"] = capture_run_validity(leg, {"verdicts": leg.get("specs") or []})
+            holders = {
+                f"destination.{index}": destination
+                for index, destination in enumerate(destinations)
+            }
+            holders.update({
+                f"leg.{index}": destination["advanceCarry"]
+                for index, destination in enumerate(destinations)
+                if isinstance(destination.get("advanceCarry"), dict)
+            })
+            publish_artifact_run_validity(result, holders)
         finally:
             try:
                 player.stop()
@@ -6800,7 +7275,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
             carry_specs=[spec for spec in facts["verdicts"] if spec["kind"] == "carry" and spec["expect"] is True],
             pre_navigation_scripts=pre_navigation_scripts,
-            host_kind=host_kind, continuous_expected=continuous_expected,
+            host_kind=host_kind, continuous_expected=continuous_expected, facts=facts,
         )
 
         export_off = prepare_export(args.fixture, args.original_index, root, "pass-g-off")
@@ -6810,7 +7285,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
             gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
             pre_navigation_scripts=pre_navigation_scripts,
-            host_kind=host_kind, continuous_expected=continuous_expected,
+            host_kind=host_kind, continuous_expected=continuous_expected, facts=facts,
         )
 
     if args.core_variant is not None:
@@ -6818,6 +7293,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
         result["status"], result["reasons"] = passg_red_status(result)
     else:
         result["status"], result["reasons"] = overall_status_g(result)
+    publish_artifact_run_validity(result, artifact_validity_holders("pass-g", result))
     return result
 
 
@@ -7700,6 +8176,7 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
     red, unknown = unmet_verdicts(arm, arm_facts["verdicts"])
     result.update(arm=arm, redSet=sorted(red + strays), unknown=unknown + census_unknown)
     result["status"], result["statusReasons"] = red_arm_status(result)
+    publish_artifact_run_validity(result, artifact_validity_holders("arm", result))
     return result
 
 
@@ -7832,6 +8309,7 @@ def run_paint_control(args: argparse.Namespace) -> dict[str, Any]:
         ) if isinstance(record, dict) else None,
     )
     result["status"], result["statusReasons"] = paint_control_status(result)
+    publish_artifact_run_validity(result, artifact_validity_holders("arm", result))
     return result
 
 
@@ -8751,7 +9229,8 @@ CARRY_COVER_SAMPLER_JS = r"""
   if (window.__obedCarryCover__) return performance.timeOrigin;
   var BITS = __BITS__, CELL = __CELL__;
   var rows = [], cells = [], count = 0;
-  window.__obedCarryCover__ = {rows: rows, on: true};
+  var health = {installed: false, callbacks: 0, enterCount: 0, leaveCount: 0, active: 0, accountingComplete: false};
+  window.__obedCarryCover__ = {rows: rows, on: true, raf: null, health: health};
   var bar = document.createElement('div');
   bar.id = '__obedCarryCoverSync';
   bar.style.cssText = 'position:fixed;left:0;top:0;margin:0;padding:0;border:0;display:flex;pointer-events:none;'
@@ -8779,28 +9258,70 @@ CARRY_COVER_SAMPLER_JS = r"""
     });
     return vids;
   }
+  function enterCost(){
+    var recorder = window.__obedCost, entered = false;
+    health.callbacks++;
+    if (recorder && typeof recorder.enter === 'function') {
+      entered = recorder.enter('sampler.tick') === true;
+      if (entered) { health.enterCount++; health.active++; }
+    }
+    return {recorder: recorder, entered: entered};
+  }
+  function leaveCost(cost){
+    if (!cost.entered) return;
+    health.active--;
+    if (cost.recorder.leave('sampler.tick') === true) health.leaveCount++;
+  }
   function tick(ts){
     if (!window.__obedCarryCover__.on) return;
-    var n = count++ % (1 << BITS);
-    for (var b = 0; b < BITS; b++) {
-      var on = (n >> b) & 1;
-      cells[2 * b].style.background = on ? '#fff' : '#000';
-      cells[2 * b + 1].style.background = on ? '#000' : '#fff';
+    var cost = enterCost();
+    try {
+      var n = count++ % (1 << BITS);
+      for (var b = 0; b < BITS; b++) {
+        var on = (n >> b) & 1;
+        cells[2 * b].style.background = on ? '#fff' : '#000';
+        cells[2 * b + 1].style.background = on ? '#000' : '#fff';
+      }
+      var row = {ts: ts, tick: n, pre: read()};
+      rows.push(row);
+      if (rows.length > 20000) rows.shift();
+      setTimeout(function(){
+        if (!window.__obedCarryCover__.on) {
+          row.vids = read();
+          row.readAt = performance.now();
+          return;
+        }
+        var delayedCost = enterCost();
+        try { row.vids = read(); row.readAt = performance.now(); }
+        finally { leaveCost(delayedCost); }
+      }, 0);
+    } finally {
+      leaveCost(cost);
     }
-    var row = {ts: ts, tick: n, pre: read()};
-    rows.push(row);
-    if (rows.length > 20000) rows.shift();
-    setTimeout(function(){ row.vids = read(); row.readAt = performance.now(); }, 0);
-    requestAnimationFrame(tick);
+    window.__obedCarryCover__.raf = requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
+  if (window.__obedCost && typeof window.__obedCost.install === 'function') {
+    health.installed = window.__obedCost.install('sampler.tick') === true;
+  }
+  window.__obedCarryCover__.raf = requestAnimationFrame(tick);
   return performance.timeOrigin;
 })()
 """.replace("__BITS__", str(CARRY_COVER_SYNC_BITS)).replace("__CELL__", str(CARRY_COVER_SYNC_CELL_PX))
+CARRY_COVER_STOP_JS = r"""
+(function(){
+  var cc = window.__obedCarryCover__;
+  if (!cc) return false;
+  cc.on = false;
+  if (cc.raf != null) cancelAnimationFrame(cc.raf);
+  cc.raf = null;
+  cc.health.accountingComplete = cc.health.installed && cc.health.active === 0
+    && cc.health.callbacks === cc.health.enterCount && cc.health.enterCount === cc.health.leaveCount;
+  return true;
+})()
+"""
 CARRY_COVER_READ_JS = r"""
 (function(){
   var cc = window.__obedCarryCover__;
-  if (cc) cc.on = false;
   var core = window.__OBED_P2_PRESERVE__;
   var notes = [];
   try {
@@ -8808,7 +9329,7 @@ CARRY_COVER_READ_JS = r"""
       return e && (e.kind === 'bridge-motion-start' || e.kind === 'bridge-clock');
     })));
   } catch (e) {}
-  return {rows: cc ? cc.rows : null, notes: notes};
+  return {rows: cc ? cc.rows : null, notes: notes, health: cc ? cc.health : null};
 })()
 """
 
@@ -9375,7 +9896,11 @@ def capture_carry_cover(
     """One host session: reach the bridge's source slide, let it settle, then screencast the page and rAF-sample the
     carried <video> from `CARRY_COVER_PREROLL_S` before the advance press until the transition plus
     `CARRY_COVER_TAIL_S` after it."""
-    capture: dict[str, Any] = {}
+    capture: dict[str, Any] = {
+        "hostKind": HOST_HEADLESS_CHROME,
+        "scope": {"kind": "carry-cover", "boundary": bridge.get("boundary")},
+        "glReplay": {"requested": "off"},
+    }
     player = LiveOutputHost(
         export, slides, headless=True,
         pre_navigation_scripts=instrument_pre_navigation_scripts(None),
@@ -9383,6 +9908,8 @@ def capture_carry_cover(
     try:
         player.start()
         capture["continuity"] = player.output.get("continuity")
+        capture["environment"] = static_environment(player, HOST_HEADLESS_CHROME)
+        observations = capture["environment"]["observations"] = {"before": environment_observation()}
         warm_up_for_screenshots(player)
         transport = player._require_transport()
         if bridge["fromOrdinal"] > 1:
@@ -9408,8 +9935,12 @@ def capture_carry_cover(
             stop.set()
             thread.join(10)
         capture["screencastErrors"] = errors
+        observations["during"] = environment_observation()
+        transport.evaluate(CARRY_COVER_STOP_JS)
+        capture["instrumentCost"] = finalize_instrument_cost(transport, "carry-cover")
         capture["read"] = transport.evaluate(CARRY_COVER_READ_JS)
         capture["arrived"] = player.observe().original_slide
+        observations["after"] = environment_observation()
     finally:
         try:
             player.stop()
@@ -9420,6 +9951,10 @@ def capture_carry_cover(
         (float(ts) * 1000.0 - float(origin), decode_png(data))
         for ts, data in raw if isinstance(ts, (int, float)) and isinstance(origin, (int, float))
     ]
+    read = capture.get("read")
+    capture["samples"] = copy.deepcopy(read.get("rows")) if isinstance(read, Mapping) else None
+    reconcile_instrument_accounting(capture, "carry-cover")
+    capture["runValidity"] = capture_run_validity(capture)
     return capture
 
 
@@ -9439,6 +9974,12 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
         for bridge in bridges:
             if bridge.get("problem"):
                 bridge["result"] = {"verdict": "inconclusive", "reasons": [bridge["problem"]]}
+                bridge["capture"] = {
+                    "hostKind": HOST_HEADLESS_CHROME,
+                    "scope": {"kind": "carry-cover", "boundary": bridge.get("boundary")},
+                    "glReplay": {"requested": "off"},
+                }
+                bridge["capture"]["runValidity"] = capture_run_validity(bridge["capture"])
                 continue
             export = prepare_export(args.fixture, args.original_index, root, f"carry-cover-{bridge['boundary']}")
             capture = capture_carry_cover(
@@ -9468,6 +10009,7 @@ def run_carry_cover(args: argparse.Namespace) -> dict[str, Any]:
     )
     result["continuity"] = continuity
     result["status"], result["reasons"] = carry_cover_status(continuity, bridges)
+    publish_artifact_run_validity(result, artifact_validity_holders("carry-cover", result))
     return result
 
 
@@ -9510,7 +10052,7 @@ def run_carry_cover_cli(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    global FEED_CONTROL, MM_FEED_REQUEST, MM_OPACITY_REQUEST, FEED_DWELL_S
+    global FEED_CONTROL, MM_FEED_REQUEST, MM_OPACITY_REQUEST, FEED_DWELL_S, INSTRUMENT_VARIANT
     args = parse_args()
     FEED_CONTROL = {"tamper": None if args.feed_tamper == "no-linger" else args.feed_tamper,
                     "tamperScene": args.feed_tamper_scene,
@@ -9518,6 +10060,7 @@ def main() -> None:
     MM_FEED_REQUEST = args.mm_feed
     MM_OPACITY_REQUEST = args.mm_opacity
     FEED_DWELL_S = args.feed_dwell
+    INSTRUMENT_VARIANT = args.instrument_variant
     try:
         with run_scope(args.rescore if args.rescore is not None else args.artifact), (
             tampered_feed_ordinal(args.feed_tamper_scene) if args.feed_tamper == "ordinal" else nullcontext()
@@ -9528,6 +10071,7 @@ def main() -> None:
         MM_FEED_REQUEST = "auto"
         MM_OPACITY_REQUEST = "auto"
         FEED_DWELL_S = None
+        INSTRUMENT_VARIANT = None
 
 
 def run_cli(args: argparse.Namespace) -> None:
@@ -9688,6 +10232,7 @@ def run_cli(args: argparse.Namespace) -> None:
         result["status"] = "error"
         result["error"] = str(exc)
     finally:
+        publish_artifact_run_validity(result, artifact_validity_holders("full", result))
         save()
 
     specs = [*((result.get("groundTruth") or {}).get("verdicts") or []), *((result.get("groundTruthGl") or {}).get("verdicts") or [])]
