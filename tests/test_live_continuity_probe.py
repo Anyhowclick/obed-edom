@@ -18,6 +18,7 @@ import base64
 import copy
 import dataclasses
 import gzip
+import hashlib
 import importlib.util
 import json
 import math
@@ -13340,6 +13341,563 @@ def test_probe_only_calibration_red_selects_fs_instrument_variant(monkeypatch: p
     (source,) = probe.feed_instrument_pre_navigation_scripts(facts)
     assert "instrumentVariant:'calibration-red'" in source
     assert "--instrument-variant" not in (REPO / "scripts" / "run_gates.sh").read_text()
+
+
+def _departure_frame(
+    tick: int, roi_color: tuple[int, int, int], *, width: int = 160, height: int = 90,
+    roi: tuple[int, int, int, int] = (100, 30, 30, 30),
+) -> np.ndarray:
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    cell = probe.CARRY_COVER_SYNC_CELL_PX
+    for bit in range(probe.CARRY_COVER_SYNC_BITS):
+        on = bool((tick >> bit) & 1)
+        image[:cell, 2 * bit * cell:(2 * bit + 1) * cell] = 255 if on else 0
+        image[:cell, (2 * bit + 1) * cell:(2 * bit + 2) * cell] = 0 if on else 255
+    x, y, w, h = roi
+    image[y:y + h, x:x + w] = roi_color
+    return image
+
+
+def _departure_png(image: np.ndarray) -> str:
+    ok, encoded = cv2.imencode(".png", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    assert ok
+    return base64.b64encode(encoded.tobytes()).decode()
+
+
+def test_departure_pixel_distance_is_per_channel_mean_absolute_difference() -> None:
+    image = np.array([[[0, 2, 4]]], dtype=np.uint8)
+    reference = np.zeros((1, 1, 3), dtype=np.uint8)
+    assert probe._pixel_distance(image, reference) == 2.0
+
+
+def _departure_feed_report(one_frame_status: str | None = None) -> dict[str, Any]:
+    layout = probe.binary_counter_movie.layout()
+    levels = [255.0 if bit else 0.0 for bit in probe.binary_counter_movie.strip_bits(12)]
+    decoder = {
+        "instance": "source-object", "elId": 77, "visible": True, "opacityProduct": 1.0,
+        "rect": {"x": 100.0, "y": 30.0, "w": 30.0, "h": 30.0},
+    }
+    report = {
+        "kind": "mm-feed", "version": 3, "config": {"counterLayout": layout},
+        "sampling": {"width": 192, "referenceCapacity": 18, "entries": {}},
+        "contexts": [{
+            "serial": 4, "id": "0-canvas", "createdAt": 1.0, "firstDrawAt": 64.0,
+            "closedAt": None, "closedFrameIndex": None, "atScene": 9, "lost": False,
+            "entryIds": ["derived-entry"], "evidenceComplete": True,
+        }],
+        "unplannedContextCount": 0,
+        "frames": [{
+            "serial": 4, "atScene": 9, "n": 1, "t": 2.0, "frameTime": 2.0,
+            "frameIndex": 0, "frameTimestamp": 2.0, "draws": 1, "uploads": 2,
+            "labels": [], "riders": [{
+                "entryId": "derived-entry", "serial": 4, "atScene": 9,
+                "instance": "source-object", "visible": False, "opacityProduct": 0.0,
+                "intersectsCanvas": False, "sourceRectError": 0.0,
+            }],
+            "labelExpected": [], "glErrors": [], "module": None,
+            "rows": [{
+                "serial": 4, "atScene": 9, "entryId": "derived-entry", "objectId": "source-object",
+                "dstObjectId": "dest-object", "draw": 1, "t": 2.0, "quad": None,
+                "mixFactor": .5, "decoder": None,
+                "textures": [{
+                    "unit": 0, "ordinal": 1, "size": [640, 360], "uploadedSize": [1280, 720],
+                    "video": True, "flip": True,
+                }, None],
+                "feedRead": {
+                    "patchInside": True, "coveredByLaterDraw": False, "kind": "alpha",
+                    "dVideo": 2.0, "dPoster": 20.0, "dSep": 20.0,
+                    "referenceCounter": 12, "referenceLevels": levels, "referenceReason": None,
+                },
+            }],
+        }],
+        "browserFrames": [{"index": 0, "timestamp": 2.0}], "handbacks": [],
+        "media": [], "mediaDropped": [], "mediaOverflow": 0, "artwork": [], "errors": [],
+        "module": None, "uploads": [],
+        "claims": [{
+            "objectId": "source-object", "entryId": "derived-entry", "serial": 4,
+            "atScene": 9, "t": 1.0, "claimed": True, "generation": 1, "visit": 2,
+            "source": "claim", "decoder": decoder,
+        }],
+        "standDowns": [],
+        "departures": [{
+            "t": 1.5, "serial": 4, "atScene": 9, "entryId": "derived-entry",
+            "generation": 1, "visit": 2, "source": "pause", "decoder": decoder,
+        }],
+        "callbackCostP95Ms": None, "tamper": None, "killedOnce": [],
+        "hookHealth": {
+            "version": 1, "bootstrapCalls": 1, "configureCalls": 1, "installAttempts": 2,
+            "accountingComplete": True, "errors": [],
+            "hooks": {
+                hook: {"installed": True, "callbackCount": 0, "enterCount": 0, "leaveCount": 0, "active": 0}
+                for hook in probe.contract.FEED_COST_HOOKS
+            },
+        },
+    }
+    if one_frame_status is not None:
+        report["instrumentVariant"] = "one-frame-poster"
+        report["oneFramePoster"] = {
+            "fired": one_frame_status != "not-fired",
+            "entryId": "wrong-entry" if one_frame_status == "wrong-entry" else
+                       "derived-entry" if one_frame_status != "not-fired" else None,
+            "frameN": 3 if one_frame_status != "not-fired" else None,
+            "rafTimestamp": 32.0 if one_frame_status != "not-fired" else None,
+            "contextSerial": 4 if one_frame_status != "not-fired" else None,
+            "firstDrawFrameIndex": 4 if one_frame_status != "not-fired" else None,
+        }
+    return report
+
+
+def _capture_departure_fake(
+    monkeypatch: pytest.MonkeyPatch, evidence_dir: Path, *, raw_ticks: tuple[int, ...] = tuple(range(6)),
+    drop_indices: tuple[int, ...] = (), red_indices: tuple[int, ...] = (), duplicate_indices: tuple[int, ...] = (),
+    corrupt_indices: tuple[int, ...] = (), start_ms: float = 16.0, first_draw_ms: float = 48.0,
+    hide_ms: float = 32.0, press_ms: float = 20.0, delivery_latency_ms: float = 8.0,
+    ts_offset: float = 0.0,
+    visible_indices: tuple[int, ...] | None = None, poster_reference: np.ndarray | None = None,
+    poster_provenance: dict[str, Any] | None = None,
+    src_rect: dict[str, float] | None = None, dst_rect: dict[str, float] | None = None,
+    one_frame_red: bool = False, one_frame_status: str = "fired",
+    thresholds: dict[str, Any] | None = None, supply_thresholds: bool = True,
+) -> tuple[dict[str, Any], Any, dict[str, Any] | None]:
+    source_rect = src_rect or {"x": 100.0, "y": 30.0, "w": 30.0, "h": 30.0}
+    destination_rect = dst_rect or dict(source_rect)
+    rows = [
+        {"ts": ts_offset + index * 16.0, "tick": tick, "videos": [{
+            "elId": 77, "instance": "source-object",
+            "visible": index in visible_indices if visible_indices is not None else
+                       ts_offset + index * 16.0 < ts_offset + hide_ms,
+            "rect": source_rect,
+        }]}
+        for index, tick in enumerate(raw_ticks)
+    ]
+    departure = {
+        "entryId": "derived-entry", "atScene": 9, "serial": 4, "visit": 2,
+        "decoder": {"elId": 77}, "start": {"t": ts_offset + start_ms},
+        "firstDraw": {"t": ts_offset + first_draw_ms},
+    }
+    monkeypatch.setattr(
+        probe.mm_feed_instrument, "verdict_records",
+        lambda *args, **kwargs: {"derived-entry": {"departureExposure": departure}},
+    )
+    monkeypatch.setattr(probe, "page_target_ws_url", lambda port: "ws://fake")
+    monkeypatch.setattr(probe, "wait_until_settled", lambda player: True)
+    monkeypatch.setattr(probe.time, "sleep", lambda seconds: None)
+
+    class Transport:
+        port = 123
+
+        def evaluate(self, source: str) -> Any:
+            if source == probe.STAGE_MAP_JS:
+                return {"s": 1.0, "sy": 1.0, "ox": 0.0, "oy": 0.0,
+                        "offsetWidth": 160, "offsetHeight": 90}
+            if source == probe.DEPARTURE_PIXEL_SAMPLER_JS:
+                return 1000.0
+            if source == probe.DEPARTURE_PIXEL_READ_JS:
+                return {"rows": rows}
+            if source == "window.__obedMmFeedProbe.report()":
+                return _departure_feed_report(one_frame_status if one_frame_red else None)
+            if source == "performance.now()":
+                return ts_offset + press_ms
+            return True
+
+        def call(self, method: str, **kwargs: Any) -> dict[str, Any]:
+            assert method == "Page.captureScreenshot"
+            roi = tuple(round(source_rect[key]) for key in ("x", "y", "w", "h"))
+            return {"data": _departure_png(_departure_frame(0, (0, 0, 255), roi=roi))}
+
+    class Player:
+        def __init__(self) -> None:
+            self.transport = Transport()
+            self.commands: list[tuple[Any, ...]] = []
+
+        def _require_transport(self) -> Transport:
+            return self.transport
+
+        def execute(self, *command: Any) -> None:
+            self.commands.append(command)
+
+    def screencast(_url: str, frames: list[tuple[Any, str]], _stop: Any, _errors: list[str], size: Any) -> None:
+        assert size == (160, 90)
+        for index, tick in enumerate(raw_ticks):
+            if index in drop_indices:
+                continue
+            color = (0, 255, 0) if index in red_indices else (255, 0, 0)
+            roi = tuple(round(source_rect[key]) for key in ("x", "y", "w", "h"))
+            image = _departure_frame(tick, color, roi=roi)
+            if index in corrupt_indices:
+                image[:probe.CARRY_COVER_SYNC_CELL_PX, :2 * probe.CARRY_COVER_SYNC_BITS
+                      * probe.CARRY_COVER_SYNC_CELL_PX] = 127
+            at = (1000.0 + ts_offset + index * 16.0 + delivery_latency_ms) / 1000.0
+            frames.append((at, _departure_png(image)))
+            if index in duplicate_indices:
+                frames.append((at + 0.001, _departure_png(image)))
+
+    entry = {
+        "id": "derived-entry", "objectId": "source-object", "dstObjectId": "dest-object",
+        "atScene": 9, "fromOrdinal": 2, "durationSeconds": 0.1,
+        "srcRect": source_rect, "dstRect": destination_rect,
+    }
+    threshold_input = thresholds if thresholds is not None else {
+        "margin": 3.5,
+        "redMin": 21.0,
+        "provenance": {
+            "nullRecords": [{"entryId": "null", "leads": [40.0, 42.0]}],
+            "redRecords": [{"entryId": "red", "leads": [-24.0, -21.0]}],
+        },
+    }
+    if not supply_thresholds:
+        threshold_input = None
+    player = Player()
+    captured = probe.capture_departure_pixels(
+        player, entry, (160, 90), evidence_dir,
+        poster_reference=(poster_reference if poster_reference is not None else
+                          np.full((30, 30, 3), (0, 255, 0), dtype=np.uint8)),
+        poster_provenance=(poster_provenance if poster_provenance is not None else
+                           {"source": "export poster", "dstRect": entry["dstRect"]}),
+        thresholds=threshold_input,
+        one_frame_red=one_frame_red,
+        screencast=screencast,
+    )
+    return captured, player, threshold_input
+
+
+@pytest.mark.parametrize(("drop_index", "coverage_complete", "expected_missing"), [
+    (None, True, []),
+    (2, False, [2]),
+    (1, False, []),
+    (4, False, []),
+])
+def test_departure_pixel_fake_transport_captures_window_coverage_and_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, drop_index: int | None, coverage_complete: bool,
+    expected_missing: list[int],
+) -> None:
+    captured, player, threshold_input = _capture_departure_fake(
+        monkeypatch, tmp_path, drop_indices=() if drop_index is None else (drop_index,),
+    )
+    record = captured["departurePixels"]
+    assert player.commands == [("goTo", 2), ("advance",)]
+    assert set(record) == {
+        "entryId", "visit", "contextSerial", "decoderId", "atScene", "startMs", "hideMs", "firstDrawMs",
+        "roi", "frames", "references", "expectedTicks", "deliveredTicks", "missingTicks",
+        "ambiguousFrames", "exposedFrames",
+    }
+    assert (record["entryId"], record["visit"], record["contextSerial"], record["decoderId"]) == (
+        "derived-entry", 2, 4, 77,
+    )
+    assert all(
+        isinstance(record[field], (str, int)) and not isinstance(record[field], bool)
+        for field in ("entryId", "visit", "contextSerial", "decoderId", "atScene")
+    )
+    assert (record["startMs"], record["hideMs"], record["firstDrawMs"]) == (16.0, 32.0, 48.0)
+    assert record["expectedTicks"] == 2
+    assert record["deliveredTicks"] == (1 if drop_index == 2 else 2)
+    assert record["missingTicks"] == expected_missing
+    assert captured["pixelVerdict"]["coverageComplete"] is coverage_complete
+    assert captured["pixelVerdict"]["verdict"] is (True if coverage_complete else None)
+    assert captured["thresholds"] == threshold_input
+    assert record["ambiguousFrames"] == 0
+    assert record["exposedFrames"] == 0
+    assert record["references"]["lastDecoder"]["sha256"]
+    assert record["references"]["poster"]["dstRect"] == {"x": 100.0, "y": 30.0, "w": 30.0, "h": 30.0}
+    assert record["references"]["background"]["provenance"]["decoderHidden"] is True
+    assert all(
+        record["references"][name]["provenance"]["metric"] == "mad"
+        for name in ("lastDecoder", "poster", "background")
+    )
+    assert record["references"]["pairwise"] == {
+        "lastDecoder_poster": 170.0,
+        "lastDecoder_background": 170.0,
+        "poster_background": 170.0,
+    }
+    assert all(frame["distances"] == {
+        "lastDecoder": 0.0, "poster": 170.0, "background": 170.0,
+    } for frame in record["frames"])
+    frame_ticks = {frame["tick"] for frame in record["frames"]}
+    assert (1 in frame_ticks) is (drop_index != 1)
+    assert (4 in frame_ticks) is (drop_index != 4)
+    assert all(frame["t"] == frame["tick"] * 16.0 for frame in record["frames"])
+
+
+def test_departure_pixel_real_scorer_classifies_null_one_raf_red_and_pre_start_red(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    null, _player, _thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path / "null", visible_indices=tuple(range(6)), supply_thresholds=False,
+    )
+    calibration_red, _player, _thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path / "calibration-red", raw_ticks=tuple(range(7)), red_indices=(2,),
+        visible_indices=(0, 1, 3), start_ms=40.0, first_draw_ms=64.0,
+        supply_thresholds=False, one_frame_red=True,
+    )
+    derived = probe.paint_instrument.derive_pixel_thresholds(
+        [null["departurePixels"]], [calibration_red["departurePixels"]],
+    )
+    assert derived is not None
+    one_raf, _player, _thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path / "one-raf", raw_ticks=tuple(range(7)), red_indices=(2,),
+        visible_indices=(0, 1, 3), start_ms=40.0, first_draw_ms=64.0,
+        thresholds=derived, one_frame_red=True,
+    )
+    offset_red, _player, _thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path / "offset-red", raw_ticks=tuple(range(7)), red_indices=(2,),
+        visible_indices=(0, 1, 3), start_ms=40.0, first_draw_ms=64.0,
+        ts_offset=0.700000011921, thresholds=derived, one_frame_red=True,
+    )
+    early, _player, _thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path / "pre-start", red_indices=(2,), start_ms=40.0, thresholds=derived,
+    )
+    mutant = copy.deepcopy(one_raf["departurePixels"])
+    mutant.update(hideMs=64.0, expectedTicks=1, deliveredTicks=1, missingTicks=[], exposedFrames=0)
+    rounded = copy.deepcopy(offset_red["departurePixels"])
+    for frame in rounded["frames"]:
+        frame["t"] = round(frame["t"], 3)
+    assert probe.score_departure_pixels(null["departurePixels"], thresholds=derived)["verdict"] is True
+    assert null["departurePixels"]["hideMs"] == null["departurePixels"]["startMs"] == 16.0
+    assert one_raf["departurePixels"]["hideMs"] == 32.0
+    assert one_raf["departurePixels"]["expectedTicks"] == 3
+    assert one_raf["departurePixels"]["exposedFrames"] == 1
+    assert one_raf["pixelVerdict"]["verdict"] is False
+    assert one_raf["oneFramePoster"]["entryId"] == one_raf["departurePixels"]["entryId"]
+    assert one_raf["oneFramePoster"]["contextSerial"] == one_raf["departurePixels"]["contextSerial"]
+    assert one_raf["instrumentVariant"] == "one-frame-poster"
+    assert offset_red["pixelVerdict"]["verdict"] is False
+    assert offset_red["departurePixels"]["frames"][4]["t"] == 64.700000011921
+    assert probe.score_departure_pixels(rounded, thresholds=derived)["verdict"] is None
+    assert early["departurePixels"]["hideMs"] == 32.0 < early["departurePixels"]["startMs"]
+    assert early["pixelVerdict"]["verdict"] is False
+    assert probe.score_departure_pixels(mutant, thresholds=derived)["verdict"] is True
+
+
+@pytest.mark.parametrize("one_frame_status", ["not-fired", "wrong-entry"])
+def test_departure_pixel_one_frame_red_requires_this_entry_to_have_fired(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, one_frame_status: str,
+) -> None:
+    with pytest.raises(RuntimeError, match="one-frame tamper did not fire for this entry"):
+        _capture_departure_fake(
+            monkeypatch, tmp_path, raw_ticks=tuple(range(7)), red_indices=(2,),
+            visible_indices=(0, 1, 3), start_ms=40.0, first_draw_ms=64.0,
+            supply_thresholds=False, one_frame_red=True, one_frame_status=one_frame_status,
+        )
+
+
+def test_departure_pixel_sync_ambiguity_is_recorded_without_distance_ties(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    ambiguous, _player, _thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path / "ambiguous", duplicate_indices=(2,), corrupt_indices=(3,),
+    )
+    assert ambiguous["departurePixels"]["ambiguousFrames"] == 2
+    assert ambiguous["pixelVerdict"]["coverageComplete"] is False
+
+
+def test_departure_pixel_never_visible_is_incomplete_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="never visible; coverage incomplete"):
+        _capture_departure_fake(monkeypatch, tmp_path, hide_ms=0.0)
+
+
+def test_departure_pixel_unwraps_twelve_bit_ticks_without_counting_brackets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    captured, _player, _thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path, raw_ticks=(4094, 4095, 0, 1, 2, 3),
+    )
+    record = captured["departurePixels"]
+    assert [frame["tick"] for frame in record["frames"]] == list(range(4094, 4100))
+    assert (record["expectedTicks"], record["deliveredTicks"], record["missingTicks"]) == (2, 2, [])
+
+
+def test_departure_pixel_without_thresholds_records_no_exposed_frames(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        probe, "score_departure_pixels",
+        lambda *_args, **_kwargs: pytest.fail("threshold-free evidence must not reach the scorer"),
+    )
+    captured, _player, thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path, red_indices=(2,), supply_thresholds=False,
+    )
+    assert thresholds is None
+    assert captured["departurePixels"]["exposedFrames"] == 0
+    assert captured["pixelVerdict"]["reason"] == "thresholds not supplied"
+
+
+def test_departure_screencast_quantizes_old_point_six_four_scale_and_decodes_tick() -> None:
+    viewport = (160, 90)
+    assert probe.departure_screencast_size(viewport, {"w": 150.0, "h": 150.0}) == (120, 68)
+    image = np.zeros((68, 120, 3), dtype=np.uint8)
+    cell = 3
+    tick = 0xA53
+    for bit in range(probe.CARRY_COVER_SYNC_BITS):
+        on = bool((tick >> bit) & 1)
+        image[:cell, 2 * bit * cell:(2 * bit + 1) * cell] = 255 if on else 0
+        image[:cell, (2 * bit + 1) * cell:(2 * bit + 2) * cell] = 0 if on else 255
+    assert probe.departure_sync_tick(image, viewport) == tick
+
+
+def test_departure_pixel_refuses_a_decoder_roi_over_the_sync_bar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="decoder ROI overlaps the sync bar"):
+        _capture_departure_fake(
+            monkeypatch, tmp_path,
+            src_rect={"x": 0.0, "y": 0.0, "w": 30.0, "h": 30.0},
+        )
+
+
+def test_departure_poster_reference_is_decoded_from_export_and_does_not_collapse_pairwise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    poster_file = tmp_path / "source-poster.pdf"
+    poster_file.write_bytes(b"synthetic export poster")
+    rendered = np.full((20, 80, 3), (0, 255, 0), dtype=np.uint8)
+
+    class Slide:
+        ordinal = 2
+        movies = {"source-object": ("clip.mov", "poster-texture")}
+        pdf_path = poster_file
+
+        @staticmethod
+        def page_index(texture: str) -> int | None:
+            return 7 if texture == "poster-texture" else None
+
+    class Renderer:
+        @staticmethod
+        def png(_source: Path, _index: int, destination: Path) -> bool:
+            ok, encoded = cv2.imencode(".png", cv2.cvtColor(rendered, cv2.COLOR_RGB2BGR))
+            assert ok
+            destination.write_bytes(encoded.tobytes())
+            return True
+
+    monkeypatch.setattr(probe.preview_textures, "_load", lambda _export, _slides: [Slide()])
+    monkeypatch.setattr(probe.preview_textures, "_Renderer", Renderer)
+    entry = {
+        "id": "derived-entry", "objectId": "source-object", "dstObjectId": "dest-object",
+        "asset": "clip.mov", "fromOrdinal": 2, "fromPlayer": 1,
+        "srcRect": {"x": 100.0, "y": 30.0, "w": 40.0, "h": 10.0},
+        "dstRect": {"x": 100.0, "y": 30.0, "w": 32.0, "h": 8.0},
+    }
+    poster, provenance = probe._capture_departure_poster_reference(
+        tmp_path, [], entry, tmp_path / "renders",
+    )
+    assert poster is not None and poster.shape == (20, 80, 3)
+    assert np.array_equal(poster, rendered)
+    assert provenance == {
+        "source": "export poster image", "path": str(poster_file.resolve()),
+        "sha256": hashlib.sha256(poster_file.read_bytes()).hexdigest(),
+        "renderedPath": str((tmp_path / "renders" / "derived-entry-poster-texture-7.png").resolve()),
+        "metric": "mad", "slide": 1, "objectId": "source-object", "asset": "clip.mov",
+        "texture": "poster-texture", "pageIndex": 7,
+    }
+    captured, _player, _thresholds = _capture_departure_fake(
+        monkeypatch, tmp_path / "evidence", poster_reference=poster, poster_provenance=provenance,
+        src_rect=entry["srcRect"], dst_rect=entry["dstRect"],
+    )
+    reference = captured["departurePixels"]["references"]
+    assert reference["pairwise"]["lastDecoder_poster"] == 170.0
+    assert reference["pairwise"]["lastDecoder_poster"] != 0
+    assert reference["poster"]["provenance"]["path"] == str(poster_file.resolve())
+    assert reference["poster"]["provenance"]["sha256"] == provenance["sha256"]
+    assert reference["poster"]["provenance"]["scale"] == 1.0
+    assert reference["poster"]["provenance"]["slide"] == 1
+    assert reference["poster"]["dstRect"] == entry["srcRect"] != entry["dstRect"]
+
+
+def test_departure_pixel_run_records_entry_error_and_continues(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    entries = [{"id": "bad"}, {"id": "good"}]
+    args = argparse.Namespace(
+        artifact=tmp_path / "artifact.json", fixture=tmp_path / "fixture.key", original_index=tmp_path / "index.json",
+        departure_pixel_thresholds=None, viewport=(160, 90), core_variant=None,
+        departure_pixel_one_frame_poster=False, departure_pixel_persistent_null=False,
+        mm_feed="auto", mm_opacity="off", feed_dwell=1.25, feed_tamper=None, feed_tamper_scene=None,
+        feed_variant=None, hold_upload_kill_switch=False, attach=False,
+    )
+    monkeypatch.setattr(probe, "run_root", lambda _artifact: tmp_path / "run")
+    monkeypatch.setattr(probe, "prepare_export", lambda _fixture, _index, _root, label: tmp_path / label)
+    monkeypatch.setattr(probe, "load_slides", lambda _export: [])
+    monkeypatch.setattr(probe, "ground_truth_plan", lambda _export, _slides: object())
+    monkeypatch.setattr(probe, "complete_facts", lambda *_args: {"planSha256": "plan"})
+    monkeypatch.setattr(probe, "departure_pixel_entries", lambda _facts, _plan: entries)
+    monkeypatch.setattr(probe, "_departure_threshold_input", lambda _path: (None, {"value": None}))
+    monkeypatch.setattr(probe, "force_viewport", lambda *_viewport: None)
+    monkeypatch.setattr(probe, "evidence_dir_of", lambda _artifact: tmp_path / "evidence")
+    monkeypatch.setattr(probe, "js_sha256", lambda: "core")
+
+    def poster(_export: Any, _slides: Any, entry: dict[str, Any], _render_dir: Any) -> Any:
+        if entry["id"] == "bad":
+            return None, {"reason": "export poster missing"}
+        return np.zeros((1, 1, 3), dtype=np.uint8), {"source": "poster"}
+
+    monkeypatch.setattr(probe, "_capture_departure_poster_reference", poster)
+    monkeypatch.setattr(
+        probe, "_run_departure_pixel_entry",
+        lambda _args, _export, _slides, _facts, entry, *_rest: {"entryId": entry["id"], "status": "recorded"},
+    )
+    result = probe.run_departure_pixels(args)
+    assert result["entries"] == [
+        {"entryId": "bad", "status": "error", "error": "poster reference unavailable: export poster missing"},
+        {"entryId": "good", "status": "recorded"},
+    ]
+    assert result["arm"] == {
+        "mmFeed": "auto", "mmOpacity": "off", "feedDwell": 1.25,
+        "feedTamper": None, "feedTamperScene": None, "feedVariant": None,
+        "holdUploadKillSwitch": False, "coreVariant": None, "attach": False,
+    }
+
+
+@pytest.mark.parametrize(("value", "valid"), [
+    ("decoder", True), (7, True), (None, False), (True, False), (7.0, False), ({}, False),
+])
+def test_departure_pixel_identity_fields_are_only_strings_or_integers(value: Any, valid: bool) -> None:
+    assert probe._departure_pixel_identity(value) is valid
+
+
+@pytest.mark.parametrize("argv", [
+    ["--departure-pixel-one-frame-poster"],
+    ["--departure-pixels", "--carry-cover"],
+    ["--departure-pixels", "--departure-pixel-one-frame-poster", "--departure-pixel-persistent-null"],
+])
+def test_departure_pixel_discovery_refuses_real_cli_mode_conflicts(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        probe.parse_args(argv)
+
+
+def test_departure_pixel_entry_inventory_is_derived_from_plan_facts() -> None:
+    facts = {"verdicts": [
+        {"id": "fact-a", "kind": "carry", "underArtwork": True, "feed": {"draw": 1},
+         "srcObjectId": "a", "dstObjectId": "aa", "atScene": 4, "fromPlayer": 1, "toPlayer": 2,
+         "asset": "a.mov", "dstRect": {"x": 1, "y": 2, "w": 3, "h": 4}, "authoredSrcRect": SRC_RECT},
+        {"id": "fact-b", "kind": "carry", "underArtwork": True, "feed": {"draw": 2},
+         "srcObjectId": "b", "dstObjectId": "bb", "atScene": 8, "fromPlayer": 3, "toPlayer": 4,
+         "asset": "b.mov", "dstRect": {"x": 5, "y": 6, "w": 7, "h": 8}, "authoredSrcRect": DST_RECT},
+        {"id": "not-feed", "kind": "carry", "underArtwork": False, "feed": None},
+    ]}
+    boundaries = [
+        argparse.Namespace(from_player_index=1, to_player_index=2, transition_duration=0.4),
+        argparse.Namespace(from_player_index=3, to_player_index=4, transition_duration=0.8),
+    ]
+    entries = probe.departure_pixel_entries(facts, argparse.Namespace(boundaries=boundaries))
+    assert [(entry["id"], entry["durationSeconds"]) for entry in entries] == [("fact-a", 0.4), ("fact-b", 0.8)]
+
+
+def test_departure_pixel_flags_are_probe_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = probe.parse_args(["--departure-pixels", "--departure-pixel-one-frame-poster"])
+    assert args.departure_pixels is True and args.departure_pixel_one_frame_poster is True
+    monkeypatch.setattr(probe, "DEPARTURE_PIXEL_TAMPER", "one-frame-poster")
+    selected: list[str] = []
+    monkeypatch.setattr(
+        probe.mm_feed_instrument, "instrument_variant",
+        lambda name, source: selected.append(name) or source + "\nvar instrumentVariant='one-frame-poster';",
+    )
+    facts = {"verdicts": [{"id": "carry", "underArtwork": True, "feed": {"draw": 1}}]}
+    (source,) = probe.feed_instrument_pre_navigation_scripts(facts, one_frame_poster_entry_id="carry")
+    assert selected == ["one-frame-poster"] and "instrumentVariant='one-frame-poster'" in source
+    assert '"oneFramePosterEntryId": "carry"' in source
+    shell = (REPO / "scripts" / "run_gates.sh").read_text()
+    assert "--departure-pixels" not in shell and "--departure-pixel-one-frame-poster" not in shell
 
 
 @pytest.mark.parametrize(("kind", "feed", "expected"), [
