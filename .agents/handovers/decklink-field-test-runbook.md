@@ -250,7 +250,7 @@ as §0a, Take output, Ready, then as below. **Manual OBS (§0b):**
 cd $W && OBED_LIVE_ATTACH=http://127.0.0.1:9222 OBED_LIVE_ATTACH_MATCH='about:blank#program' \
 PYTHONPATH=$W/src $PY -m obed_edom dashboard
 ```
-**Alpha Keynote** tab → **1. Add & qualify**: drop `Minimal Alpha_DSK.key` from Finder (or choose it on this Mac) →
+**Alpha Keynote** tab → **1. Add & qualify**: drop `Minimal Alpha_DSK.key` (main checkout `output/source-decks/` since 2026-10-17) from Finder (or choose it on this Mac) →
 **Qualify Keynote** (exports from a scratch copy; the source is never touched) → **Deck ready**, with "Movie continuity
 on" (or off, with the reason) and any movies converted to H.264. **2. Present** → **Start output session**: the output
 is SHOWN as soon as the deck loads (slide 1 keys onto In3/In4 — warn staff first); **Hide output** / **Show output** toggles it.
