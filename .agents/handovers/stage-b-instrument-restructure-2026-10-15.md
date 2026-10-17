@@ -55,6 +55,10 @@ distances, the diagnosis side-finding) → C5 → C10 audit → **gate 5a (owner
 list and decisions)** → 6a full suites → gates 7–15 → Q7 attempt 4 (the owner's live check).
 
 **Open items carried**
+- **Player follow-up (owner 2026-10-17, not urgent): one-source-frame skip at resume after a feed-off hold.** C4-F
+  diagnosis on round `adfeb552` (Alpha b5to6, feed-off-2s and after-feed): the first callback after resume advances source
+  time two frames while `presentedFrames` advances one; upload and media time agree, so it is the player, not the
+  instrument. Scored as the owner-approved one-frame REPORT meanwhile; ≥2 still fails. Fix in the player later.
 - F4 (3): the Alpha b5to6 / b7to8:wa0121 flips. Re-check on the merged tree.
 - `PRE_DRAW_GRACE_MS` = 320 ms: thin margin (D7 controls 306.5 ms); widening it is the owner's call.
 - C2 integration items (`c2-offline-gate-record.md` §Open).
