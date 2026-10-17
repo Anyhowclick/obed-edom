@@ -63,6 +63,25 @@ stage-b-arch). Plan r3 `.agents/plans/keynote_live_continuity_stage_b_c2_integra
   - phase 3, P-c: pixel discovery.
   - Then full suites plus the pre-5a integration round, then merge to stage-b-arch.
 
+**2026-10-17 night: C2-integration checkpoint, phase 2 landed** on `claude/stage-b-c4c5` @ `0ec8d143`.
+- Streams, each Sol high with Opus 5.5 high to READY:
+  - P-b `8acc55b4`: validity on every judged path;
+  - F-b `6b8db3d6`: holder/aggregate/sampler/attach/scope contracts;
+  - O-b `aff79f80`: OBS feed-session validity;
+  - G-b `43fa57bf`: round-level Chrome build check;
+  - co-landing fixup `0ec8d143`.
+- Targeted tests: 3366 passed outside the sandbox on Node 16.0.
+- Coordinator decisions this phase (reversible):
+  - the frozen top-level aggregate `{ok, reasons, policy:{hostKind}, measured:{environment:{chromeBuild}}, holders}`;
+  - round build check: unreadable, absent runValidity, missing, mixed or zero builds invalidate; only registered P2 is N/A, including an unreadable P2;
+  - cadence is NOT a paint-verdict input (it's judged only in runValidity);
+  - the `replay` scope can never be ok=True;
+  - P-b keeps None holders as unproven.
+- Watch items for the integration round:
+  - Pass G destinations now run the full sampler during screenshot bursts (burst spacing and verdicts must not move);
+  - no OBS feed take can pass until Q2 (cadence stays measurement-only).
+- NEXT: phase 3, P-c pixel discovery (with F's live tamper/contract and V's pixel scorer). Then full suites plus the pre-5a integration round (`--allow-record`), then merge to stage-b-arch.
+
 **OPEN, due before gate 5a (owner 2026-10-16):** C1's feed-control colours and holdMatch/poster positive/red separation,
 and the D1 counter-policy obligations (D7 crossfade/from-only; a positive GL counter decode now exists on the strip2 D7
 feed-on arms). C1 gate 2 timing passed (`c1-gate2-record.md`).
