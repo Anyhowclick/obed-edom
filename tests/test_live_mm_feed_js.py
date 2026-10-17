@@ -360,6 +360,14 @@ def test_real_instrument_observes_module_uploads_after_zero_draw_frame() -> None
         "draws": {"drawCount": 1, "draws": []},
     }
     before_module = f"""
+const costHooks={{}},costStack=[];
+global.__obedCost={{
+  install(hook){{if(typeof hook!=='string'||!hook)return false;if(!costHooks[hook])costHooks[hook]={{count:0,chunks:[]}};return true}},
+  enter(hook){{if(!costHooks[hook])return false;costStack.push(hook);return true}},
+  leave(hook){{if(costStack[costStack.length-1]!==hook)return false;costStack.pop();costHooks[hook].count++;costHooks[hook].chunks.push(0);return true}},
+  stop(){{return true}},
+  read(hook,offset,n){{if(typeof hook==='string')return (costHooks[hook]&&costHooks[hook].chunks||[]).slice(offset||0,(offset||0)+(n||1e9));return {{version:1,stopped:false,errors:[],hooks:costHooks,frames:{{count:0,chunks:[]}}}}}}
+}};
 eval(INSTRUMENT);
 assert(global.__obedMmFeedProbe);
 global.__obedMmFeedProbe.bootstrap({json.dumps({"entries": [probe_entry]}, separators=(",", ":"))});
@@ -388,6 +396,10 @@ assert.strictEqual(report.claims.length,1);
 assert.strictEqual(report.claims[0].claimed,true);
 assert.strictEqual(report.claims[0].serial,1);
 assert.strictEqual(report.claims[0].entryId,'entry-A');
+assert.strictEqual(report.hookHealth.accountingComplete,true);
+assert.strictEqual(report.hookHealth.hooks['feed.rvfc'].callbackCount,0);
+assert(report.hookHealth.hooks['feed.raf'].callbackCount>0);
+assert(report.hookHealth.hooks['feed.draw'].callbackCount>0);
 """,
         before_module=before_module,
         constants={"INSTRUMENT": mm_feed_instrument.INSTRUMENT_JS},
@@ -814,3 +826,48 @@ assert.deepStrictEqual(calls.stand,[]);
         mm_feed_variants.variant_script("from-only", "<script></script>")
     with pytest.raises(ValueError, match="anchor occurs 0 times"):
         mm_feed_variants.variant_script("no-linger", "<script></script>")
+
+
+def test_calibration_red_instrument_variant_is_probe_only_and_anchor_checked() -> None:
+    changed = mm_feed_instrument.instrument_variant("calibration-red")
+    assert changed != mm_feed_instrument.INSTRUMENT_JS
+    assert "patches=calibrationSample(v," in changed
+    assert "patches=sample(v," not in changed
+    entry = _entry("A")
+    probe_entry = {
+        "id": "entry-A", "atScene": 2, "objectId": "A", "dstObjectId": "A2",
+        "feed": entry["feed"], "draws": {"drawCount": 1, "draws": []},
+    }
+    _run_node(
+        _plan(entry),
+        r"""
+assert.strictEqual(typeof instrumentCallback,'function');
+instrumentCallback(0,{presentedFrames:1,mediaTime:1/30});
+const report=global.__obedMmFeedProbe.report();
+assert.strictEqual(calibrationDraws,26);
+assert.strictEqual(report.hookHealth.accountingComplete,true);
+assert.strictEqual(report.hookHealth.hooks['feed.rvfc'].callbackCount,1);
+assert.strictEqual(report.instrumentVariant,'calibration-red');
+""",
+        before_module=f"""
+let instrumentCallback=null,calibrationDraws=0;
+fake2d.drawImage=function(){{calibrationDraws++}};
+decoders.A.requestVideoFrameCallback=function(callback){{instrumentCallback=callback;return 1}};
+decoders.A.cancelVideoFrameCallback=function(){{}};
+const calibrationHooks={{}},calibrationStack=[];
+global.__obedCost={{
+  install(hook){{if(typeof hook!=='string'||!hook)return false;if(!calibrationHooks[hook])calibrationHooks[hook]={{count:0,chunks:[]}};return true}},
+  enter(hook){{if(!calibrationHooks[hook])return false;calibrationStack.push(hook);return true}},
+  leave(hook){{if(calibrationStack[calibrationStack.length-1]!==hook)return false;calibrationStack.pop();calibrationHooks[hook].count++;calibrationHooks[hook].chunks.push(0);return true}},
+  stop(){{return true}},
+  read(hook,offset,n){{if(typeof hook==='string')return (calibrationHooks[hook]&&calibrationHooks[hook].chunks||[]).slice(offset||0,(offset||0)+(n||1e9));return {{version:1,stopped:false,errors:[],hooks:calibrationHooks,frames:{{count:0,chunks:[]}}}}}}
+}};
+eval(INSTRUMENT);
+global.__obedMmFeedProbe.bootstrap({json.dumps({"entries": [probe_entry]}, separators=(",", ":"))});
+""",
+        constants={"INSTRUMENT": changed},
+    )
+    with pytest.raises(ValueError, match="unknown feed instrument variant"):
+        mm_feed_instrument.instrument_variant("production")
+    with pytest.raises(ValueError, match="anchor counts"):
+        mm_feed_instrument.instrument_variant("calibration-red", "(function(){})();")

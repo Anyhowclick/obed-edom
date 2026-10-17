@@ -45,6 +45,11 @@ REFUSE_VIAS = frozenset({"stash", "remount", "src-clear", "removeAttribute", "re
 ZONE_FROM = frozenset({"pending", "armed", "released"})
 ZONE_TO = frozenset({"armed", "released", "retired"})
 BRIDGE_CLOCK_FALLBACK_MIN_MS = 50
+INSTRUMENT_COST_HOOKS = (
+    "sampler.tick", "paint.prePaint", "feed.rvfc", "feed.raf", "feed.draw", "frame.total",
+)
+FEED_COST_HOOKS = ("feed.rvfc", "feed.raf", "feed.draw")
+INSTRUMENT_COST_ROW_FIELDS = frozenset({"applicable", "installed", "count", "p95", "max", "overBudget"})
 
 
 def first_errors(*streams: Iterable[str], limit: int = CONTRACT_ERROR_LIMIT) -> list[str]:
@@ -124,6 +129,98 @@ def _fields(value: dict[str, Any], kind: str, path: str, table: dict[str, Any]) 
 def _unique(values: list[Any], clause: str, path: str) -> Iterator[str]:
     if len(values) != len(set(values)):
         yield f"{clause} at {path}"
+
+
+def feed_hook_health(value: Any, path: str = "mmFeedEvidence.hookHealth") -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"feedHookHealth:object at {path}"
+        return
+    yield from _fields(value, "feedHookHealth", path, {
+        "version": lambda v: v == 1,
+        "bootstrapCalls": _count,
+        "configureCalls": _count,
+        "installAttempts": _count,
+        "accountingComplete": lambda v: isinstance(v, bool),
+        "errors": lambda v: isinstance(v, list),
+        "hooks": lambda v: isinstance(v, dict),
+    })
+    errors = value.get("errors") if isinstance(value.get("errors"), list) else []
+    for index, error in enumerate(errors):
+        if not isinstance(error, dict) or not _non_empty_str(error.get("where")) \
+                or not _non_empty_str(error.get("error")):
+            yield f"feedHookHealth.error at {path}.errors[{index}]"
+    hooks = value.get("hooks") if isinstance(value.get("hooks"), dict) else {}
+    if set(hooks) != set(FEED_COST_HOOKS):
+        yield f"feedHookHealth.hooks at {path}.hooks"
+    valid_rows = True
+    for hook in FEED_COST_HOOKS:
+        row = hooks.get(hook)
+        where = f"{path}.hooks[{hook!r}]"
+        if not isinstance(row, dict):
+            yield f"feedHookHealth.hook:object at {where}"
+            valid_rows = False
+            continue
+        yield from _fields(row, "feedHookHealth.hook", where, {
+            "installed": lambda v: isinstance(v, bool),
+            "callbackCount": _count,
+            "enterCount": _count,
+            "leaveCount": _count,
+            "active": _count,
+        })
+        counts = [row.get(key) for key in ("callbackCount", "enterCount", "leaveCount", "active")]
+        if not all(_count(count) for count in counts):
+            valid_rows = False
+        elif row.get("installed") is False and any(counts[1:]):
+            yield f"feedHookHealth.hook:uninstalled accounting at {where}"
+            valid_rows = False
+    if valid_rows and isinstance(value.get("accountingComplete"), bool):
+        complete = not errors and all(
+            hooks[hook]["installed"] is True
+            and hooks[hook]["callbackCount"] == hooks[hook]["enterCount"] == hooks[hook]["leaveCount"]
+            and hooks[hook]["active"] == 0
+            for hook in FEED_COST_HOOKS
+        )
+        if value["accountingComplete"] is not complete:
+            yield f"feedHookHealth.accountingComplete at {path}"
+
+
+def instrument_cost(value: Any, path: str = "instrumentCost") -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"instrumentCost:object at {path}"
+        return
+    if set(value) != set(INSTRUMENT_COST_HOOKS):
+        yield f"instrumentCost.hooks at {path}"
+    for hook in INSTRUMENT_COST_HOOKS:
+        row = value.get(hook)
+        where = f"{path}[{hook!r}]"
+        if not isinstance(row, dict):
+            yield f"instrumentCost.hook:object at {where}"
+            continue
+        if set(row) != INSTRUMENT_COST_ROW_FIELDS:
+            yield f"instrumentCost.hook:fields at {where}"
+        yield from _fields(row, "instrumentCost.hook", where, {
+            "applicable": lambda v: isinstance(v, bool),
+            "installed": lambda v: isinstance(v, bool),
+            "count": _count,
+            "p95": lambda v: v is None or _finite(v) and v >= 0,
+            "max": lambda v: v is None or _finite(v) and v >= 0,
+            "overBudget": _count,
+        })
+        applicable, installed = row.get("applicable"), row.get("installed")
+        count, p95, maximum, over = (row.get(key) for key in ("count", "p95", "max", "overBudget"))
+        if applicable is False and (installed is not False or count != 0):
+            yield f"instrumentCost.hook:inapplicable at {where}"
+        if applicable is True and installed is False and count != 0:
+            yield f"instrumentCost.hook:uninstalled at {where}"
+        if _count(count) and _count(over) and count == 0:
+            if p95 is not None or maximum is not None or over != 0:
+                yield f"instrumentCost.hook:zero statistics at {where}"
+        elif _count(count) and _count(over) and not (
+                _finite(p95) and p95 >= 0 and _finite(maximum) and maximum >= p95 and over <= count):
+            yield f"instrumentCost.hook:measured statistics at {where}"
+    frame_total = value.get("frame.total")
+    if isinstance(frame_total, dict) and frame_total.get("applicable") is not True:
+        yield f"instrumentCost.frame.total:applicable at {path}['frame.total']"
 
 
 STAGE_MAP_FIELDS = {
@@ -717,6 +814,10 @@ def mm_feed_report(value: Any, path: str = "mmFeedEvidence") -> Iterator[str]:
         yield f"mmFeed.mediaOverflow at {path}"
     if version == 3 and not _count(value.get("unplannedContextCount")):
         yield f"mmFeed.unplannedContextCount at {path}"
+    if version == 3:
+        yield from feed_hook_health(value.get("hookHealth"), f"{path}.hookHealth")
+        if "instrumentVariant" in value and value["instrumentVariant"] != "calibration-red":
+            yield f"mmFeed.instrumentVariant at {path}"
     if value.get("callbackCostP95Ms") is not None and not (_finite(value.get("callbackCostP95Ms")) and value["callbackCostP95Ms"] >= 0):
         yield f"mmFeed.callbackCostP95Ms at {path}"
     if strict_counter:
@@ -1256,6 +1357,62 @@ def feed_verdict_record(value: Any, path: str = "feedVerdict") -> Iterator[str]:
         for key in ("seeked", "resumedFromZero", "successfulFeed", "departurePauseBeforeMove"):
             if key in resume and not isinstance(resume[key], bool):
                 yield f"feedVerdict.resume.{key} at {path}.resume"
+
+
+def _published_verdict(value: Any, kind: str, path: str) -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"{kind}:object at {path}"
+        return
+    if value.get("verdict") is not None and not isinstance(value.get("verdict"), bool):
+        yield f"{kind}.verdict at {path}"
+    if "verdict" not in value:
+        yield f"{kind}.verdict:missing at {path}"
+    if "reason" in value and value["reason"] is not None and not _non_empty_str(value["reason"]):
+        yield f"{kind}.reason at {path}"
+    if "notApplicable" in value and not isinstance(value["notApplicable"], bool):
+        yield f"{kind}.notApplicable at {path}"
+
+
+def under_artwork_result(value: Any, path: str = "underArtwork") -> Iterator[str]:
+    if not isinstance(value, dict):
+        yield f"underArtwork:object at {path}"
+        return
+    yield from _published_verdict(value, "underArtwork", path)
+    visits = value.get("visits")
+    if visits is not None:
+        if not isinstance(visits, list) or not visits:
+            yield f"underArtwork.visits:list at {path}"
+        else:
+            for index, visit in enumerate(visits):
+                yield from under_artwork_result(visit, f"{path}.visits[{index}]")
+        return
+    mode = value.get("mode")
+    if mode is None and value.get("verdict") is None and _non_empty_str(value.get("reason")):
+        return
+    if mode not in ("continuous", "once", "departure", "standDown"):
+        yield f"underArtwork.mode at {path}"
+        return
+    for key in ("noRiderAboveCanvas", "artworkAbove", "departureExposure"):
+        yield from _published_verdict(value.get(key), f"underArtwork.{key}", f"{path}.{key}")
+    if mode == "continuous":
+        for key in ("feedLive", "labelsOverFeed"):
+            yield from _published_verdict(value.get(key), f"underArtwork.{key}", f"{path}.{key}")
+        hold = value.get("holdFrame")
+        if hold != {"verdict": None, "notApplicable": True}:
+            yield f"underArtwork.holdFrame:notApplicable at {path}.holdFrame"
+    else:
+        for key in ("holdFrame", "posterHold"):
+            yield from _published_verdict(value.get(key), f"underArtwork.{key}", f"{path}.{key}")
+        resume = value.get("resume")
+        yield from _published_verdict(resume, "underArtwork.resume", f"{path}.resume")
+        if isinstance(resume, dict):
+            if "report" in resume and not isinstance(resume["report"], bool):
+                yield f"underArtwork.resume.report at {path}.resume"
+            if "dropSize" in resume and not _int(resume["dropSize"]):
+                yield f"underArtwork.resume.dropSize at {path}.resume"
+            if resume.get("report") is True and not (
+                    resume.get("verdict") is True and resume.get("dropSize") == 1):
+                yield f"underArtwork.resume.reportSemantics at {path}.resume"
 
 
 HANDBACK_FIELDS = {"status": lambda v: v in ("ok", "inconclusive"), "reason": _str_or_null, "targetHash": _int,
