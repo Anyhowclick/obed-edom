@@ -2,7 +2,7 @@
 
 NON-INTERACTIVE. Do not propose a plan or ask for approval. Implement, test, write ONE final report, stop.
 
-**Launch only after the MM-FEED fix has merged into `claude/stage-b-arch`.** The coordinator fills in `<BASE>` (that merge SHA), `<WORKTREE>` and `<SCRATCH>` at launch.
+**Base: `claude/stage-b-arch` @ `9f7df247` or later** (the MM-FEED fix merged 2026-10-17). The coordinator fills in `<BASE>`, `<WORKTREE>` and `<SCRATCH>` at launch.
 
 ## Authority
 - Plan: `.agents/plans/keynote_live_continuity_stage_b_instrument_restructure.plan.md` §6 (C4 slice) and §9 (streams, co-landed contracts). The plan's line numbers refer to an older baseline. Re-anchor every reference by symbol.
@@ -46,6 +46,27 @@ NON-INTERACTIVE. Do not propose a plan or ask for approval. Implement, test, wri
    - Missing resume evidence, inconsistent clocks, non-advance, or a drop of 2 or more frames is never REPORT.
 5. **Counter-deck refusal (MM-FEED diagnosis side finding).** Don't score a counter deck with Alpha distances. If a record's `counterLayout` is set and a read falls back to `kind: alpha` because the decoder reference has no counter, `score_feed_live` returns `None` with a named reason. That fallback must never give `False`.
 6. **Errors and overflow stay feed-local**, never in C2's run-validity. Keep the owner's error scope exactly as it is today.
+7. **Alpha hold: neighbourhood match (owner 2026-10-17).** Evidence: `mmfeed-fix-gate-record.md`, round `adfeb552`, the feed-off-2s/-5s/-12s and attach-once arms.
+   - On near-static real footage, the held frame can't be told apart from its ring neighbours: hold margins are 0–5 against `ALPHA_HOLD_MARGIN` = 6, and neighbours sit at about 0. So `score_hold_frame` returns None today.
+   - **Do not lower the margin.**
+   - For `kind: alpha` reads, measure the frames that are indistinguishable from the target, meaning their alpha distance to the target frame is below the margin. Each must be measured on the same reads, never assumed.
+   - Pass when the read matches the target or a measured-indistinguishable frame. Record `exactness: "neighbourhood"`, the neighbourhood (frame offsets) and the margins.
+   - Return False when the read matches the poster or any *distinguishable* frame. Return None when the neighbourhood itself is unreadable.
+   - Counter reads stay exact (`COUNTER_HOLD_MARGIN`, no neighbourhood).
+   - Reds: hold on the poster, hold on a distinguishable frame. Null: a near-static hold within the measured neighbourhood. Offline replay: the `adfeb552` feed-off records go from None to True.
+8. **Resume off-by-one (diagnose first).** Alpha b5to6 under feed-off-2s and after-feed: media time advanced one source frame more than `presentedFrames`. The base is `lastUploadedFrame` 66 against `pauseFrame` 65, on a constant-30-fps source.
+   - Using the stored `adfeb552` records, decide per frame: is this a real one-frame skip at resume, or an off-by-one between the upload record and media time?
+   - If it's a real skip and fully evidenced, `score_resume` makes it the owner-approved one-frame REPORT.
+   - If it's an instrument off-by-one, fix the producer or normalization.
+   - Report the frame table either way. Never REPORT an unexplained drop.
+9. **no-pause control signal path.** With `--core-variant no-pause` and the feed off, the core feed seam emits neither a claim nor a departure, so the mode is `unavailable` and `posterHold` is None instead of the registered False.
+   - Make the producer attribute the departure (or stand-down) independently of the pause, so the control reaches `score_poster_hold`.
+   - The scorer then returns False because there is no pause.
+   - Check against the stored `adfeb552` no-pause record.
+
+10. **Ordinal targeted carry.** Alpha b5to6 under `--feed-tamper ordinal` scores `holdFrame` None (standDown; the held target or its first/middle/last reads are missing). Find out why the reads are missing, and fix it if it's the producer. The registered expectation is `holdFrame` False.
+
+The `adfeb552` evidence is in `output/evidence/stage-b-2026-10-13/mmfeed-fix/round-adfeb552/`.
 
 ## Tests (minimal: max coverage, fewest new tests)
 - Extend F's existing fake page with:

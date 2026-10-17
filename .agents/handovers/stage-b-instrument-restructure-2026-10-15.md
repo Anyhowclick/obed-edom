@@ -34,6 +34,14 @@ and `alpha-b3to4-stall-2026-10-15.md`.
 - **Do not merge on that round.** Then: merge `claude/stage-b-arch` into the fix branch (probe/probe-test overlap with
   C3), rerun suites, diagnose 1–3, and re-run the round. That round closes C1's open item.
 
+**2026-10-17 update (coordinator).**
+- The MM-FEED fix is **merged** (`9f7df247`; round `adfeb552` 9 red, all pre-existing Alpha, record `mmfeed-fix-gate-record.md`).
+- Owner rules:
+  - D7 crossfade ambiguity = red (proved: 0/72 ambiguous on the feed-on D7/D7s arms, 8/8 from-only records red);
+  - Alpha holdFrame = **neighbourhood match** on near-static footage;
+  - merge now, and fold the 9 Alpha arms into C4-F (hold, resume off-by-one, no-pause, ordinal reads) and C5-G (control scope, Alpha from-only re-registration).
+- The C10 audit is done (`c10-audit-record.md`), with no pin edits. The C4-F and C5-G Sol briefs are ready to launch in parallel.
+
 **OPEN, due before gate 5a (owner 2026-10-16):** C1's feed-control colours and holdMatch/poster positive/red separation,
 and the D1 counter-policy obligations (D7 crossfade/from-only; a positive GL counter decode now exists on the strip2 D7
 feed-on arms). C1 gate 2 timing passed (`c1-gate2-record.md`).

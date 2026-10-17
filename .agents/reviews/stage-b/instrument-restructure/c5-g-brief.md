@@ -2,7 +2,7 @@
 
 NON-INTERACTIVE. Do not propose a plan or ask for approval. Implement, test, write ONE final report, stop.
 
-**Launch only after the MM-FEED fix has merged into `claude/stage-b-arch`**, in parallel with the C4 stream-F brief. The coordinator fills in `<BASE>`, `<WORKTREE>` and `<SCRATCH>`.
+**Base: `claude/stage-b-arch` @ `9f7df247` or later** (the MM-FEED fix merged 2026-10-17). Runs in parallel with the C4 stream-F brief. The coordinator fills in `<BASE>`, `<WORKTREE>` and `<SCRATCH>`.
 
 ## Authority
 - Plan: `.agents/plans/keynote_live_continuity_stage_b_instrument_restructure.plan.md` §7 (C5) and §9. The plan's line numbers refer to an older baseline. Re-anchor by symbol and function name.
@@ -28,7 +28,7 @@ NON-INTERACTIVE. Do not propose a plan or ask for approval. Implement, test, wri
    - `MM_FEED_STRIP_EXPECTATIONS`;
    - the paint floors;
    - the feed/REPORT rows;
-   - any D7/D7s strip2 media-identity pin the MM-FEED fix added.
+   - `D7_COUNTER_MDAT_SHA256`, the strip2 media-identity pin. `run_gates.sh` staging AST-reads it next to the D7/D7s plan pins.
 
    Move the values **byte-for-byte**, with no edits; the plan-sha tests' pinned literals stay independent. The probe imports these from `gate_checks`. `gate_checks` imports `live_run_validity` but never the probe. Where `run_gates.sh` currently AST-reads the probe for pins, it AST-reads `gate_checks.py` instead.
 2. **`judge(record, gate_kind, arm, host_kind, *, rc) -> GateResult`.**
@@ -58,7 +58,13 @@ NON-INTERACTIVE. Do not propose a plan or ask for approval. Implement, test, wri
    Leave `departureExposure` rows **unregistered**. Stream P registers them after C4.
 
    **Flag in the report** any row where encoding the proposal changes today's verdict. The coordinator takes those to the owner; don't decide them.
-5. **`tests/test_run_gates.py` gates fixture:**
+5. **Alpha control scope and re-registration** (MM-FEED round `adfeb552`, `mmfeed-fix-gate-record.md`; evidence `output/evidence/stage-b-2026-10-13/mmfeed-fix/round-adfeb552/`).
+   - **Scope controls to their target.** `--feed-tamper ordinal|after-feed --feed-tamper-scene 10` tampers only the carry at atScene 10 (Alpha b5to6). Apply the control expectation to that carry only; every other carry must meet the plain feed-on expectation.
+   - **Exempt not-applicable rows.** `mm-opacity-off` expects `labelsOverFeed` False only where a label over the feed applies. A row whose verdict is `notApplicable` (Alpha b5to6, expected 0 labels) is exempt, and is never silently counted as a pass.
+   - **Name the target explicitly.** In `judge`, both rules key on exact spec IDs and atScene from the plan, never on substrings. If the target carry is missing, the result is MISMATCH.
+   - **Re-register the Alpha first-crossfade read expectation** from the stored `adfeb552` from-only record. Use the same procedure the owner approved for D7: fresh per-progress values, with the old value, the new value and a justification for each. At 0.75 the GL patch matches the unfed to-unit's poster (dVideo 149.6 against dPoster 4.7), so the read is red. Re-check 0.5 the same way. Don't fit values to a desired outcome.
+   - **One more mismatch to report, not fix.** The ordinal arm's targeted carry also scores `holdFrame` None (reads missing under standDown). That is stream F's instrument item. Report it as a remaining mismatch.
+6. **`tests/test_run_gates.py` gates fixture:**
    - symlink `gate_checks.py` and `live_run_validity.py` into the fake gate worktree;
    - move the D7 pins out of `PROBE_STUB`;
    - keep the sha-mismatch case's independent literal.
