@@ -14,10 +14,12 @@ sys.path.insert(0, str(REPO / "scripts"))
 import binary_counter_movie as binary  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
 import mm_feed_instrument as feed  # noqa: E402
+import paint_instrument  # noqa: E402
 
 
 def _node(script: str) -> dict:
-    node = shutil.which("node")
+    pinned = Path.home() / ".nvm/versions/node/v16.0.0/bin/node"
+    node = str(pinned) if pinned.is_file() else shutil.which("node")
     if node is None:
         pytest.skip("node is not available")
     completed = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20)
@@ -106,6 +108,45 @@ def test_feed_cost_accounting_is_optional_balanced_and_whole_capture() -> None:
         1,
     )
     assert _cost_probe(truncated, callbacks=1001)["p95"] < 20
+
+
+def _report_before_stop(instrument: str) -> dict:
+    return _node(f"""
+global.window=global;global.location={{hash:'#1'}};let now=0,cancelled=[],raf=[],nextRaf=0;
+global.performance={{now:()=>++now}};global.requestAnimationFrame=fn=>(raf.push(fn),++nextRaf);
+global.cancelAnimationFrame=id=>cancelled.push(id);
+class Media{{pause(){{}} play(){{return Promise.resolve()}}}}
+class Canvas{{getContext(){{return null}}}}
+global.HTMLMediaElement=Media;global.HTMLCanvasElement=Canvas;
+global.document={{timeline:{{currentTime:0}},getElementById:()=>null,createElement:()=>new Canvas(),head:null,documentElement:null}};
+eval({json.dumps(paint_instrument.COST_RECORDER_JS)});
+const recorder=global.__obedCost;
+eval({json.dumps(instrument)});
+const firstFrame=raf.splice(0);firstFrame.forEach(fn=>fn(1));
+const before=recorder.read();
+const report=global.__obedMmFeedProbe.report();
+const afterReport=recorder.read();
+const queued=raf.splice(0);queued.forEach(fn=>fn(2));
+const afterQueued=recorder.read();
+const stopped=recorder.stop();
+const afterStop=recorder.read();
+console.log(JSON.stringify({{before,afterReport,afterQueued,stopped,afterStop,health:report.hookHealth,cancelled}}));
+""")
+
+
+def test_report_is_safe_before_stopping_the_real_cost_recorder() -> None:
+    result = _report_before_stop(feed.INSTRUMENT_JS)
+    assert result["before"]["stopped"] is False
+    assert result["afterReport"]["stopped"] is False
+    assert result["stopped"] is True and result["afterStop"]["stopped"] is True
+    assert result["afterStop"]["errors"] == []
+    assert result["health"]["accountingComplete"] is True
+    assert result["before"]["hooks"]["feed.raf"]["count"] == 1
+    for hook, row in result["health"]["hooks"].items():
+        assert result["afterReport"]["hooks"][hook]["count"] == row["enterCount"]
+        assert result["afterQueued"]["hooks"][hook]["count"] == row["enterCount"]
+    assert result["afterStop"]["frames"]["count"] >= 1
+    assert result["cancelled"]
 
 
 def test_realistic_fake_gl_sampling_lifecycle_and_shutdown() -> None:

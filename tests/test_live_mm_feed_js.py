@@ -21,7 +21,8 @@ if str(REPO / "scripts") not in sys.path:
 import mm_feed_variants  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 
-NODE = shutil.which("node")
+PINNED_NODE = Path.home() / ".nvm/versions/node/v16.0.0/bin/node"
+NODE = str(PINNED_NODE) if PINNED_NODE.is_file() else shutil.which("node")
 PINNED_MM_FEED_SHA256 = "94e6b068e0ef7c2acebdca1c942627ef5e5108c13a37dbdc5fc07c70a94de42f"
 
 
