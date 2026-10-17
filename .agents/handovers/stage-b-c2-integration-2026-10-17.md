@@ -170,6 +170,14 @@ Three Opus 5.5 high investigators worked read-only; the coordinator spot-checked
 | Alpha feed-on-1920 b7to8 wa0125: handbackContinuity False | LOAD FLAKE. One missed vsync (33.3 ms) gave a 3-frame media jump against a limit of 2, at round load 3.9–5.0. Interleaved quiet reruns 1920→1600→1920 all MATCH (12/12 hand-backs True). | None. |
 | HOST D4 wrong-instance: inconclusive, carry lines `unknown` | ONE-OFF. "row:ts not increasing at samples[1]" (`live_evidence_contract.py:990-992`): two pre-press sampler rows 1.5 ms apart carried the same `document.timeline.currentTime`. Seen 1/71 sampler arms this round and 0/7 earlier D4 artifacts. The check and the timestamp source predate phase 1. Two quiet reruns MATCH. | Optional hardening (coordinator): the sampler skips a row whose timestamp equals the previous row's (`live_continuity_probe.py` ~474-491). |
 
+**Update 2026-10-17 ~23:30: decisions taken.**
+- The owner chose cost option (A), and "the rest as per rec", including dilution = yes.
+- Fold plan r2: `.agents/plans/keynote_live_continuity_stage_b_pre5a_folds.plan.md`.
+  - It folds critique r1 by Codex GPT-6 Astra high and by Fable; their critiques are in `.cache/reviews/pre5a-folds-critique-{astra,fable}.md`.
+  - F5 (sampler duplicate timestamp) is deferred, a reversible coordinator call.
+  - F6 is split into step 0 (`willReadFrequently`), F6a (pixel-identical) and F6b (an independent decoder reference via an instrument-owned texture), plus `frame.gl`.
+- Steps 2–4 below are superseded by that plan's Sequencing. Step 1 still applies.
+
 **Next, in order:**
 1. Bring c4c5 up to date with main (#299 and later) and re-run the census tests.
 2. Owner decisions:
