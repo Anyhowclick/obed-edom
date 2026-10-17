@@ -624,6 +624,350 @@ def test_v3_mm_feed_contract_counts_unplanned_contexts_and_removes_v2_exemption(
     ]
 
 
+def test_one_frame_poster_report_is_accepted_only_when_discovery_fired() -> None:
+    report = _v3_setup(_mm_feed_report())
+    report.update(
+        instrumentVariant="one-frame-poster",
+        oneFramePoster={
+            "fired": True, "entryId": "carry-a", "frameN": 3, "rafTimestamp": 12.5,
+            "contextSerial": 2, "firstDrawFrameIndex": 4,
+        },
+    )
+    assert contract.first_errors(contract.mm_feed_report(report, discovery=True), limit=20) == []
+    assert "mmFeed.discoveryVariant" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(report)
+    ]
+    version_2 = copy.deepcopy(report)
+    version_2["version"] = 2
+    assert "mmFeed.discoveryVariant" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(version_2)
+    ]
+
+    report["oneFramePoster"] = {
+        "fired": False, "entryId": None, "frameN": None, "rafTimestamp": None,
+        "contextSerial": None, "firstDrawFrameIndex": None,
+    }
+    assert "mmFeed.oneFramePoster:not fired" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(report, discovery=True)
+    ]
+
+
+@pytest.mark.parametrize(("judged", "clause"), [
+    ({"arms": [{"producer": {"instrumentVariant": "one-frame-poster"}}]},
+     "judgedMmFeed.discoveryVariant"),
+    ({"arms": [{"producer": {"oneFramePoster": {"fired": False}}}]},
+     "judgedMmFeed.oneFramePoster"),
+])
+def test_judged_mm_feed_artifact_rejects_nested_discovery_tamper_mutants(
+    judged: dict[str, Any], clause: str,
+) -> None:
+    assert clause in [
+        problem.split(" at ")[0] for problem in contract.judged_mm_feed_artifact(judged)
+    ]
+
+
+@pytest.mark.parametrize("first_draw", [3, 2])
+def test_one_frame_poster_discovery_requires_strictly_earlier_frame(first_draw: int) -> None:
+    report = _v3_setup(_mm_feed_report())
+    report.update(
+        instrumentVariant="one-frame-poster",
+        oneFramePoster={
+            "fired": True, "entryId": "carry-a", "frameN": 3, "rafTimestamp": 12.5,
+            "contextSerial": 2, "firstDrawFrameIndex": first_draw,
+        },
+    )
+    assert "mmFeed.oneFramePoster:not fired" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(report, discovery=True)
+    ]
+
+
+@pytest.mark.parametrize("field", ["contextSerial", "firstDrawFrameIndex"])
+def test_one_frame_poster_discovery_requires_target_context_order_fields(field: str) -> None:
+    report = _v3_setup(_mm_feed_report())
+    record = {
+        "fired": True, "entryId": "carry-a", "frameN": 3, "rafTimestamp": 12.5,
+        "contextSerial": 2, "firstDrawFrameIndex": 4,
+    }
+    record[field] = None
+    report.update(instrumentVariant="one-frame-poster", oneFramePoster=record)
+    assert "mmFeed.oneFramePoster:not fired" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(report, discovery=True)
+    ]
+
+
+def _departure_pixels() -> dict[str, Any]:
+    digest = "a" * 64
+    return {
+        "entryId": "carry-a", "visit": 1, "contextSerial": 2, "decoderId": 7, "atScene": 6,
+        "startMs": 100.0, "hideMs": 110.0, "firstDrawMs": 130.0,
+        "roi": {"x": 10, "y": 20, "w": 320, "h": 180},
+        "frames": [
+            {"t": 105.0, "tick": 40, "sha256": digest, "path": "frames/040.png",
+             "distances": {"lastDecoder": 0.0, "poster": 18.0, "background": 20.0}},
+            {"t": 120.0, "tick": 41, "sha256": "b" * 64, "path": "frames/041.png",
+             "distances": {"lastDecoder": 1.0, "poster": 17.0, "background": 19.0}},
+        ],
+        "references": {
+            "lastDecoder": {"sha256": "c" * 64,
+                            "provenance": {"metric": "mad", "source": "same-session decoder ROI"}},
+            "poster": {"sha256": "d" * 64, "dstRect": {"x": 0, "y": 0, "w": 320, "h": 180},
+                       "provenance": {"metric": "mad", "source": "poster at recorded dstRect"}},
+            "background": {"sha256": "e" * 64,
+                           "provenance": {"metric": "mad", "source": "same-session hidden ROI"}},
+            "pairwise": {
+                "lastDecoder_poster": 18.0,
+                "lastDecoder_background": 20.0,
+                "poster_background": 12.0,
+            },
+        },
+        "expectedTicks": 2, "deliveredTicks": 1, "missingTicks": [42],
+        "ambiguousFrames": 0, "exposedFrames": 0,
+    }
+
+
+def _pixel_thresholds() -> dict[str, Any]:
+    return {
+        "margin": 4.0,
+        "redMin": 8.0,
+        "provenance": {"nullLeads": [18.0, 16.0], "redLeads": [-17.0]},
+    }
+
+
+def _pixel_envelope() -> dict[str, Any]:
+    pixels = _departure_pixels()
+    pixels.update(missingTicks=[], expectedTicks=1, deliveredTicks=1)
+    return {
+        "kind": "live-continuity-departure-pixel-discovery",
+        "departurePixels": pixels,
+        "pixelVerdict": {
+            "verdict": True, "reason": None, "coverageComplete": True, "exposedFrameCount": 0,
+        },
+        "thresholds": _pixel_thresholds(),
+    }
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    (lambda r: r.update(entryId=""), "departurePixels.entryId"),
+    (lambda r: r.update(contextSerial=1.5), "departurePixels.contextSerial"),
+    (lambda r: r.update(hideMs=140.0), "departurePixels:departure times not monotonic"),
+    (lambda r: r["frames"][1].update(t=104.0), "departurePixels.frame:t decreasing"),
+    (lambda r: r["frames"][0].update(sha256="A" * 64), "departurePixels.frame.sha256"),
+    (lambda r: r["roi"].update(x=1.5), "departurePixels.roi:positive ints"),
+    (lambda r: r["references"]["background"].update(provenance={"source": "hidden ROI"}),
+     "departurePixels.reference.provenance.metric"),
+    (lambda r: r["missingTicks"].append(-1), "departurePixels.missingTicks:expected range"),
+    (lambda r: r.update(missingTicks=[9999]), "departurePixels.missingTicks:expected range"),
+])
+def test_departure_pixel_contract_rejects_identity_capture_and_coverage_mutants(
+    mutate: Any, clause: str,
+) -> None:
+    record = _departure_pixels()
+    mutate(record)
+    assert clause in [problem.split(" at ")[0] for problem in contract.departure_pixels(record)]
+
+
+@pytest.mark.parametrize("field", ["entryId", "visit", "contextSerial", "decoderId", "atScene"])
+def test_departure_pixel_identity_fields_reject_non_string_non_integer_mutants(field: str) -> None:
+    record = _departure_pixels()
+    record[field] = 1.5
+    assert f"departurePixels.{field}" in [
+        problem.split(" at ")[0] for problem in contract.departure_pixels(record)
+    ]
+
+
+def test_departure_pixel_identity_fields_accept_strings_or_integers() -> None:
+    record = _departure_pixels()
+    for field in ("entryId", "visit", "contextSerial", "decoderId", "atScene"):
+        record[field] = f"identity-{field}"
+    assert list(contract.departure_pixels(record)) == []
+
+
+def test_departure_pixel_ticks_are_unwrapped_non_negative_integers() -> None:
+    record = _departure_pixels()
+    record["frames"][0]["tick"] = 5000
+    record["frames"][1]["tick"] = 5001
+    record["missingTicks"] = [5002]
+    assert list(contract.departure_pixels(record)) == []
+
+
+def test_departure_pixel_hide_may_precede_capture_start() -> None:
+    record = _departure_pixels()
+    record.update(hideMs=90.0, expectedTicks=3, deliveredTicks=2)
+    assert list(contract.departure_pixels(record)) == []
+
+
+def test_departure_pixel_tick_counts_exclude_bracket_frames() -> None:
+    record = _departure_pixels()
+    record.update(expectedTicks=3, deliveredTicks=2, missingTicks=[5002])
+    assert "departurePixels.deliveredTicks:frame mismatch" in [
+        problem.split(" at ")[0] for problem in contract.departure_pixels(record)
+    ]
+
+
+@pytest.mark.parametrize("reference", ["lastDecoder", "poster", "background"])
+def test_departure_pixel_reference_provenance_requires_mad_metric_mutants(reference: str) -> None:
+    record = _departure_pixels()
+    record["references"][reference]["provenance"]["metric"] = "mse"
+    assert "departurePixels.reference.provenance.metric" in [
+        problem.split(" at ")[0] for problem in contract.departure_pixels(record)
+    ]
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    (lambda r: r["references"].pop("pairwise"), "departurePixels.references:fields"),
+    (lambda r: r["references"]["pairwise"].pop("poster_background"),
+     "departurePixels.references.pairwise:fields"),
+    (lambda r: r["references"]["pairwise"].update(lastDecoder_poster=float("inf")),
+     "departurePixels.references.pairwise.lastDecoder_poster"),
+    (lambda r: r["references"]["pairwise"].update(lastDecoder_background=-0.1),
+     "departurePixels.references.pairwise.lastDecoder_background"),
+])
+def test_departure_pixel_pairwise_contract_kills_shape_and_distance_mutants(
+    mutate: Any, clause: str,
+) -> None:
+    record = _departure_pixels()
+    mutate(record)
+    assert clause in [problem.split(" at ")[0] for problem in contract.departure_pixels(record)]
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    (lambda t: t.pop("margin"), "pixelThresholds.margin:missing"),
+    (lambda t: t.pop("redMin"), "pixelThresholds.redMin:missing"),
+    (lambda t: t.pop("provenance"), "pixelThresholds.provenance:missing"),
+    (lambda t: t.update(margin=float("nan")), "pixelThresholds.margin"),
+    (lambda t: t.update(margin=0), "pixelThresholds.margin"),
+    (lambda t: t.update(redMin=0), "pixelThresholds.redMin"),
+    (lambda t: t.update(redMin=-0.1), "pixelThresholds.redMin"),
+    (lambda t: t.update(provenance={}), "pixelThresholds.provenance"),
+])
+def test_pixel_threshold_contract_kills_required_finite_and_provenance_mutants(
+    mutate: Any, clause: str,
+) -> None:
+    thresholds = _pixel_thresholds()
+    mutate(thresholds)
+    assert clause in [problem.split(" at ")[0] for problem in contract.pixel_thresholds(thresholds)]
+
+
+def test_pixel_discovery_contract_requires_thresholds_next_to_verdict() -> None:
+    envelope = _pixel_envelope()
+    envelope.pop("thresholds")
+    assert "pixelDiscovery.thresholds:missing" in [
+        problem.split(" at ")[0] for problem in contract.pixel_discovery_artifact(envelope)
+    ]
+
+
+@pytest.mark.parametrize(("mutate", "clause"), [
+    (lambda e: e["departurePixels"].update(expectedTicks=2, missingTicks=[42]),
+     "pixelDiscovery:coverage accounting"),
+    (lambda e: e["departurePixels"].update(ambiguousFrames=1),
+     "pixelDiscovery:ambiguous frames"),
+])
+def test_pixel_discovery_rejects_complete_coverage_mutants(mutate: Any, clause: str) -> None:
+    envelope = _pixel_envelope()
+    mutate(envelope)
+    assert clause in [
+        problem.split(" at ")[0] for problem in contract.pixel_discovery_artifact(envelope)
+    ]
+
+
+def test_pixel_discovery_accepts_unsupplied_thresholds_for_named_none_verdict() -> None:
+    envelope = _pixel_envelope()
+    envelope["thresholds"] = None
+    envelope["pixelVerdict"].update(
+        verdict=None, reason="thresholds not supplied", coverageComplete=False, exposedFrameCount=0,
+    )
+    assert list(contract.pixel_discovery_artifact(envelope)) == []
+
+
+@pytest.mark.parametrize("verdict", [True, False])
+def test_pixel_discovery_requires_thresholds_for_classified_verdicts(verdict: bool) -> None:
+    envelope = _pixel_envelope()
+    envelope["thresholds"] = None
+    if verdict is False:
+        envelope["pixelVerdict"].update(
+            verdict=False, reason="poster exposed", coverageComplete=True, exposedFrameCount=1,
+        )
+        envelope["departurePixels"]["exposedFrames"] = 1
+    assert "pixelDiscovery.thresholds:required" in [
+        problem.split(" at ")[0] for problem in contract.pixel_discovery_artifact(envelope)
+    ]
+
+
+def test_pixel_discovery_rejects_unsupplied_thresholds_without_named_none_verdict() -> None:
+    envelope = _pixel_envelope()
+    envelope["thresholds"] = None
+    envelope["pixelVerdict"].update(
+        verdict=None, reason="ambiguous frame", coverageComplete=False, exposedFrameCount=0,
+    )
+    assert "pixelDiscovery.thresholds:required" in [
+        problem.split(" at ")[0] for problem in contract.pixel_discovery_artifact(envelope)
+    ]
+
+
+def test_pixel_discovery_contract_is_separate_from_judged_mm_feed_artifacts() -> None:
+    pixels = _departure_pixels()
+    pixels["frames"].append({
+        "t": 135.0, "tick": 42, "sha256": "f" * 64, "path": "frames/042.png",
+        "distances": {"lastDecoder": 2.0, "poster": 16.0, "background": 18.0},
+    })
+    pixels.update(firstDrawMs=135.0, expectedTicks=2, deliveredTicks=2, missingTicks=[])
+    envelope = _pixel_envelope()
+    envelope["departurePixels"] = pixels
+    assert list(contract.pixel_discovery_artifact(envelope)) == []
+    judged = {"kind": "live-continuity-probe", "arms": {"A": {"departurePixels": pixels}}}
+    assert "judgedMmFeed.discoveryPixels" in [
+        problem.split(" at ")[0] for problem in contract.judged_mm_feed_artifact(judged)
+    ]
+    report = _v3_setup(_mm_feed_report())
+    report["departurePixels"] = pixels
+    assert "mmFeed.discoveryPixels" in [problem.split(" at ")[0] for problem in contract.mm_feed_report(report)]
+
+
+@pytest.mark.parametrize(("verdict", "clause"), [
+    ({"verdict": True, "reason": None, "coverageComplete": False, "exposedFrameCount": 0},
+     "pixelVerdict:true consistency"),
+    ({"verdict": True, "reason": None, "coverageComplete": True, "exposedFrameCount": 1},
+     "pixelVerdict:true consistency"),
+    ({"verdict": False, "reason": "poster", "coverageComplete": True, "exposedFrameCount": 0},
+     "pixelVerdict:false consistency"),
+    ({"verdict": False, "reason": "poster", "coverageComplete": False, "exposedFrameCount": 1},
+     "pixelVerdict:false consistency"),
+])
+def test_pixel_verdict_contract_kills_consistency_mutants(verdict: dict[str, Any], clause: str) -> None:
+    assert clause in [problem.split(" at ")[0] for problem in contract.pixel_verdict(verdict)]
+
+
+def test_pixel_verdict_contract_accepts_false_and_unclassified_evidence() -> None:
+    assert list(contract.pixel_verdict({
+        "verdict": False, "reason": "one poster frame", "coverageComplete": True, "exposedFrameCount": 1,
+    })) == []
+    assert list(contract.pixel_verdict({
+        "verdict": None, "reason": "null/red separation is unresolved", "coverageComplete": False,
+        "exposedFrameCount": 0,
+    })) == []
+
+
+def test_pixel_discovery_true_verdict_rejects_recorded_exposed_frame_mutant() -> None:
+    envelope = _pixel_envelope()
+    envelope["departurePixels"]["exposedFrames"] = 1
+    clauses = [problem.split(" at ")[0] for problem in contract.pixel_discovery_artifact(envelope)]
+    assert "pixelDiscovery:true exposed frames" in clauses
+
+
+def test_pixel_discovery_complete_coverage_rejects_exposed_count_mismatch_mutant() -> None:
+    envelope = _pixel_envelope()
+    envelope["pixelVerdict"].update(verdict=None, exposedFrameCount=1)
+    assert "pixelDiscovery:exposed frame count" in [
+        problem.split(" at ")[0] for problem in contract.pixel_discovery_artifact(envelope)
+    ]
+
+
+def test_pixel_discovery_incomplete_coverage_allows_unreconciled_exposed_counts() -> None:
+    envelope = _pixel_envelope()
+    envelope["pixelVerdict"].update(verdict=None, coverageComplete=False, exposedFrameCount=1)
+    assert list(contract.pixel_discovery_artifact(envelope)) == []
+
+
 def test_attempt_3_legacy_feed_reports_keep_the_frozen_error_inventory() -> None:
     saved = REPO / "output/evidence/stage-b-2026-10-13/q7-attempt3/Alpha/runs/feed-20261015-150437.json"
     if not saved.exists():

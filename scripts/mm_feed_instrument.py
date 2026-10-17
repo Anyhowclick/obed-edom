@@ -29,7 +29,10 @@ INSTRUMENT_JS = r"""
   if(window.__obedMmFeedProbe)return;
   var READS=[0.25,0.5,0.75],SAMPLE_WIDTH=192,PATCH_UV=[[0.2,0.2],[0.5,0.2],[0.8,0.2],[0.2,0.5],[0.5,0.5],[0.8,0.5],[0.2,0.8],[0.5,0.8],[0.8,0.8]];
   var COST_HOOKS=['feed.rvfc','feed.raf','feed.draw'];
+  var INSTRUMENT_VARIANT=null;
   var S={config:null,entries:[],contexts:[],live:[],frames:[],browserFrames:[],handbacks:[],media:[],mediaOverflow:0,artwork:[],errors:[],tamper:null,killedOnce:[],forcedDecoders:{},uploads:[],claims:[],standDowns:[],departures:[],rvfcCosts:[],cleanup:[],rafIds:[],unplannedContextCount:0,nextContextSerial:0};
+  var oneFramePoster=INSTRUMENT_VARIANT==='one-frame-poster'?{fired:false,entryId:null,frameN:null,rafTimestamp:null,contextSerial:null,firstDrawFrameIndex:null}:null;
+  var oneFramePosterAttempted=false,oneFramePosterTarget=null;
   var stopped=false,frozenReport=null;
   var costEnabled=true,costDepth={},costHealth={bootstrapCalls:0,configureCalls:0,installAttempts:0,errors:[],hooks:{}};
   COST_HOOKS.forEach(function(hook){costHealth.hooks[hook]={installed:false,callbackCount:0,enterCount:0,leaveCount:0,active:0}});
@@ -86,7 +89,7 @@ INSTRUMENT_JS = r"""
   function beginVisit(entry){var es=entryState[entry.id]||{};es.visit=(es.visit||0)+1;es.ring=[];es.domFrames=[];es.artworkDone=false;es.serial=null;es.sourceActive=true;delete es.leafSize;entryState[entry.id]=es;var v=es.decoder,ds=v&&decoderState.get(v);if(ds&&ds.move&&ds.move.entryId===entry.id)ds.move=null;return es}
   function ensureVisit(entry){var es=entryState[entry.id]||{};return es.sourceActive&&es.visit?es:beginVisit(entry)}
   function updateVisitLifecycle(){var current=scene();entries().forEach(function(entry){var es=entryState[entry.id]||{};if(current===entry.atScene-1){if(!es.sourceActive)beginVisit(entry)}else es.sourceActive=false})}
-  function promotePreconfiguredContexts(){updateVisitLifecycle();S.live.forEach(function(pair){var G=pair[1];if(G.closed||G.planned||!G.beforeConfig)return;var atScene=resolveAtScene(),active=entriesAt(atScene),context=G.context;if(!active.length)return;G.planned=true;G.atScene=atScene;G.entries=active;context.evidenceComplete=false;context.atScene=atScene;context.entryIds=active.map(function(e){return e.id});S.contexts.push(context);active.forEach(function(e){var es=ensureVisit(e);es.serial=G.serial;var v=decoderForEntry(e),ds=v&&decoderState.get(v);if(ds)ds.move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,generation:ds.generation,visit:es.visit}})})}
+  function promotePreconfiguredContexts(){updateVisitLifecycle();S.live.forEach(function(pair){var G=pair[1];if(G.closed||G.planned||!G.beforeConfig)return;var atScene=resolveAtScene(),active=entriesAt(atScene),context=G.context;if(!active.length)return;G.planned=true;G.atScene=atScene;G.entries=active;context.evidenceComplete=false;context.atScene=atScene;context.entryIds=active.map(function(e){return e.id});S.contexts.push(context);active.forEach(function(e){var es=ensureVisit(e);es.serial=G.serial;G.entryVisits[e.id]=es.visit;var v=decoderForEntry(e),ds=v&&decoderState.get(v);if(ds)ds.move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,generation:ds.generation,visit:es.visit}});bindOneFramePosterContext(G)})}
   function mediaEvent(kind,v,extra){
     var move=moveFor(v),state=decoderState.get(v),current=scene();
     if(kind==='pause'&&v.__obedPosterHeld&&!(move&&move.atScene===current+1)){var pendingMoves=entries().filter(function(e){return e.atScene===current+1&&
@@ -280,11 +283,11 @@ INSTRUMENT_JS = r"""
     var wrapCost=costEnter('feed.draw');try{gl.__obedMmFeedProbe=true;
     var atScene=resolveAtScene();S.live.forEach(function(pair){if(pair[1].frame)finishFrame(pair[0],pair[1])});
     var active=entriesAt(atScene),O={},G={unit:gl.TEXTURE0,bindings:{},program:null,flip:false,premultiply:false,
-      frame:null,serial:++S.nextContextSerial,regularUploads:0,atScene:atScene,entries:active,closed:false,planned:active.length>0,beforeConfig:!S.config};
+      frame:null,serial:++S.nextContextSerial,regularUploads:0,atScene:atScene,entries:active,entryVisits:{},closed:false,planned:active.length>0,beforeConfig:!S.config};
     ['texImage2D','activeTexture','bindTexture','pixelStorei','useProgram','getUniformLocation','uniform1f','uniformMatrix4fv','clear','drawArrays','drawElements'].forEach(function(n){O[n]=gl[n]});
     var contextRecord={serial:G.serial,id:canvas.id,createdAt:performance.now(),firstDrawAt:null,closedAt:null,closedFrameIndex:null,atScene:atScene,lost:false,entryIds:active.map(function(e){return e.id}),evidenceComplete:G.planned};G.context=contextRecord;
     if(G.planned)S.contexts.push(contextRecord);else S.unplannedContextCount++;S.live.push([gl,G]);
-    active.forEach(function(e){var es=ensureVisit(e);es.serial=G.serial;
+    active.forEach(function(e){var es=ensureVisit(e);es.serial=G.serial;G.entryVisits[e.id]=es.visit;
       [S.claims,S.standDowns].forEach(function(stream){stream.forEach(function(row){if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene)row.serial=G.serial})});
       var v=decoderForEntry(e),ds=v&&decoderState.get(v);[S.media,S.departures].forEach(function(stream){stream.forEach(function(row){
         if(row.serial===null&&row.entryId===e.id&&row.atScene===atScene&&row.visit===es.visit&&ds&&row.generation===ds.generation)row.serial=G.serial})});
@@ -292,6 +295,7 @@ INSTRUMENT_JS = r"""
       if(!attributed&&v&&ds)S.departures.push({t:contextRecord.createdAt,serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,generation:ds.generation,visit:es.visit,source:'context',decoder:departureRead(v)});
       if(v){armDecoder(v,e);decoderState.get(v).move={serial:G.serial,atScene:atScene,entryId:e.id,objectId:e.objectId,
         generation:decoderState.get(v).generation,visit:es.visit}}});
+    bindOneFramePosterContext(G);
     gl.activeTexture=function(u){if(stopped)return O.activeTexture.apply(gl,arguments);G.unit=u;return O.activeTexture.apply(gl,arguments)};
     gl.bindTexture=function(target,texture){if(stopped)return O.bindTexture.apply(gl,arguments);if(target===gl.TEXTURE_2D)G.bindings[G.unit]=texture;return O.bindTexture.apply(gl,arguments)};
     gl.pixelStorei=function(p,v){if(stopped)return O.pixelStorei.apply(gl,arguments);if(p===gl.UNPACK_FLIP_Y_WEBGL)G.flip=!!v;if(p===gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL)G.premultiply=!!v;return O.pixelStorei.apply(gl,arguments)};
@@ -328,8 +332,8 @@ INSTRUMENT_JS = r"""
     function draw(name,args){
       if(stopped)return O[name].apply(gl,args);
       if(!G.planned)return O[name].apply(gl,args);
-      if(!G.frame){var unframed=O[name].apply(gl,args);if(contextRecord.firstDrawAt===null)contextRecord.firstDrawAt=performance.now();return unframed}
-      var drawCost=costEnter('feed.draw');try{var F=G.frame,draw=++F.draws,u=G.program?(programUniforms.get(G.program)||{}):{},table=G.entries[0]&&G.entries[0].draws&&G.entries[0].draws.draws||[],drawFact=table.filter(function(r){return r.draw===draw})[0];
+      if(!G.frame){var firstUnframed=contextRecord.firstDrawAt===null,unframed=O[name].apply(gl,args);if(firstUnframed){contextRecord.firstDrawAt=performance.now();completeOneFramePoster(G,null)}return unframed}
+      var drawCost=costEnter('feed.draw');try{var F=G.frame,firstFramedDraw=contextRecord.firstDrawAt===null,draw=++F.draws,u=G.program?(programUniforms.get(G.program)||{}):{},table=G.entries[0]&&G.entries[0].draws&&G.entries[0].draws.draws||[],drawFact=table.filter(function(r){return r.draw===draw})[0];
       if(drawFact&&u.MVPMatrix)F.quads[draw]=quad(u.MVPMatrix,gl.drawingBufferWidth,gl.drawingBufferHeight,drawFact.layerSize);
       if(drawFact&&finite(drawFact.labelBoxOpacity)&&F.quads[draw])G.entries.forEach(function(e){var fed=e.feed&&F.quads[e.feed.draw];if(!fed)return;
         var overlap=bounds(fed,gl.drawingBufferWidth,gl.drawingBufferHeight,0),lb=bounds(F.quads[draw],gl.drawingBufferWidth,gl.drawingBufferHeight,0);
@@ -339,7 +343,7 @@ INSTRUMENT_JS = r"""
       var textures=[0,1].map(function(unit){var tex=G.bindings[gl.TEXTURE0+unit],info=tex&&textureInfo.get(tex);return info?{unit:unit,ordinal:info.ordinal,size:info.size,uploadedSize:info.uploadedSize,
         video:info.video,presentedFrames:info.presentedFrames,mediaTime:info.mediaTime,_poster:info.poster,flip:info.flip}:null});
       }finally{costLeave('feed.draw',drawCost)}
-      var result=O[name].apply(gl,args),afterDrawCost=costEnter('feed.draw');try{if(contextRecord.firstDrawAt===null)contextRecord.firstDrawAt=performance.now();
+      var result=O[name].apply(gl,args),afterDrawCost=costEnter('feed.draw');try{if(firstFramedDraw){contextRecord.firstDrawAt=performance.now();completeOneFramePoster(G,F.frameIndex)}
       G.entries.filter(function(e){return e.feed&&e.feed.draw===draw}).forEach(function(e){
         var layerSize=drawFact&&drawFact.layerSize,leafSize=textures[0]&&textures[0].size,points=u.MVPMatrix&&layerSize?quad(u.MVPMatrix,gl.drawingBufferWidth,gl.drawingBufferHeight,layerSize):null;
         var decoder=decoderRead(e),v=decoderForEntry(e),reference=null;try{reference=sample(v,{size:leafSize,state:entryState[e.id],layout:S.config&&S.config.counterLayout})}catch(x){noteError('fed draw sample',x)}
@@ -477,9 +481,35 @@ INSTRUMENT_JS = r"""
   function collectRiders(gl,G){var F=G.frame,canvas=gl.canvas;if(!F||G.closed||!canvas||!canvas.isConnected)return;var riderCost=costEnter('feed.draw');try{var cr=canvas.getBoundingClientRect();
     G.entries.forEach(function(e){var v=decoderForEntry(e);if(v&&G.context.firstDrawAt===null&&visible(v)){var x=sourceRectError(e,v),has=Object.prototype.hasOwnProperty.call(F.srcErr,e.id);if(!has)F.srcErr[e.id]=x;else if(F.srcErr[e.id]!==null)F.srcErr[e.id]=x===null?null:Math.max(F.srcErr[e.id],x)}if(F.riders.some(function(r){return r.entryId===e.id}))return;var d=decoderRead(e);if(d)F.riders.push({entryId:e.id,serial:G.serial,atScene:G.atScene,instance:d.instance,visible:d.visible,
       opacityProduct:d.opacityProduct,intersectsCanvas:!!(d.rect&&d.visible&&d.rect.x<cr.right&&d.rect.x+d.rect.w>cr.left&&d.rect.y<cr.bottom&&d.rect.y+d.rect.h>cr.top)})})}finally{costLeave('feed.draw',riderCost)}}
+  function emptyOneFramePoster(){return {fired:false,entryId:null,frameN:null,rafTimestamp:null,contextSerial:null,firstDrawFrameIndex:null}}
+  function matchingOneFrameContexts(target){return S.live.map(function(pair){return pair[1]}).filter(function(G){return G.atScene===target.atScene&&G.entryVisits&&G.entryVisits[target.entryId]===target.visit})}
+  function resetOneFramePoster(){oneFramePoster=emptyOneFramePoster();oneFramePosterTarget=null}
+  function bindOneFramePosterContext(G){
+    var target=oneFramePosterTarget;if(!target||!G.entryVisits||G.entryVisits[target.entryId]!==target.visit||G.atScene!==target.atScene)return;
+    if(target.contextSerial!==null&&target.contextSerial!==G.serial){resetOneFramePoster();return}
+    target.contextSerial=G.serial;oneFramePoster.contextSerial=G.serial;
+  }
+  function completeOneFramePoster(G,index){
+    var target=oneFramePosterTarget;if(!target||target.contextSerial!==G.serial)return;
+    if(!Number.isInteger(index)||!Number.isInteger(oneFramePoster.frameN)||oneFramePoster.frameN>=index){resetOneFramePoster();return}
+    oneFramePoster.firstDrawFrameIndex=index;
+  }
+  function fireOneFramePoster(stamp,index){
+    if(!oneFramePoster||oneFramePosterAttempted||!finite(stamp)||!Number.isInteger(index))return;var targetEntryId=S.config&&S.config.oneFramePosterEntryId;if(typeof targetEntryId!=='string'||!targetEntryId)return;
+    var rows=S.departures.filter(function(row){return row.source==='pause'&&row.entryId===targetEntryId});if(!rows.length)return;oneFramePosterAttempted=true;var candidates=[];
+    rows.forEach(function(row){var found=entries().filter(function(entry){return entry.id===row.entryId&&entry.atScene===row.atScene});if(found.length!==1)return;var entry=found[0],decoder=decoderForEntry(entry);
+      if(!decoder||decoder.__obedPosterHeld!==true||decoder.paused!==true||!decoder.style||typeof decoder.style.setProperty!=='function')return;
+      var target={entryId:entry.id,visit:row.visit,atScene:row.atScene,contextSerial:null},matching=matchingOneFrameContexts(target);
+      if(matching.some(function(G){return G.context&&G.context.firstDrawAt!==null})||matching.length>1)return;
+      var targetContext=matching.length===1?matching[0]:null;if(targetContext)target.contextSerial=targetContext.serial;candidates.push({entry:entry,decoder:decoder,target:target})});
+    if(candidates.length!==1)return;var candidate=candidates[0],target=candidate.target,style=candidate.decoder.style,value=style.getPropertyValue('visibility'),priority=style.getPropertyPriority('visibility'),restored=false;
+    function restore(){if(restored)return;restored=true;try{if(value)style.setProperty('visibility',value,priority);else style.removeProperty('visibility')}catch(e){noteError('one-frame poster restore',e)}}
+    try{style.setProperty('visibility','hidden','important')}catch(e){noteError('one-frame poster hide',e);return}
+    oneFramePosterTarget=target;oneFramePoster={fired:true,entryId:candidate.entry.id,frameN:index,rafTimestamp:stamp,contextSerial:target.contextSerial,firstDrawFrameIndex:null};S.cleanup.push(restore);schedule(restore);
+  }
   function riderTick(stamp){
     if(stopped)return;
-    var frameStamp=frameTime(),index=browserFrame(frameStamp);armSeam();installKillSwitch();updateVisitLifecycle();entries().forEach(function(e){decoderForEntry(e)});
+    var frameStamp=frameTime(),index=browserFrame(frameStamp);armSeam();installKillSwitch();updateVisitLifecycle();entries().forEach(function(e){decoderForEntry(e)});fireOneFramePoster(stamp,index);
     S.live.forEach(function(pair){collectRiders(pair[0],pair[1])});
     S.live.forEach(function(pair){var G=pair[1],canvas=pair[0].canvas;if(G.frame&&(!canvas||!canvas.isConnected||scene()!==G.atScene))finishFrame(pair[0],G);if(!canvas||!canvas.isConnected)finishContext(G,frameStamp,index)});
     S.handbacks.forEach(function(h){if(!h.complete&&!h.timedOut&&performance.now()>=h.deadline)h.timedOut=true});settledArtwork();schedule(riderTick);
@@ -508,6 +538,9 @@ INSTRUMENT_JS = r"""
       browserFrames:S.browserFrames,handbacks:S.handbacks.map(function(h){return {entryId:h.entryId,serial:h.serial,atScene:h.atScene,visit:h.visit,generation:h.generation,closedAt:h.closedAt,
         closedFrameIndex:h.closedFrameIndex,closedDom:h.closedDom,frames:h.frames,complete:h.complete,timedOut:h.timedOut,lastUpload:h.lastUpload}}),
       uploads:S.uploads,claims:S.claims,standDowns:S.standDowns,departures:S.departures,hookHealth:hookHealth,callbackCostP95Ms:p95(S.rvfcCosts),module:moduleRead(),tamper:S.tamper,killedOnce:S.killedOnce};
+    var reportedOneFramePoster=oneFramePoster;if(reportedOneFramePoster&&reportedOneFramePoster.fired&&(!Number.isInteger(reportedOneFramePoster.contextSerial)||!Number.isInteger(reportedOneFramePoster.firstDrawFrameIndex)||reportedOneFramePoster.frameN>=reportedOneFramePoster.firstDrawFrameIndex))reportedOneFramePoster=emptyOneFramePoster();
+    if(reportedOneFramePoster)result.oneFramePoster=reportedOneFramePoster;
+    if(reportedOneFramePoster&&reportedOneFramePoster.fired)result.instrumentVariant=INSTRUMENT_VARIANT;
     stopped=true;if(typeof cancelAnimationFrame==='function')S.rafIds.splice(0).forEach(function(id){try{cancelAnimationFrame(id)}catch(e){}});S.cleanup.splice(0).forEach(function(clean){try{clean()}catch(e){}});
     if(media.pause===ownedPause)media.pause=originalPause;if(media.play===ownedPlay)media.play=originalPlay;if(HTMLCanvasElement.prototype.getContext===ownedGetContext)HTMLCanvasElement.prototype.getContext=originalGetContext;
     S.live=[];S.entries=[];S.handbacks=[];S.cleanup=[];S.rafIds=[];S.forcedDecoders={};entryState={};decoderState=new WeakMap();locationName=new WeakMap();programUniforms=new WeakMap();textureInfo=new WeakMap();frozenReport=deepFreeze(JSON.parse(JSON.stringify(result)));return frozenReport;
@@ -518,6 +551,7 @@ INSTRUMENT_JS = r"""
 """
 
 INSTRUMENT_VARIANTS: tuple[str, ...] = ("calibration-red",)
+DISCOVERY_INSTRUMENT_VARIANTS: tuple[str, ...] = ("one-frame-poster",)
 _CALIBRATION_RED_ANCHOR = (
     "if(!sampled){patches=sample(v,{size:size,state:state,layout:S.config&&S.config.counterLayout});sampled=true}"
 )
@@ -528,12 +562,22 @@ _CALIBRATION_RED_REPORT_ANCHOR = "kind:'mm-feed',version:3,config:S.config"
 _CALIBRATION_RED_REPORT_REPLACEMENT = (
     "kind:'mm-feed',version:3,instrumentVariant:'calibration-red',config:S.config"
 )
+_ONE_FRAME_POSTER_ANCHOR = "var INSTRUMENT_VARIANT=null;"
+_ONE_FRAME_POSTER_REPLACEMENT = "var INSTRUMENT_VARIANT='one-frame-poster';"
 
 
 def instrument_variant(name: str, script: str = INSTRUMENT_JS) -> str:
     """Return a probe-only feed instrument variant, refusing a moved transform anchor."""
-    if name not in INSTRUMENT_VARIANTS:
-        raise ValueError(f"unknown feed instrument variant {name!r}; expected one of {INSTRUMENT_VARIANTS}")
+    variants = INSTRUMENT_VARIANTS + DISCOVERY_INSTRUMENT_VARIANTS
+    if name not in variants:
+        raise ValueError(f"unknown feed instrument variant {name!r}; expected one of {variants}")
+    if name == "one-frame-poster":
+        count = script.count(_ONE_FRAME_POSTER_ANCHOR)
+        if count != 1:
+            raise ValueError(
+                f"feed instrument variant {name!r}: anchor occurs {count} times, expected exactly once"
+            )
+        return script.replace(_ONE_FRAME_POSTER_ANCHOR, _ONE_FRAME_POSTER_REPLACEMENT)
     counts = {
         _CALIBRATION_RED_ANCHOR: script.count(_CALIBRATION_RED_ANCHOR),
         _CALIBRATION_RED_REPORT_ANCHOR: script.count(_CALIBRATION_RED_REPORT_ANCHOR),

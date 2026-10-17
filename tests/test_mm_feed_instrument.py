@@ -47,6 +47,142 @@ console.log(JSON.stringify(input.cases.map(row=>window.__obedMmFeedProbe.decodeC
     assert result == python == expected
 
 
+def _one_frame_poster_probe(
+    instrument: str, *, depart: bool = True, context_timing: str = "next",
+    two_departures: bool = False,
+) -> dict:
+    return _node(f"""
+global.window=global;global.location={{hash:'#1'}};let now=0,raf=[],paints=[];
+global.performance={{now:()=>++now}};global.requestAnimationFrame=fn=>(raf.push(fn),raf.length);global.cancelAnimationFrame=()=>{{}};
+class Media{{pause(){{this.paused=true}}play(){{this.paused=false;return Promise.resolve()}}addEventListener(){{}}removeEventListener(){{}}}}
+class Style{{constructor(){{this.values={{}};this.priorities={{}}}}getPropertyValue(k){{return this.values[k]||''}}getPropertyPriority(k){{return this.priorities[k]||''}}setProperty(k,v,p){{this.values[k]=String(v);this.priorities[k]=p||''}}removeProperty(k){{delete this.values[k];delete this.priorities[k]}}}}
+class Video extends Media{{constructor(label,instance,elId){{super();this.label=label;this.__obedInstance=instance;this.__obedElId=elId;this.__obedPosterHeld=true;this.currentTime=1;this.paused=false;this.readyState=4;this.videoWidth=320;this.videoHeight=180;this.isConnected=true;this.nodeType=1;this.parentElement=null;this.style=new Style()}}getBoundingClientRect(){{return {{x:0,y:0,left:0,top:0,right:320,bottom:180,width:320,height:180}}}}checkVisibility(){{return this.style.getPropertyValue('visibility')!=='hidden'}}}}
+global.HTMLMediaElement=Media;global.HTMLVideoElement=Video;global.getComputedStyle=el=>({{opacity:'1',display:'block',visibility:el.style&&el.style.getPropertyValue('visibility')||'visible'}});
+const fake2d={{drawImage(){{}},getImageData(){{return {{data:new Uint8Array(192*108*4)}}}}}};
+function makeGl(){{const gl={{TEXTURE0:33984,TEXTURE1:33985,TEXTURE_2D:3553,ACTIVE_TEXTURE:34016,CURRENT_PROGRAM:35725,TEXTURE_BINDING_2D:32873,UNPACK_FLIP_Y_WEBGL:37440,UNPACK_PREMULTIPLY_ALPHA_WEBGL:37441,RGBA:6408,UNSIGNED_BYTE:5121,NO_ERROR:0,active:33984,program:null,flip:false,premultiply:false,bindings:new Map(),frames:[],drawVisibility:[],drawingBufferWidth:1920,drawingBufferHeight:1080,
+getParameter(p){{if(p===this.ACTIVE_TEXTURE)return this.active;if(p===this.CURRENT_PROGRAM)return this.program;if(p===this.TEXTURE_BINDING_2D)return this.bindings.get(this.active)||null;if(p===this.UNPACK_FLIP_Y_WEBGL)return this.flip;if(p===this.UNPACK_PREMULTIPLY_ALPHA_WEBGL)return this.premultiply;return null}},
+activeTexture(unit){{this.active=unit}},bindTexture(target,texture){{if(target===this.TEXTURE_2D)this.bindings.set(this.active,texture)}},pixelStorei(p,v){{if(p===this.UNPACK_FLIP_Y_WEBGL)this.flip=!!v;if(p===this.UNPACK_PREMULTIPLY_ALPHA_WEBGL)this.premultiply=!!v}},
+texImage2D(){{const args=Array.from(arguments),source=args.length<9?args[5]:null,texture=this.bindings.get(this.active);if(texture&&source)texture.content=source.label}},
+useProgram(p){{this.program=p}},getUniformLocation(){{return null}},uniform1f(){{}},uniformMatrix4fv(){{}},getUniform(){{return 0}},isContextLost(){{return false}},clear(){{}},drawArrays(){{const texture=this.bindings.get(this.TEXTURE0);this.frames.push(texture&&texture.content);this.drawVisibility.push(video.style.getPropertyValue('visibility')||'visible')}},drawElements(){{}},readPixels(x,y,w,h,f,t,pixels){{pixels.fill(0)}},getError(){{return 0}}}};return gl}}
+class Canvas{{constructor(id,gl){{this.id=id||'';this.gl=gl;this.width=1920;this.height=1080;this.isConnected=true;this.listeners={{}}}}getContext(type){{return type==='2d'?fake2d:this.gl}}addEventListener(k,f){{this.listeners[k]=f}}removeEventListener(k,f){{if(this.listeners[k]===f)delete this.listeners[k]}}getBoundingClientRect(){{return {{x:0,y:0,left:0,top:0,right:1920,bottom:1080,width:1920,height:1080}}}}}}
+global.HTMLCanvasElement=Canvas;const gl=makeGl();global.document={{timeline:{{currentTime:0}},head:null,documentElement:null,getElementById:()=>null,elementsFromPoint:()=>[],createElement:()=>new Canvas('',gl)}};
+const video=new Video('video','A',7),other=new Video('other','B',8),poster={{label:'poster',naturalWidth:320,naturalHeight:180}},texture={{}},sentinel={{label:'sentinel'}};
+global.__OBED_P2_PRESERVE__={{feed:{{decoderFor:id=>id==='A'?video:id==='B'?other:null}}}};
+global.__OBED_CONTINUITY__={{schema:2,boundaries:[{{atScene:2,src:{{objectId:'A'}},dst:{{objectId:'A2'}},feed:{{draw:1,drawCount:1,from:{{upload:1,size:[320,180]}},to:null}}}},{{atScene:2,src:{{objectId:'B'}},dst:{{objectId:'B2'}},feed:{{draw:1,drawCount:1,from:{{upload:1,size:[320,180]}},to:null}}}}]}};
+eval({json.dumps(instrument)});global.__obedMmFeedProbe.bootstrap({{oneFramePosterEntryId:'entry-A',entries:[{{id:'entry-A',atScene:2,objectId:'A',dstObjectId:'A2',feed:{{draw:1,drawCount:1,from:{{upload:1,size:[320,180]}},to:null}},draws:{{drawCount:1,draws:[]}},artwork:[]}},{{id:'entry-B',atScene:2,objectId:'B',dstObjectId:'B2',feed:{{draw:1,drawCount:1,from:{{upload:1,size:[320,180]}},to:null}},draws:{{drawCount:1,draws:[]}},artwork:[]}}]}});
+if({json.dumps(depart)}){{if({json.dumps(two_departures)})other.pause();video.pause()}}
+let wrapped=null;
+function createContext(){{const canvas=new Canvas('0-canvas',gl);wrapped=canvas.getContext('webgl');wrapped.activeTexture(wrapped.TEXTURE0);wrapped.bindTexture(wrapped.TEXTURE_2D,texture);wrapped.texImage2D(0,0,0,0,0,poster);wrapped.texImage2D(0,0,0,0,0,video);wrapped.activeTexture(wrapped.TEXTURE1);wrapped.bindTexture(wrapped.TEXTURE_2D,sentinel);wrapped.pixelStorei(wrapped.UNPACK_FLIP_Y_WEBGL,true);wrapped.pixelStorei(wrapped.UNPACK_PREMULTIPLY_ALPHA_WEBGL,true)}}
+function drawFirst(){{wrapped.clear();wrapped.drawArrays()}}
+const timing={json.dumps(context_timing)};
+requestAnimationFrame(function product(){{createContext();if(timing==='same')drawFirst();else requestAnimationFrame(drawFirst)}});
+function paint(ts){{document.timeline.currentTime=ts;const callbacks=raf.splice(0);callbacks.forEach(fn=>fn(ts));paints.push(video.style.getPropertyValue('visibility')||'visible')}}
+paint(10);paint(20);paint(30);
+const report=global.__obedMmFeedProbe.report(),binding=gl.bindings.get(gl.active);console.log(JSON.stringify({{paints,otherVisibility:other.style.getPropertyValue('visibility')||'visible',frames:gl.frames,drawVisibility:gl.drawVisibility,stamp:report.instrumentVariant||null,oneFramePoster:report.oneFramePoster||null,state:{{active:gl.active,flip:gl.flip,premultiply:gl.premultiply,binding:binding&&binding.label,content:texture.content}}}}));
+""")
+
+
+def test_one_frame_poster_variant_hides_the_decoder_for_one_pre_draw_raf_and_kills_mutants() -> None:
+    original = _one_frame_poster_probe(feed.INSTRUMENT_JS)
+    changed_script = feed.instrument_variant("one-frame-poster")
+    changed = _one_frame_poster_probe(changed_script)
+
+    def assert_one_frame(result: dict) -> None:
+        assert result["paints"] == ["hidden", "visible", "visible"]
+        assert result["frames"] == ["video"]
+        assert result["drawVisibility"] == ["visible"]
+        assert result["stamp"] == "one-frame-poster"
+        assert result["oneFramePoster"] == {
+            "fired": True, "entryId": "entry-A", "frameN": 0, "rafTimestamp": 10,
+            "contextSerial": 1, "firstDrawFrameIndex": 1,
+        }
+        assert result["state"] == {
+            "active": 33985, "flip": True, "premultiply": True,
+            "binding": "sentinel", "content": "video",
+        }
+
+    assert original == {
+        "paints": ["visible", "visible", "visible"], "frames": ["video"],
+        "otherVisibility": "visible", "drawVisibility": ["visible"],
+        "stamp": None, "oneFramePoster": None,
+        "state": {"active": 33985, "flip": True, "premultiply": True,
+                  "binding": "sentinel", "content": "video"},
+    }
+    assert_one_frame(changed)
+
+    two_departures = _one_frame_poster_probe(changed_script, two_departures=True)
+    assert_one_frame(two_departures)
+    assert two_departures["otherVisibility"] == "visible"
+
+    same_frame = _one_frame_poster_probe(changed_script, context_timing="same")
+    assert same_frame["oneFramePoster"] == {
+        "fired": False, "entryId": None, "frameN": None, "rafTimestamp": None,
+        "contextSerial": None, "firstDrawFrameIndex": None,
+    }
+    assert same_frame["stamp"] is None
+    assert same_frame["drawVisibility"] == ["hidden"]
+
+    two_frame_mutant = changed_script.replace(
+        "schedule(restore);",
+        "schedule(function(){schedule(restore)});",
+        1,
+    )
+    assert _one_frame_poster_probe(two_frame_mutant)["paints"] == ["hidden", "hidden", "visible"]
+    with pytest.raises(AssertionError):
+        assert_one_frame(_one_frame_poster_probe(two_frame_mutant))
+
+    old_context_keyed_mutant = changed_script.replace(
+        "var targetContext=matching.length===1?matching[0]:null;",
+        "var targetContext=matching.length===1?matching[0]:null;if(!targetContext)return;",
+        1,
+    )
+    assert old_context_keyed_mutant != changed_script
+    old_context_keyed = _one_frame_poster_probe(old_context_keyed_mutant)
+    assert old_context_keyed["oneFramePoster"]["fired"] is False
+    with pytest.raises(AssertionError):
+        assert_one_frame(old_context_keyed)
+
+    at_first_draw_mutant = changed_script.replace(
+        "fireOneFramePoster(stamp,index);",
+        "",
+        1,
+    ).replace(
+        "var result=O[name].apply(gl,args),afterDrawCost=",
+        "fireOneFramePoster(frameTime(),browserFrame(frameTime()));var result=O[name].apply(gl,args),afterDrawCost=",
+        1,
+    )
+    at_first_draw = _one_frame_poster_probe(at_first_draw_mutant)
+    assert at_first_draw["oneFramePoster"]["fired"] is False
+    assert at_first_draw["drawVisibility"] == ["hidden"]
+    with pytest.raises(AssertionError):
+        assert_one_frame(at_first_draw)
+
+    not_fired = _one_frame_poster_probe(changed_script, depart=False)
+    assert not_fired["stamp"] is None
+    assert not_fired["oneFramePoster"] == {
+        "fired": False, "entryId": None, "frameN": None, "rafTimestamp": None,
+        "contextSerial": None, "firstDrawFrameIndex": None,
+    }
+    stamped_not_fired_mutant = changed_script.replace(
+        "if(reportedOneFramePoster&&reportedOneFramePoster.fired)result.instrumentVariant=INSTRUMENT_VARIANT;",
+        "if(reportedOneFramePoster)result.instrumentVariant=INSTRUMENT_VARIANT;",
+        1,
+    )
+    with pytest.raises(AssertionError):
+        assert _one_frame_poster_probe(stamped_not_fired_mutant, depart=False)["stamp"] is None
+
+    missing_stamp_mutant = changed_script.replace(
+        "if(reportedOneFramePoster&&reportedOneFramePoster.fired)result.instrumentVariant=INSTRUMENT_VARIANT;",
+        "",
+        1,
+    )
+    with pytest.raises(AssertionError):
+        assert_one_frame(_one_frame_poster_probe(missing_stamp_mutant))
+
+    with pytest.raises(ValueError, match="anchor occurs 0 times"):
+        feed.instrument_variant("one-frame-poster", "(function(){})();")
+
+
 def _cost_probe(
     instrument: str, *, recorder: bool = True, callbacks: int = 1,
     recorder_failure: str | None = None,
