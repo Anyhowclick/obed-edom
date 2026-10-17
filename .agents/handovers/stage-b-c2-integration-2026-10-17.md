@@ -110,13 +110,78 @@ These are not GL-replay arms. Find which producer path omits the GL intervals fo
 - `derive_pixel_thresholds` by hand, writing the JSON for `--departure-pixel-thresholds`;
 - the discovery captures over D7/D7s departures and the Alpha b5to6, b6to7 and both b7to8 carries.
 
+## Root causes of the three open issues (2026-10-17 21:40–22:40)
+
+Three Opus 5.5 high investigators worked read-only; the coordinator spot-checked their code claims.
+- Reports: `funny-pasteur-751a72/.cache/reviews/pre5a-debug-{cost,glint,mismatch}.md`. The brief is in `pre5a-debug-common.md`.
+- Scratch scripts and rerun artifacts are under this session's scratchpad (`dbg-*`). Copy what's needed before that is cleared.
+- Every live rerun was a single headless Chrome under a shared lock, at load 2.3–4.2. No machine was truly quiet.
+
+**1. Cost, `frame.total` > 8 ms on D7/D7s. ROOT CAUSE: the feed instrument's own per-GL-frame pixel verification. OWNER DECISION.**
+- **Cost per GL frame:** 7.5–11 ms on BOTH decks. The parts:
+  - `sample()` video→canvas→`getImageData`, ×2 under feed.draw and ×2 under feed.rvfc (`mm_feed_instrument.py:349→227`, `:133`);
+  - two mid-frame `gl.readPixels` GPU syncs (`:341`);
+  - `labelStats` (`:272`).
+- **Why only D7 fails:** the gate is a whole-capture p95, so idle frames dilute it.
+  - D7 captures are 45–53 % GL frames.
+  - Alpha is 86–95 % idle, yet about 35 % of its GL frames are also over 8 ms. Alpha feed-on-1920 reruns failed too, at 8.48–8.8 ms.
+- **Ruled out:**
+  - load: reruns match within 0.5 ms;
+  - viewport: the over-budget count is flat across 1600 / 1920 / 2560;
+  - double counting: per-hook sums equal `frame.total` exactly.
+- **History:** `frame.total` was never measured on D7 before this round. The 8 ms budget came from per-rVFC history (`gate4-historical-impact.md`).
+- **Prototypes (scratch only):**
+  - `labelStats` with running sums: 10.8 → 10.2 ms, sound but insufficient;
+  - plus reusing the rVFC ring sample: 9.7 ms, UNSOUND (7 of 642 counter reads mismatch).
+  - Getting under 8 ms needs ≥3 ms of synchronous readback removed per GL frame. That is a design change.
+- **Owner question (the gate stays at 8 ms):**
+  - (A) Restructure the reads: copy the pre-label regions to a scratch texture, do one end-of-frame readback, slim `labelStats`. This touches GL state in the product context, so it needs a plan, review and feed re-registration.
+  - (B) Fully verify only a fixed subset of GL frames: roughly half the cost, less per-frame evidence.
+  - Sub-question: should clean-null cost also require the GL-frame cost under budget, so Alpha cannot pass by dilution?
+- **Live check after a fix:** D7 and Alpha feed-on-1920, interleaved, both ≤ 8 ms with feed verdicts unchanged.
+
+**2. "GL intervals were not supplied". ROOT CAUSE: a conflict in the frozen rule. COORDINATOR FOLD PROPOSED (not applied).**
+- `gl_intervals_for` (`live_continuity_probe.py:2011-2034`, P-b `8acc55b4`) builds the intervals only from each spec's scored `underArtwork.interval`. If any spec lacks one, it returns None for the whole holder.
+- That interval exists only when an expected-ordinal upload was fed (`mm_feed_instrument.py:793`, deliberate).
+- The three arms are exactly the registered reds that suppress those uploads:
+  - hold-upload-killed: 0 uploads;
+  - ordinal: no upload at the scene-10 ordinals 4/5;
+  - strip bridge@14:movie2: b7to8 wa0121 unbound.
+- §7 expects cadence-open as their only reason.
+- **Proof:**
+  - null control: re-deriving `runValidity` reproduces all 18 saved Alpha holders exactly;
+  - positive control: a monkeypatched fix changes only the 3 bad holders, which become cadence-open only (`ok=None`) and still pass the contract.
+- **Proposed fold (P-owned, `live_continuity_probe.py` only):**
+  - When a spec has no interval, fall back to that entry's measured GL context window: `feedEvidence.producer.contexts`, exactly one match, `lost=False`, `evidenceComplete=True`, finite `createdAt`/`closedAt`. Otherwise keep None.
+  - GL replay, repeated visits and lost or incomplete contexts stay None.
+  - Do NOT relax the producer gate at `:793`.
+  - Red-first test: extend `test_gl_intervals_are_never_empty_for_replay_or_unreadable_feed` (`tests/test_live_continuity_probe.py:13921`).
+  - Amended frozen-rule wording is in the report.
+- **Twin:** `managed_obs_qualify.feed_gl_intervals` (`:2326-2340`, O) has the same all-or-nothing rule. Mirror the fold there, or record it as a follow-up.
+- **Alternative reading:** cadence intervals mean fed substitution only. §7 would then permit a "feed suppressed" reason for the registered reds instead.
+
+**3. The 9 MISMATCHes. Four causes, none a phase 1–3 regression.**
+
+| Item | Classification | Action |
+|---|---|---|
+| Alpha feed-off 2/5/12s, attach-once, after-feed: holdFrame None | LEGITIMATELY UNSEPARATED on moving footage. The producer is complete (3 reads, 18 ring candidates, target at distance 0, one poster). The poster is 38–142 MAD away, so the canvas is not showing it. On moving footage the nearest distinguishable frame is 6.1–13 MAD from the target, so separation stays −1.78…5.60 < 6. Static-stretch carries in the same artifacts score True. Round adfeb552 had these as None too. | **Owner disposition:** documented open item "unseparated on moving footage" (parent INVALID), or another evidence source. Follow-up observation: some reads match a frame 2–11 before the target (never past −6). Next step is an exact-frame check on a counter deck, never a threshold change. |
+| Alpha ordinal (fresh v3) b5to6 wa0125: holdFrame None, expected False | INSTRUMENT DEFECT. The target read is present. The tamper adds 1000 to `feed.from.upload` (`live_continuity_probe.py:1724`), so no poster row is sampled or emitted (`mm_feed_instrument.py:313`, `:386`). The scorer returns None at `:1448-1449`, before separation. The candidates alone decide False (separation −6.67). | **Fold (F-owned scorer):** with no poster row, still compute separation from the candidates; return False when it is ≤ −`ALPHA_HOLD_MARGIN`, else None. True still requires exactly one poster. Red-first case next to `tests/test_mm_feed_instrument.py:830`. |
+| Alpha no-pause (fresh v3) b6to7/b7to8 wa0125: posterHold None, expected False | EXPECTATION TOO BROAD. The core detaches wa0125 during those carries (~107 frames), and the browser pauses a detached media element. `holdPauseMissing: True` with `clockStill: True`, and the scorer correctly gives None (`:1502-1504`). The connected carries (b5to6 wa0125, b7to8 wa0121) turn False as registered. | **Coordinator/owner:** register no-pause `posterHold False` only on the connected carries and record the detached ones as None. |
+| Alpha feed-on-1920 b7to8 wa0125: handbackContinuity False | LOAD FLAKE. One missed vsync (33.3 ms) gave a 3-frame media jump against a limit of 2, at round load 3.9–5.0. Interleaved quiet reruns 1920→1600→1920 all MATCH (12/12 hand-backs True). | None. |
+| HOST D4 wrong-instance: inconclusive, carry lines `unknown` | ONE-OFF. "row:ts not increasing at samples[1]" (`live_evidence_contract.py:990-992`): two pre-press sampler rows 1.5 ms apart carried the same `document.timeline.currentTime`. Seen 1/71 sampler arms this round and 0/7 earlier D4 artifacts. The check and the timestamp source predate phase 1. Two quiet reruns MATCH. | Optional hardening (coordinator): the sampler skips a row whose timestamp equals the previous row's (`live_continuity_probe.py` ~474-491). |
+
 **Next, in order:**
 1. Bring c4c5 up to date with main (#299 and later) and re-run the census tests.
-2. Quiet-machine reruns: one D7 feed-on null (cost), D4 wrong-instance, Alpha feed-on-1920.
-3. Per-frame read of the Alpha None holds, then the owner's disposition.
-4. Fix the GL-intervals gap.
-5. Pixel round.
-6. Merge only on the owner's go.
+2. Owner decisions:
+   - cost reduction (A) or (B), plus the GL-frame sub-question;
+   - disposition of the unseparated Alpha holds;
+   - the no-pause expectation narrowing;
+   - whether to take the GL-interval fold as proposed.
+3. Folds with Sol: GL-interval fallback (P, plus the O twin), ordinal scorer False path (F), and optionally the sampler ts dedupe. Run the r1–3 review rule on each.
+4. The cost redesign per the owner's choice. It needs a plan.
+5. Re-run the affected arms interleaved.
+6. Pixel round.
+7. Merge only on the owner's go.
 
 **Phases**
 - **Phase 1 LANDED on c4c5:**
