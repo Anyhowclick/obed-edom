@@ -376,6 +376,9 @@ bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawAr
 gl.clear();
 bind(gl,first,0); gl.activeTexture(gl.TEXTURE0); program(gl,'absent'); gl.drawArrays(4,0,6);
 const report=global.__obedMmFeedProbe.report();
+assert.strictEqual(global.__obedMmFeedProbe.version,3);
+assert.strictEqual(report.version,3);
+assert.strictEqual(report.unplannedContextCount,0);
 assert.strictEqual(global.__OBED_MM_FEED__.entries.A.state,'fed');
 assert.strictEqual(global.__OBED_MM_FEED__.entries.A.framesFed,2);
 assert.deepStrictEqual(report.frames.map(x=>x.draws),[0,1,1]);

@@ -28,6 +28,7 @@ for sub in ("scripts", "src"):
 
 import binary_counter_movie as binary_counter  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
+import mm_feed_instrument  # noqa: E402
 from obed_edom import p2_verdict  # noqa: E402
 
 LEGAL = {c["name"]: c for c in json.loads((REPO / "tests/fixtures/live_continuity/contract/legal.json").read_text())["cases"]}
@@ -477,8 +478,23 @@ def _strict_setup(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _v3_setup(report: dict[str, Any]) -> dict[str, Any]:
+    report = _strict_setup(report)
+    report.update(version=3, unplannedContextCount=0)
+    report["contexts"][0]["evidenceComplete"] = True
+    decoder = {"instance": "movie-a", "elId": 7, "visible": True, "opacityProduct": 1.0,
+               "rect": {"x": 0, "y": 0, "w": 10, "h": 10}}
+    report["claims"][0].update(generation=1, visit=1, source="claim", decoder=decoder)
+    report["departures"][0].update(source="pause", decoder=decoder)
+    return report
+
+
 def _strict(mutate: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], Any]:
     return lambda report: mutate(_strict_setup(report))
+
+
+def _v3(mutate: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], Any]:
+    return lambda report: mutate(_v3_setup(report))
 
 
 def _counter_feed_read(report: dict[str, Any]) -> dict[str, Any]:
@@ -550,6 +566,77 @@ def test_mm_feed_contract_accepts_null_draw_and_source_geometry_values() -> None
     report["contexts"][0]["firstDrawAt"] = None
     report["frames"][0]["riders"][0]["sourceRectError"] = None
     assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+
+
+def test_v3_mm_feed_contract_counts_unplanned_contexts_and_removes_v2_exemption() -> None:
+    report = _v3_setup(_mm_feed_report())
+    assert contract.first_errors(contract.mm_feed_report(report), limit=20) == []
+    report["contexts"][0].update(atScene=None, entryIds=[])
+    report["frames"][0].update(atScene=None, rows=[], labels=[], riders=[], labelExpected=[])
+    problems = [problem.split(" at ")[0] for problem in contract.mm_feed_report(report)]
+    assert "mmFeed.context.atScene" in problems
+    assert "mmFeed.frame.atScene" in problems
+    report = _v3_setup(_mm_feed_report())
+    report.pop("unplannedContextCount")
+    assert "mmFeed.unplannedContextCount" in [
+        problem.split(" at ")[0] for problem in contract.mm_feed_report(report)
+    ]
+
+
+def test_v3_feed_verdict_contract_requires_departure_but_resume_only_for_hold() -> None:
+    record = _feed_verdict_record()
+    record.update(evidenceVersion=3, handback={
+        "complete": False, "timedOut": False, "frameMappingComplete": False,
+        "lastUpload": {}, "closed": {}, "presented": [], "sourceFrameDurationS": None,
+        "durationSource": "rvfc", "adjacentFrames": None, "canvasLingerMs": None,
+    }, departureExposure={
+        "complete": True, "entryId": "carry-a", "serial": 1, "atScene": 2,
+        "visit": 1, "generation": 1, "decoder": {"instance": "movie-a", "elId": 7},
+        "context": {"serial": 1, "id": "0-canvas"},
+        "start": {"t": 1.0, "source": "context", "decoderVisible": True,
+                  "observedAt": 1.1, "unobservedBeforeContextMs": 0.0},
+        "firstDraw": {"t": 2.0, "frameN": 1}, "ordering": True, "intervalCoverage": True,
+        "posterExposure": False, "preDrawVisibility": [True], "hiddenWholePreDraw": False,
+        "riders": [],
+    })
+    assert list(contract.feed_verdict_record(record)) == []
+    record.pop("departureExposure")
+    assert "feedVerdict.departureExposure:object" in [
+        problem.split(" at ")[0] for problem in contract.feed_verdict_record(record)
+    ]
+    hold = _feed_verdict_record()
+    hold.update(evidenceVersion=3, mode="departure", hold={
+        "usableContext": True, "boundTextures": True, "canvasLingerMs": 3.0, "reads": [],
+    }, poster={}, handback={}, departureExposure={})
+    assert "feedVerdict.resume:object" in [
+        problem.split(" at ")[0] for problem in contract.feed_verdict_record(hold)
+    ]
+
+
+def test_v3_handback_allows_null_generation_but_normalizes_it_incomplete() -> None:
+    report = _v3_setup(_mm_feed_report())
+    report["handbacks"] = [{
+        "entryId": "carry-a", "serial": 1, "atScene": 2, "visit": 1, "generation": None,
+        "closedAt": 2.0, "closedFrameIndex": 0, "complete": True, "timedOut": False,
+        "frames": [], "lastUpload": None, "closedDom": None,
+    }]
+    assert not any("handback.generation" in problem for problem in contract.mm_feed_report(report))
+    entry = {"id": "carry-a", "objectId": "movie-a", "dstObjectId": "movie-b", "atScene": 2,
+             "feed": {"draw": 1, "from": {"upload": 1, "size": [640, 360]}, "to": None}}
+    normalized = mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
+    assert normalized["handback"]["complete"] is False
+
+
+def test_v3_claim_allows_null_identity_but_normalizes_departure_incomplete() -> None:
+    report = _v3_setup(_mm_feed_report())
+    report["claims"][0].update(decoder=None, generation=None, visit=None)
+    problems = contract.mm_feed_report(report)
+    assert not any(f"claims.entry.{field}" in problem
+                   for problem in problems for field in ("decoder", "generation", "visit"))
+    entry = {"id": "carry-a", "objectId": "movie-a", "dstObjectId": "movie-b", "atScene": 2,
+             "feed": {"draw": 1, "from": {"upload": 1, "size": [640, 360]}, "to": None}}
+    normalized = mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
+    assert normalized["departureExposure"]["complete"] is False
 
 
 def _feed_verdict_record() -> dict[str, Any]:
