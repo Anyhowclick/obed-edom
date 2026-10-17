@@ -29,6 +29,261 @@ PERIOD = 1000.0 / 60
 SLOT = {"x": 100.0, "y": 100.0, "w": 400.0, "h": 225.0}
 STAGE = {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0}
 SCORE_KW = dict(rect_tolerance=3.0, iou_min=0.75, max_gap_frames=3, min_fps=20.0)
+PIXEL_THRESHOLDS = {"margin": 10.0, "redMin": 12.0, "provenance": {"source": "synthetic null/red separation"}}
+
+
+def _departure_pixels(*, poster_tick: int | None = None, indistinguishable_tick: int | None = None,
+                      entry_id: str = "null") -> dict[str, Any]:
+    frames = []
+    for tick in (9, 10, 11, 12, 13):
+        distances = {"lastDecoder": 1.0, "poster": 13.0, "background": 15.0}
+        if tick == poster_tick:
+            distances = {"lastDecoder": 13.0, "poster": 1.0, "background": 15.0}
+        if tick == indistinguishable_tick:
+            distances = {"lastDecoder": 5.0, "poster": 7.0, "background": 15.0}
+        frames.append({
+            "t": float(tick), "tick": tick, "sha256": f"{tick:064x}",
+            "path": f"pixels/frame-{tick}.png", "distances": distances,
+        })
+    return {
+        "entryId": entry_id,
+        "visit": 1,
+        "contextSerial": 2,
+        "decoderId": 7,
+        "atScene": 4,
+        "startMs": 9.0,
+        "hideMs": 10.0,
+        "firstDrawMs": 12.0,
+        "roi": {"x": 100, "y": 100, "w": 400, "h": 225},
+        "frames": frames,
+        "references": {
+            "lastDecoder": {"sha256": "a" * 64, "provenance": {"tick": 9, "metric": "mad"}},
+            "poster": {
+                "sha256": "b" * 64, "dstRect": {"x": 100, "y": 100, "w": 400, "h": 225},
+                "provenance": {"export": "poster.png", "metric": "mad"},
+            },
+            "background": {"sha256": "c" * 64, "provenance": {"session": "same", "metric": "mad"}},
+            "pairwise": {
+                "lastDecoder_poster": 20.0,
+                "lastDecoder_background": 24.0,
+                "poster_background": 18.0,
+            },
+        },
+        "expectedTicks": 3,
+        "deliveredTicks": 3,
+        "missingTicks": [],
+        "ambiguousFrames": 0,
+        "exposedFrames": int(poster_tick is not None),
+    }
+
+
+def test_departure_pixel_null_is_true_and_an_intermediate_frame_deletion_cannot_stay_true() -> None:
+    record = _departure_pixels()
+    assert pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS) == {
+        "verdict": True,
+        "reason": "every hide-to-first-draw frame matches the last decoder",
+        "coverageComplete": True,
+        "exposedFrameCount": 0,
+    }
+
+    record["frames"].pop(2)
+    mutant = pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)
+    assert mutant["verdict"] is None
+    assert mutant["coverageComplete"] is False
+
+
+def test_departure_pixel_poster_frame_is_false_and_substitution_mutates_the_null() -> None:
+    null = _departure_pixels()
+    null["frames"][2] = _departure_pixels(poster_tick=11)["frames"][2]
+    null["exposedFrames"] = 1
+    mutant = pi.score_departure_pixels(null, thresholds=PIXEL_THRESHOLDS)
+    assert mutant["verdict"] is False
+    assert mutant["coverageComplete"] is True
+    assert mutant["exposedFrameCount"] == 1
+
+    red = _departure_pixels(poster_tick=11, entry_id="red")
+    assert pi.score_departure_pixels(red, thresholds=PIXEL_THRESHOLDS)["verdict"] is False
+
+
+def test_departure_pixel_indistinguishable_reference_is_none() -> None:
+    result = pi.score_departure_pixels(
+        _departure_pixels(indistinguishable_tick=11), thresholds=PIXEL_THRESHOLDS,
+    )
+    assert result["verdict"] is None
+    assert result["coverageComplete"] is True
+    assert result["exposedFrameCount"] == 0
+
+
+def test_departure_pixel_deleted_frame_with_adjusted_counts_is_none() -> None:
+    record = _departure_pixels()
+    record["frames"].pop(2)
+    record["expectedTicks"] = 2
+    record["deliveredTicks"] = 2
+    result = pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)
+    assert result["verdict"] is None
+    assert result["coverageComplete"] is False
+
+
+@pytest.mark.parametrize(("ticks", "expected", "delivered"), [
+    ([10, 12, 13], 3, 3),
+    ([10, 10, 12], 2, 2),
+    ([10, 12, 11], 3, 3),
+], ids=["non-contiguous", "duplicate", "reversed"])
+def test_departure_pixel_tick_identities_must_be_contiguous_and_strictly_increasing(
+    ticks: list[int], expected: int, delivered: int,
+) -> None:
+    record = _departure_pixels()
+    for frame, tick in zip(record["frames"][1:4], ticks):
+        frame["tick"] = tick
+    record["expectedTicks"] = expected
+    record["deliveredTicks"] = delivered
+    result = pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)
+    assert result["verdict"] is None
+    assert result["coverageComplete"] is False
+
+
+@pytest.mark.parametrize("frame_index", [0, -1], ids=["no-preroll-bracket", "no-tail-bracket"])
+def test_departure_pixel_window_must_be_bracketed(frame_index: int) -> None:
+    record = _departure_pixels()
+    record["frames"].pop(frame_index)
+    result = pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)
+    assert result["verdict"] is None
+    assert result["coverageComplete"] is False
+
+
+def test_incomplete_coverage_retains_the_observed_exposed_count() -> None:
+    record = _departure_pixels(poster_tick=10)
+    record["frames"].pop(2)
+    record["expectedTicks"] = 2
+    record["deliveredTicks"] = 2
+    result = pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)
+    assert result["verdict"] is None
+    assert result["coverageComplete"] is False
+    assert result["exposedFrameCount"] == 1
+
+
+def test_pairwise_reference_distance_and_equal_hashes_are_indistinguishable() -> None:
+    mse_shaped = _departure_pixels()
+    mse_shaped["frames"][2]["distances"] = {
+        "lastDecoder": 100.0, "poster": 110.25, "background": 225.0,
+    }
+    mse_shaped["references"]["pairwise"]["lastDecoder_poster"] = 9.0
+    assert pi.score_departure_pixels(mse_shaped, thresholds=PIXEL_THRESHOLDS)["verdict"] is None
+
+    equal_hashes = _departure_pixels()
+    equal_hashes["references"]["poster"]["sha256"] = equal_hashes["references"]["lastDecoder"]["sha256"]
+    assert pi.score_departure_pixels(equal_hashes, thresholds=PIXEL_THRESHOLDS)["verdict"] is None
+
+    wrong_metric = _departure_pixels()
+    wrong_metric["references"]["poster"]["provenance"]["metric"] = "mse"
+    assert pi.score_departure_pixels(wrong_metric, thresholds=PIXEL_THRESHOLDS)["verdict"] is None
+
+
+@pytest.mark.parametrize(("poster_tick", "recorded"), [(None, 1), (11, 0)], ids=["false-positive", "missed-red"])
+def test_recorded_exposed_count_must_match_scored_frames(poster_tick: int | None, recorded: int) -> None:
+    record = _departure_pixels(poster_tick=poster_tick)
+    record["exposedFrames"] = recorded
+    result = pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)
+    assert result["verdict"] is None
+    assert result["reason"] == "record exposedFrames disagrees with scored frames"
+
+
+def test_red_min_keeps_a_weak_negative_lead_ambiguous() -> None:
+    record = _departure_pixels()
+    record["frames"][2]["distances"] = {"lastDecoder": 10.6, "poster": 10.0, "background": 30.0}
+    result = pi.score_departure_pixels(
+        record, thresholds={"margin": 0.5, "redMin": 12.0, "provenance": {"source": "weak-null"}},
+    )
+    assert result["verdict"] is None
+    assert result["exposedFrameCount"] == 0
+
+
+def test_threshold_provenance_must_be_a_nonempty_mapping_and_identities_are_str_or_int() -> None:
+    for provenance in ("not-a-mapping", {}):
+        assert pi.score_departure_pixels(
+            _departure_pixels(), thresholds={"margin": 10.0, "redMin": 12.0, "provenance": provenance},
+        )["verdict"] is None
+    for field in ("entryId", "visit", "contextSerial", "decoderId", "atScene"):
+        malformed = _departure_pixels()
+        malformed[field] = ["not", "an", "identity"]
+        assert pi.score_departure_pixels(malformed, thresholds=PIXEL_THRESHOLDS)["verdict"] is None
+
+
+def test_pixel_threshold_derivation_uses_null_red_separation_and_refuses_non_separation() -> None:
+    null = _departure_pixels(entry_id="persistent-decoder")
+    red = _departure_pixels(poster_tick=11, entry_id="one-frame-poster")
+    red["exposedFrames"] = 0
+    thresholds = pi.derive_pixel_thresholds([null], [red])
+    assert thresholds == {
+        "margin": 12.0,
+        "redMin": 12.0,
+        "provenance": {
+            "method": "measured MAD decoder/exposed reference leads",
+            "nullRecords": [{
+                "entryId": "persistent-decoder", "visit": 1, "contextSerial": 2, "decoderId": 7, "atScene": 4,
+                "leads": [12.0, 12.0, 12.0],
+            }],
+            "redRecords": [{
+                "entryId": "one-frame-poster", "visit": 1, "contextSerial": 2, "decoderId": 7, "atScene": 4,
+                "leads": [12.0, -12.0, 12.0],
+            }],
+        },
+    }
+    assert pi.score_departure_pixels(null, thresholds=thresholds)["verdict"] is True
+    assert pi.score_departure_pixels({**red, "exposedFrames": 1}, thresholds=thresholds)["verdict"] is False
+    assert pi.derive_pixel_thresholds([null], [_departure_pixels(entry_id="not-red")]) is None
+
+
+@pytest.mark.parametrize("mutation", ["pairwise", "equal-hashes"], ids=str)
+def test_pixel_threshold_derivation_requires_every_calibration_record_to_score_its_arm(mutation: str) -> None:
+    null = _departure_pixels(entry_id="persistent-decoder")
+    red = _departure_pixels(poster_tick=11, entry_id="one-frame-poster")
+    if mutation == "pairwise":
+        null["references"]["pairwise"]["lastDecoder_poster"] = 5.0
+    else:
+        null["references"]["poster"]["sha256"] = null["references"]["lastDecoder"]["sha256"]
+    assert pi.derive_pixel_thresholds([null], [red]) is None
+
+
+def test_departure_pixel_rejects_a_tick_spanning_the_preroll_window_edge() -> None:
+    record = _departure_pixels()
+    record["frames"].insert(0, {
+        "t": 8.0, "tick": 9, "sha256": f"{8:064x}", "path": "pixels/frame-8.png",
+        "distances": {"lastDecoder": 1.0, "poster": 13.0, "background": 15.0},
+    })
+    record["frames"][1]["tick"] = 10
+    result = pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)
+    assert result["verdict"] is None
+    assert result["coverageComplete"] is False
+
+
+def test_departure_pixel_allows_a_duplicate_preroll_tick_on_the_same_side_of_the_edge() -> None:
+    record = _departure_pixels()
+    record["frames"].insert(0, {
+        "t": 8.0, "tick": 9, "sha256": f"{8:064x}", "path": "pixels/frame-8.png",
+        "distances": {"lastDecoder": 1.0, "poster": 13.0, "background": 15.0},
+    })
+    assert pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)["verdict"] is True
+
+
+@pytest.mark.parametrize(("poster", "expected"), [(False, True), (True, False)], ids=["clean-null", "pre-context-red"])
+def test_departure_pixel_includes_a_hide_before_capture_start(poster: bool, expected: bool) -> None:
+    record = _departure_pixels()
+    record["startMs"] = 10.0
+    record["hideMs"] = 9.0
+    record["expectedTicks"] = 4
+    record["deliveredTicks"] = 4
+    record["frames"].insert(0, {
+        "t": 8.0, "tick": 8, "sha256": f"{8:064x}", "path": "pixels/frame-8.png",
+        "distances": {"lastDecoder": 1.0, "poster": 13.0, "background": 15.0},
+    })
+    if poster:
+        record["frames"][1]["distances"] = {"lastDecoder": 13.0, "poster": 1.0, "background": 15.0}
+        record["exposedFrames"] = 1
+    result = pi.score_departure_pixels(record, thresholds=PIXEL_THRESHOLDS)
+    assert result["verdict"] is expected
+    assert result["coverageComplete"] is True
+    assert result["exposedFrameCount"] == int(poster)
 
 
 def _pv(id: int = 1, src: str = "movie-a.mov", **kw: Any) -> dict[str, Any]:

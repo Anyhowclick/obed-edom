@@ -207,6 +207,300 @@ def _finite(value: Any) -> float | None:
     return None
 
 
+_DEPARTURE_PIXEL_FIELDS = (
+    "entryId", "visit", "contextSerial", "decoderId", "atScene", "startMs", "hideMs", "firstDrawMs", "roi",
+    "frames", "references", "expectedTicks", "deliveredTicks", "missingTicks", "ambiguousFrames", "exposedFrames",
+)
+_PIXEL_REFERENCE_NAMES = ("lastDecoder", "poster", "background")
+_PIXEL_PAIRWISE_NAMES = ("lastDecoder_poster", "lastDecoder_background", "poster_background")
+
+
+def _pixel_verdict(
+    verdict: bool | None, reason: str, *, coverage_complete: bool = False, exposed_frame_count: int = 0,
+) -> dict[str, Any]:
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "coverageComplete": coverage_complete,
+        "exposedFrameCount": exposed_frame_count,
+    }
+
+
+def _pixel_rect(value: Any) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and all(_finite(value.get(key)) is not None for key in ("x", "y", "w", "h"))
+        and float(value["w"]) > 0.0
+        and float(value["h"]) > 0.0
+    )
+
+
+def _pixel_ticks(value: Any) -> list[int] | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return None
+    ticks = list(value)
+    if not all(isinstance(tick, int) and not isinstance(tick, bool) and tick >= 0 for tick in ticks):
+        return None
+    return ticks
+
+
+def _departure_pixel_record(record: Any) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(record, Mapping):
+        return None, "departure pixel record is missing or malformed"
+    missing_fields = [field for field in _DEPARTURE_PIXEL_FIELDS if field not in record]
+    if missing_fields:
+        return None, f"departure pixel record is missing {', '.join(missing_fields)}"
+    if any(
+        not isinstance(record.get(field), (str, int)) or isinstance(record.get(field), bool)
+        for field in ("entryId", "visit", "contextSerial", "decoderId", "atScene")
+    ):
+        return None, "departure pixel identity is malformed"
+    times = [_finite(record.get(field)) for field in ("startMs", "hideMs", "firstDrawMs")]
+    if any(value is None for value in times) or not times[1] <= times[2]:
+        return None, "departure pixel timestamps are malformed"
+    if not _pixel_rect(record.get("roi")):
+        return None, "departure pixel ROI is malformed"
+    references = record.get("references")
+    if not isinstance(references, Mapping) or any(not isinstance(references.get(name), Mapping)
+                                                  for name in _PIXEL_REFERENCE_NAMES):
+        return None, "departure pixel references are malformed"
+    for name in _PIXEL_REFERENCE_NAMES:
+        reference = references[name]
+        provenance = reference.get("provenance")
+        if (
+            not isinstance(reference.get("sha256"), str) or not reference["sha256"]
+            or not isinstance(provenance, Mapping) or provenance.get("metric") != "mad"
+        ):
+            return None, f"departure pixel {name} reference is malformed"
+    if not _pixel_rect(references["poster"].get("dstRect")):
+        return None, "departure pixel poster reference dstRect is malformed"
+    pairwise = references.get("pairwise")
+    if not isinstance(pairwise, Mapping):
+        return None, "departure pixel pairwise reference distances are malformed"
+    measured_pairwise = {name: _finite(pairwise.get(name)) for name in _PIXEL_PAIRWISE_NAMES}
+    if any(value is None or value < 0.0 for value in measured_pairwise.values()):
+        return None, "departure pixel pairwise reference distances are malformed"
+    expected = record.get("expectedTicks")
+    delivered = record.get("deliveredTicks")
+    missing = _pixel_ticks(record.get("missingTicks"))
+    if (
+        not isinstance(expected, int) or isinstance(expected, bool) or expected < 0
+        or not isinstance(delivered, int) or isinstance(delivered, bool) or delivered < 0
+        or missing is None
+    ):
+        return None, "departure pixel tick accounting is malformed"
+    if len(missing) != len(set(missing)):
+        return None, "departure pixel missingTicks contains duplicates"
+    for field in ("ambiguousFrames", "exposedFrames"):
+        value = record.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None, f"departure pixel {field} is malformed"
+    raw_frames = record.get("frames")
+    if not isinstance(raw_frames, Sequence) or isinstance(raw_frames, (str, bytes)):
+        return None, "departure pixel frames are malformed"
+    frames: list[dict[str, Any]] = []
+    previous_t = -math.inf
+    for frame in raw_frames:
+        if not isinstance(frame, Mapping):
+            return None, "departure pixel frame is malformed"
+        at = _finite(frame.get("t"))
+        tick = frame.get("tick")
+        distances = frame.get("distances")
+        if (
+            at is None or at < previous_t
+            or not isinstance(tick, int) or isinstance(tick, bool) or tick < 0
+            or not isinstance(frame.get("sha256"), str) or not frame["sha256"]
+            or not isinstance(frame.get("path"), str) or not frame["path"]
+            or not isinstance(distances, Mapping)
+        ):
+            return None, "departure pixel frame is malformed"
+        measured = {name: _finite(distances.get(name)) for name in _PIXEL_REFERENCE_NAMES}
+        if any(value is None or value < 0.0 for value in measured.values()):
+            return None, "departure pixel frame distances are malformed"
+        frames.append({"t": at, "tick": tick, "distances": measured})
+        previous_t = at
+    return {
+        "record": record,
+        "frames": frames,
+        "expectedTicks": expected,
+        "deliveredTicks": delivered,
+        "missingTicks": missing,
+        "hideMs": times[1],
+        "firstDrawMs": times[2],
+        "referenceHashes": [references[name]["sha256"] for name in _PIXEL_REFERENCE_NAMES],
+        "pairwise": measured_pairwise,
+    }, None
+
+
+def _departure_pixel_window(parsed: Mapping[str, Any]) -> tuple[list[dict[str, Any]], bool, str | None]:
+    expected = parsed["expectedTicks"]
+    delivered = parsed["deliveredTicks"]
+    missing = parsed["missingTicks"]
+    all_frames = parsed["frames"]
+    all_ticks = [frame["tick"] for frame in all_frames]
+    frames = [frame for frame in parsed["frames"] if parsed["hideMs"] <= frame["t"] <= parsed["firstDrawMs"]]
+    ticks = [frame["tick"] for frame in frames]
+    if any(right < left for left, right in zip(all_ticks, all_ticks[1:])):
+        return frames, False, "departure pixel ticks decrease in time order"
+    before = {frame["tick"] for frame in all_frames if frame["t"] < parsed["hideMs"]}
+    after = {frame["tick"] for frame in all_frames if frame["t"] > parsed["firstDrawMs"]}
+    if before & set(ticks) or set(ticks) & after:
+        return frames, False, "a tick appears on both sides of a hide-to-first-draw window edge"
+    if expected == 0:
+        return frames, False, "hide-to-first-draw interval has no expected ticks"
+    if delivered != len(ticks):
+        return frames, False, "deliveredTicks does not match the synchronized hide-to-first-draw frames"
+    if any(right <= left for left, right in zip(ticks, ticks[1:])):
+        return frames, False, "hide-to-first-draw ticks are not strictly increasing"
+    if set(ticks) & set(missing):
+        return frames, False, "a synchronized tick is also recorded as missing"
+    identities = set(ticks) | set(missing)
+    if not identities:
+        return frames, False, "hide-to-first-draw interval has no tick identities"
+    lo = min(identities)
+    expected_identities = set(range(lo, lo + expected))
+    if identities != expected_identities:
+        return frames, False, "hide-to-first-draw tick identities are not contiguous"
+    hi = lo + expected - 1
+    if not any(frame["t"] < parsed["hideMs"] and frame["tick"] == lo - 1 for frame in parsed["frames"]):
+        return frames, False, "hide-to-first-draw interval has no preroll bracket tick"
+    if not any(frame["t"] > parsed["firstDrawMs"] and frame["tick"] == hi + 1 for frame in parsed["frames"]):
+        return frames, False, "hide-to-first-draw interval has no tail bracket tick"
+    if missing:
+        return frames, False, f"hide-to-first-draw interval is missing {len(missing)} tick(s)"
+    return frames, True, None
+
+
+def _pixel_lead(frame: Mapping[str, Any]) -> float:
+    distances = frame["distances"]
+    return min(distances["poster"], distances["background"]) - distances["lastDecoder"]
+
+
+def score_departure_pixels(record: Any, *, thresholds: Any) -> dict[str, Any]:
+    """Classify hide-to-first-draw pixels without changing any departure policy.
+
+    Positive finite ``thresholds.margin`` and ``thresholds.redMin`` plus mapping provenance are mandatory. Lower
+    distances are better: a decoder frame has a positive lead, while a poster/background frame has a negative lead.
+    """
+    if not isinstance(thresholds, Mapping):
+        return _pixel_verdict(None, "pixel thresholds are missing or malformed")
+    margin = _finite(thresholds.get("margin"))
+    red_min = _finite(thresholds.get("redMin"))
+    provenance = thresholds.get("provenance")
+    if (
+        margin is None or margin <= 0.0 or red_min is None or red_min <= 0.0
+        or not isinstance(provenance, Mapping) or not provenance
+    ):
+        return _pixel_verdict(None, "pixel thresholds are missing or malformed")
+    parsed, problem = _departure_pixel_record(record)
+    if parsed is None:
+        return _pixel_verdict(None, problem or "departure pixel record is missing or malformed")
+    frames, coverage_complete, coverage_problem = _departure_pixel_window(parsed)
+    leads = [_pixel_lead(frame) for frame in frames]
+    exposed = sum(lead <= -red_min for lead in leads)
+    if record.get("exposedFrames") != exposed:
+        return _pixel_verdict(
+            None, "record exposedFrames disagrees with scored frames",
+            coverage_complete=coverage_complete, exposed_frame_count=exposed,
+        )
+    if not coverage_complete:
+        return _pixel_verdict(
+            None, coverage_problem or "hide-to-first-draw coverage is incomplete", exposed_frame_count=exposed,
+        )
+    if record.get("ambiguousFrames"):
+        return _pixel_verdict(
+            None, "capture reports ambiguous frame synchronization", exposed_frame_count=exposed,
+        )
+    if (
+        len(set(parsed["referenceHashes"])) != len(parsed["referenceHashes"])
+        or any(distance < margin for distance in parsed["pairwise"].values())
+    ):
+        return _pixel_verdict(
+            None, "departure pixel references are indistinguishable",
+            coverage_complete=True, exposed_frame_count=exposed,
+        )
+    if exposed:
+        return _pixel_verdict(
+            False, f"{exposed} hide-to-first-draw frame(s) match the poster or background",
+            coverage_complete=True, exposed_frame_count=exposed,
+        )
+    ambiguous = sum(lead < margin for lead in leads)
+    if ambiguous:
+        return _pixel_verdict(
+            None, f"{ambiguous} hide-to-first-draw frame(s) do not separate the decoder from exposed references",
+            coverage_complete=True,
+        )
+    return _pixel_verdict(True, "every hide-to-first-draw frame matches the last decoder", coverage_complete=True)
+
+
+def derive_pixel_thresholds(null_records: Any, red_records: Any) -> dict[str, Any] | None:
+    """Derive the largest symmetric margin supported by complete persistent-decoder and exposed-poster records."""
+    if (
+        not isinstance(null_records, Sequence) or isinstance(null_records, (str, bytes)) or not null_records
+        or not isinstance(red_records, Sequence) or isinstance(red_records, (str, bytes)) or not red_records
+    ):
+        return None
+    null_leads: list[float] = []
+    red_leads: list[float] = []
+    null_provenance: list[dict[str, Any]] = []
+    red_provenance: list[dict[str, Any]] = []
+    for records, leads, records_provenance, red in (
+        (null_records, null_leads, null_provenance, False),
+        (red_records, red_leads, red_provenance, True),
+    ):
+        for record in records:
+            parsed, problem = _departure_pixel_record(record)
+            if parsed is None or problem is not None:
+                return None
+            frames, coverage_complete, _ = _departure_pixel_window(parsed)
+            if not coverage_complete or record.get("ambiguousFrames"):
+                return None
+            advantages = [_pixel_lead(frame) for frame in frames]
+            if not advantages:
+                return None
+            records_provenance.append({
+                **{field: record.get(field) for field in ("entryId", "visit", "contextSerial", "decoderId", "atScene")},
+                "leads": advantages,
+            })
+            if red:
+                exposure_lead = max(-advantage for advantage in advantages)
+                if exposure_lead <= 0.0:
+                    return None
+                leads.append(exposure_lead)
+            else:
+                decoder_lead = min(advantages)
+                if decoder_lead <= 0.0:
+                    return None
+                leads.append(decoder_lead)
+    null_min, red_min = min(null_leads), min(red_leads)
+    margin = min(null_min, red_min)
+    if not math.isfinite(margin) or margin <= 0.0:
+        return None
+    derived = {
+        "margin": margin,
+        "redMin": red_min,
+        "provenance": {
+            "method": "measured MAD decoder/exposed reference leads",
+            "nullRecords": null_provenance,
+            "redRecords": red_provenance,
+        },
+    }
+    if any(score_departure_pixels(record, thresholds=derived)["verdict"] is not True for record in null_records):
+        return None
+    if any(
+        score_departure_pixels(
+            {
+                **record,
+                "exposedFrames": sum(lead <= -red_min for lead in entry["leads"]),
+            },
+            thresholds=derived,
+        )["verdict"] is not False
+        for record, entry in zip(red_records, red_provenance)
+    ):
+        return None
+    return derived
+
+
 def _connected(video: Mapping[str, Any]) -> bool | None:
     value = video.get("isConnected") if "isConnected" in video else video.get("connected")
     return value if isinstance(value, bool) else None
