@@ -27,14 +27,17 @@ Missing health never proves validity. Per the plan, a known validity failure tak
 
 | | Records | proved INVALID | not re-evaluable | still valid |
 |---|---:|---:|---:|---:|
-| Unique run records (904 source files) | **1,374** | **1,103** | **271** | **0** |
+| Unique run records (904 source files) | **1,374** | **1,075** | **299** | **0** |
 | Rescored duplicates (`detach-fix-rescore`, `detach-main-p2/auto/*.rescored.jsonl`), excluded from the totals | 79 | 79 | 0 | 0 |
 
 - **No historical run is still valid.** None carries the all-hook `instrumentCost`, a settled per-visit cadence record or the full C2 environment (build, load/uptime, Chrome counts, rates).
-- **Why the 1,103 are INVALID:**
-  - 986 on environment alone (a recorded build other than .79);
-  - 84 on cost alone;
-  - 33 on both (predraw).
+- **Why the 1,075 are INVALID:**
+  - 958 on environment (a recorded Chrome 154 build);
+  - 117 on cost (84, plus the 33 headed predraw sets).
+- **Re-count 2026-10-17 under the amended Chrome rule** (any build of a qualified major, `QUALIFIED_CHROME_MAJORS = (155,)`,
+  one build per round; `823acbef`, which postdates this inventory). Only `.80`-linked predraw records were env-INVALID on a 155
+  build: 28 results-only lines with no recorded cost move to not re-evaluable (was 1,103 / 271); the 33 headed sets stay
+  INVALID on cost. No 155.0.8059.40 record exists. Chrome 154 is not a qualified major, so its 958 stay INVALID.
 - **What used to count:**
 
 | Original outcome | proved INVALID | not re-evaluable | Total |
@@ -44,7 +47,7 @@ Missing health never proves validity. Per the plan, a known validity failure tak
 | Formerly valid OBS run (`valid=True`, `passed=False`) | 5 | 59 | 64 |
 | Fail/invalid | 168 | 90 | 258 |
 | Refusal (nothing ran) | 0 | 2 | 2 |
-| Other (inconclusive, experiment `ok`, running, results-only) | 398 | 44 | 442 |
+| Other (inconclusive, experiment `ok`, running, results-only) | 370 | 72 | 442 |
 
 - The TSV column `greenSubchecks` counts green subchecks: `verdict: true` nodes inside each record.
 - Under §4 precedence, an INVALID expected red is never a MATCH, so all 252 historical red matches lose their standing.
@@ -61,13 +64,13 @@ Every live-log session header records `Browser.getVersion`. These are the headle
 | **155.0.8059.80** | 2026-10-16 11:58 | 2026-10-16 13:53 | 47 (predraw-geometry, worktree `funny-pasteur-751a72`) |
 
 - The installed Chrome reads 155.0.8059.80. `Versions/155.0.8059.80` and `Info.plist` are dated 2026-10-16 08:53, and the .79 folder is still present.
-- **Only the predraw-geometry runs have a recorded .80** (their own live logs). They are proved INVALID on environment.
+- **Only the predraw-geometry runs have a recorded .80** (their own live logs). Under the amended rule .80 qualifies; 33 stay INVALID on cost, 28 are not re-evaluable.
 - Runs after 08:53 without a recorded build are only *implied* .80, so they stay not re-evaluable. The plan forbids inferring history from today's machine. These are:
   - noRider A/B (10:20–10:27);
   - F4 acceptance (09:18–11:18);
   - the C1 timing split (17:22–17:34).
 - **The C1 record's "on Chrome 155.0.8059.79" is not supported by any record.** `c1-timing/all-summary.jsonl` stores no build.
-- **Forward consequence (owner, gate 5a).** The pinned rule (exact 155.0.8059.79) cannot be satisfied by fresh captures on this machine as installed. Either re-qualify .80 and move the pin, or restore .79 and hold updates.
+- **Forward consequence: resolved 2026-10-16.** The owner re-qualified .80 and replaced the exact pin with any build of a qualified major, one build per round (decision 1).
   - Precedent: `chrome155-requal/gates-r1.md`.
   - The C2 environment check (session `stage-b-c2-environment-a`) encodes the exact pin.
 
@@ -77,8 +80,8 @@ Every live-log session header records `Browser.getVersion`. These are the headle
 
 | Evidence | Applied | Records |
 |---|---|---:|
-| Build in the record: detach `chromeVersion`, adapter-proof `browser`, or `placement.product` (alpha-placement `fix-ab/d2-*`, `d5-*`) | ≠ .79 → proved INVALID | 244 (154) + 4 (.79) |
-| **Linked: the record's `exportRoot` / worktree path names a worktree, and that worktree's own live-log sessions in the 4 h before the record show one build.** Matched on exact `exportRoot` first, then worktree name (gate worktrees `gate-<kind>-<head>`). Siblings without a path in the same gate-round folder inherit the round's link only if all linked siblings within 4 h agree. | ≠ .79 → proved INVALID | 714 (154) + 61 (.80) + 8 (.79) |
+| Build in the record: detach `chromeVersion`, adapter-proof `browser`, or `placement.product` (alpha-placement `fix-ab/d2-*`, `d5-*`) | major ≠ 155 → proved INVALID (as built: ≠ .79) | 244 (154) + 4 (.79) |
+| **Linked: the record's `exportRoot` / worktree path names a worktree, and that worktree's own live-log sessions in the 4 h before the record show one build.** Matched on exact `exportRoot` first, then worktree name (gate worktrees `gate-<kind>-<head>`). Siblings without a path in the same gate-round folder inherit the round's link only if all linked siblings within 4 h agree. | major ≠ 155 → proved INVALID (as built: ≠ .79) | 714 (154) + 61 (.80, qualified since the 10-16 amendment) + 8 (.79) |
 | Not recorded | not re-evaluable | 272 |
 | Managed OBS (CEF): Chrome rule not applied (CEF policy preserved). OBS 32.2.2 and rates are recorded; load/uptime and Chrome counts are absent. | not re-evaluable | 71 |
 
@@ -128,7 +131,7 @@ INVALID = proved INVALID; n.r. = not re-evaluable. Run windows are in the TSV.
 | `f4-faststart/acceptance-39b32de9/attach` | 6 | 6 fail | not recorded | — | no feed | n.r. 6 |
 | `f4-faststart/acceptance-39b32de9/{headless,paint}/compare.jsonl` (A2/A3, 09:18–) | 20 | 20 fail | not recorded (implied .80) | 0.1–2.6 | capture patched out | n.r. 20 |
 | **`f4-faststart/acceptance-39b32de9/gates/*.log`** (A5, two rounds) | 76 | 14 green, 17 fail, 45 other | not recorded (implied .80) | — | 54 MM-FEED gates with capture on (`39b32de9`); 22 others no feed | **INVALID 54**, n.r. 22 |
-| **`predraw-geometry`** results-only (`*uptime.txt`, 11:58–13:47) | 61 | results only | **linked .80** (`funny-pasteur-751a72`, 47 sessions) | — | 33 capture on (headed sets), 28 A/B lines without a head | **INVALID 61** |
+| **`predraw-geometry`** results-only (`*uptime.txt`, 11:58–13:47) | 61 | results only | **linked .80** (`funny-pasteur-751a72`, 47 sessions) | — | 33 capture on (headed sets), 28 A/B lines without a head | **INVALID 33**, n.r. 28 |
 | `c1-timing/all-summary.jsonl` (17:22–17:34) | 12 | 10 fail, 2 inconclusive | not recorded (implied .80) | 2.53–119.38 | wrf:true variants | INVALID 5, n.r. 7 |
 
 `ab-summary` detail: R `new-on-1/2`, `new-off-1`, `hyb-newscripts-oldsrc`, `bis-1df31c33` at **110.35–128.3** and the load-overlapped `bis-ca39b819`/`bis-dd16db52` at 124.6–127.0 are INVALID. N (2.4) and O (2.5–2.9) are not re-evaluable.
@@ -161,7 +164,8 @@ C1 detail: `01`/`10-head`, `02-old`, `09`/`09b-fidelity` (109.7–119.4) are INV
    - The record's own finding, that capture on vs. off gives identical offenders, still stands as a within-run comparison. The `capOff` arms carry it, and the root cause is the rider census counting frames before the first GL draw.
 7. **Pre-draw geometry gate (`predraw-geometry/gate-record-2026-10-16.md`, `step0-2026-10-16.md`).**
    - Covers sets step0 `533f88d5`, val `f9cdc159`/`794dfe4c`, f4 `b3ddc071`, hand-back A/B, and final `9d5cf850`.
-   - Change: → **environment proved INVALID** (own live logs record `Chrome/155.0.8059.80`), and cost INVALID by identity for the headed sets.
+   - Change: → cost INVALID by identity for the 33 headed sets; the 28 headless A/B lines → not re-evaluable (own live logs
+     record `Chrome/155.0.8059.80`, a qualified build since 10-16; no cost recorded).
    - `PRE_DRAW_GRACE_MS` = 320 was set provisionally by the owner from stored 10-15 prefixes (176–315 ms; `gate-record-2026-10-16-predraw.md`, an offline replay that stands). These .80 runs only confirmed it "stays 320", so that confirmation is INVALID evidence.
 8. **F4 acceptance (`movie-warmup-2026-10-16/acceptance-record.md`).**
    - Change: A5 MM-FEED gates (54 of 76 across two rounds) → **cost INVALID**. They are `39b32de9` with the capture on, and the record states "`callbackCostP95Ms` ~128 ms" for the MM-FEED failures.
@@ -255,6 +259,18 @@ These are listed so the count is complete.
      - Q7 attempt 1 ×2 and attempt 2 ×3.
    - Totals would become 1,188 / 186 / 0. Refusals and records without the feed instrument (d2/d5) are excluded.
 5. **Q2 cadence.** On clean history, p95 > 2P hits about 20 % of visits and max > 2P more. Decide together with fresh C1-fixed per-visit captures (gate 3).
+
+**Decided (owner).**
+1. 2026-10-16: re-qualify .80; any build of a qualified major, one build per round, recorded per run.
+2. 2026-10-17: inventory accepted after the re-count under rule 1: **1,075 proved INVALID / 299 not re-evaluable / 0 still
+   valid** of 1,374, plus the no-artifact table. No grandfathering, no rewrites.
+3. 2026-10-17: `> 8` (8.0 meets the budget; `live_run_validity.py` already compares `p95 > budget`). `single-384` stays not
+   re-evaluable.
+4. 2026-10-17: the narrowed rule as applied (recorded cost, then capture identity); `wrf:true` alone does not prove
+   INVALID. (After the re-count the literal rule would add 113 records, the 85 above plus the 28 predraw lines: 1,188 / 186.)
+5. Open until gate 5a with gate 3's fresh per-visit captures. Ruled out now: per-visit p95 > 2P and max > 2P (they reject
+   clean visits). Lean: per-visit median > 2P as the gate (1 of 549 clean visits, by 0.02 ms), p95/max report-only,
+   confirmed only if fresh captures show clean-null margin and the reds still fail it.
 
 ## Review log
 

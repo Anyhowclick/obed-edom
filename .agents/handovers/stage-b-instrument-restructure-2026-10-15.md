@@ -39,7 +39,7 @@ and the D1 counter-policy obligations (D7 crossfade/from-only; a positive GL cou
 feed-on arms). C1 gate 2 timing passed (`c1-gate2-record.md`).
 
 **Owner to confirm**
-- Gate 4 decisions 2–5 (accept the inventory, cost `>` vs `>=` 8 ms, wrf-rule scope, Q2 cadence) at gate 5a.
+- Q2 cadence (gate 4 decision 5) at gate 5a, with gate 3's fresh per-visit captures.
 
 **Next, in order (plan)**
 MM-FEED fix merge + C1 separation re-proof → bounded C4 (stream F; also: refuse scoring a counter deck with Alpha
@@ -75,6 +75,9 @@ trashing any): `stage-b-coord` (merges), `funny-pasteur-751a72` (coordinator, `c
   - Saves about 35 s of wall time per round.
 
 ## Owner decisions (2026-10-15/16/17)
+- 2026-10-17: gate 4 decisions 2–4 (`gate4-historical-impact.md` §Decided): inventory accepted after the re-count under the
+  155.x rule (1,075 / 299 / 0); cost gate `> 8`; wrf rule narrowed as applied. Decision 5 (Q2) waits for gate 3 data; lean
+  per-visit median > 2P, p95/max report-only.
 - 2026-10-17: D7/D7s from-only read rule = **ambiguity in a crossfade read is red**. A crossfade counter read (`feed.to`
   non-null) whose markers pass but whose bits fall in the band (reason `ambiguous`, not `marker`) scores `ok: False`: with
   both units fed the inputs are the same frame, so a clean feed always decodes. `marker` stays None; single-texture reads and
