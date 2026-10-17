@@ -39,9 +39,6 @@ and the D1 counter-policy obligations (D7 crossfade/from-only; a positive GL cou
 feed-on arms). C1 gate 2 timing passed (`c1-gate2-record.md`).
 
 **Owner to confirm**
-- C3: the carry-window start deviates from the plan's literal "first decoded settled source row" to keep the old
-  coverage (`c3-gate-record.md`).
-- D7 from-only crossfade read rule (above).
 - Gate 4 decisions 2–5 (accept the inventory, cost `>` vs `>=` 8 ms, wrf-rule scope, Q2 cadence) at gate 5a.
 
 **Next, in order (plan)**
@@ -77,7 +74,13 @@ trashing any): `stage-b-coord` (merges), `funny-pasteur-751a72` (coordinator, `c
   - Add an arm-level check that the dwell was applied.
   - Saves about 35 s of wall time per round.
 
-## Owner decisions (2026-10-15/16)
+## Owner decisions (2026-10-15/16/17)
+- 2026-10-17: D7/D7s from-only read rule = **ambiguity in a crossfade read is red**. A crossfade counter read (`feed.to`
+  non-null) whose markers pass but whose bits fall in the band (reason `ambiguous`, not `marker`) scores `ok: False`: with
+  both units fed the inputs are the same frame, so a clean feed always decodes. `marker` stays None; single-texture reads and
+  the band are unchanged. Re-register the D7/D7s per-progress expectations from a fresh round; null = 0 ambiguous crossfade
+  reads on every feed-on arm.
+- 2026-10-17: C3 carry-window deviation confirmed (union of the old legacy/paint starts minus the initial cold start).
 - 2026-10-16: requalify Chrome 155.0.8059.80; minor/patch builds auto-qualify (any build in a qualified major, one
   build per round, recorded per run).
 - 2026-10-16: the coordinator role moves to this session; the old coordinator is retired.
