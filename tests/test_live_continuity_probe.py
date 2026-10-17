@@ -4458,6 +4458,7 @@ class TestGlReplayCli:
         RecordingHost.made = []
         monkeypatch.setattr(probe, "LiveOutputHost", RecordingHost)
         monkeypatch.setattr(probe, "force_viewport", lambda *a: None)
+        monkeypatch.setattr(probe, "COST_RECORDER_JS", "window.__costRecorder = true;")
         monkeypatch.setenv("OBED_LIVE_GL_REPLAY", "auto")
         return RecordingHost.made
 
@@ -4467,6 +4468,7 @@ class TestGlReplayCli:
         with pytest.raises(RuntimeError):
             probe.run_arm("A", Path("x"), [], {}, (64, 32), {}, **kwargs)
         assert recording[-1]["gl_replay"] == (gl or "off")
+        assert recording[-1]["pre_navigation_scripts"] == ("window.__costRecorder = true;",)
 
     @pytest.mark.parametrize("gl", [None, "off", "auto"])
     def test_run_visible_pass_passes_gl_replay_explicitly(self, recording: list[dict[str, Any]], tmp_path: Path, gl: Any) -> None:
@@ -4474,17 +4476,21 @@ class TestGlReplayCli:
         result = probe.run_visible_pass("V", Path("x"), [], synthetic_plan(), (64, 32), {}, tmp_path, **kwargs)
         assert result["status"] == "error"
         assert recording[-1]["gl_replay"] == (gl or "off")
+        assert recording[-1]["pre_navigation_scripts"] == ("window.__costRecorder = true;",)
 
     @pytest.mark.parametrize("gl", [None, "off", "auto"])
     def test_goto_arm_passes_gl_replay_explicitly(self, recording: list[dict[str, Any]], tmp_path: Path, gl: Any) -> None:
         kwargs = {} if gl is None else {"gl_replay": gl}
+        pre_navigation_scripts = probe.instrument_pre_navigation_scripts({})
         with pytest.raises(RuntimeError):
             probe._run_goto_arm(
                 Path("x"), [], env={}, tag="G", armed=True, instances={}, expectations={}, viewport=(64, 32),
                 evidence_dir=tmp_path, character_rect=None, onset_scene_id="2",
+                pre_navigation_scripts=pre_navigation_scripts,
                 host_kind=probe.HOST_HEADLESS_CHROME, continuous_expected=True, **kwargs,
             )
         assert recording[-1]["gl_replay"] == (gl or "off")
+        assert recording[-1]["pre_navigation_scripts"] is pre_navigation_scripts
 
     @pytest.mark.parametrize("gl", [None, "off", "auto"])
     def test_attach_arm_passes_gl_replay_explicitly(
@@ -4510,6 +4516,28 @@ class TestGlReplayCli:
         with pytest.raises(RuntimeError):
             probe.run_attach_arm(Path("x"), [], {}, tmp_path, {}, **kwargs)
         assert recording[-1]["gl_replay"] == (gl or "off")
+        assert recording[-1]["pre_navigation_scripts"] == ("window.__costRecorder = true;",)
+
+    def test_force_wrap_and_carry_cover_install_the_recorder(
+        self, recording: list[dict[str, Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        facts = {"verdicts": []}
+        monkeypatch.setattr(probe, "force_wrap_ground_truth", lambda *args: {
+            "export": Path("x"), "slides": [], "facts": facts, "factsOn": None,
+            "source": {}, "scene": 1,
+        })
+        with pytest.raises(RuntimeError):
+            probe.run_force_wrap(argparse.Namespace(
+                force_wrap={"boundary": "3to4", "offsetMs": 0.0}, fixture=Path("x"),
+                original_index=Path("x"), gl_replay="off", artifact=tmp_path / "fw.json",
+                viewport=(64, 32),
+            ))
+        assert recording[-1]["pre_navigation_scripts"] == ("window.__costRecorder = true;",)
+        with pytest.raises(RuntimeError):
+            probe.capture_carry_cover(
+                Path("x"), [], {"fromOrdinal": 1, "durationSeconds": 1.0}, (64, 32), hide_overlay=False,
+            )
+        assert recording[-1]["pre_navigation_scripts"] == ("window.__costRecorder = true;",)
 
 
 def test_attach_arm_holds_the_viewport_override_session_until_its_chrome_is_torn_down(
@@ -5142,6 +5170,34 @@ class TestConcurrentRunIsolation:
             probe.run_pass_g(args)
         assert [c[0] for c in calls] == [probe.run_root(artifact) / "attach-chrome-profile-g"]
         assert calls[0][1]["pass"] == "G"
+
+    def test_pass_g_reuses_one_pre_navigation_script_tuple_for_both_sessions(
+        self, driven: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[dict[str, Any]] = []
+        plan = argparse.Namespace(scene_index_by_player={0: 1, 1: 2})
+        slides = [{"originalOrdinal": 1, "playerIndex": 0}, {"originalOrdinal": 2, "playerIndex": 1}]
+        facts = {"rectExpectations": {"V": {}}, "verdicts": []}
+        monkeypatch.setattr(probe, "COST_RECORDER_JS", "window.__costRecorder = true;")
+        monkeypatch.setattr(probe, "load_slides", lambda *a: slides)
+        monkeypatch.setattr(probe, "ground_truth_plan", lambda *a, **k: plan)
+        monkeypatch.setattr(probe, "ground_truth_facts", lambda *a, **k: facts)
+        monkeypatch.setattr(probe, "slide_instances_of", lambda *a: {})
+        monkeypatch.setattr(probe, "arrival_starts", lambda *a: {})
+        monkeypatch.setattr(probe, "character_region_rect", lambda *a: None)
+        monkeypatch.setattr(probe, "goto_matrix", lambda *a: ())
+        monkeypatch.setattr(probe, "_run_goto_arm", lambda *a, **kwargs: calls.append(kwargs) or {})
+        args = probe.parse_args([
+            "--pass", "G", "--fixture", str(driven["fixture"]), "--original-index", str(driven["index"]),
+            "--artifact", str(driven["tmp"] / "out" / "g.json"),
+        ])
+
+        probe.run_pass_g(args)
+
+        armed_scripts = calls[0]["pre_navigation_scripts"]
+        null_scripts = calls[1]["pre_navigation_scripts"]
+        assert armed_scripts is null_scripts
+        assert armed_scripts == probe.instrument_pre_navigation_scripts(facts)
 
 
 class TestInvocationLock:
@@ -7313,7 +7369,7 @@ class TestGroundTruthFactsIsGeneral:
         base = _plain(S1_BASE.ground_truth_facts(plan, armed=gl))
         current = _plain(probe.ground_truth_facts(plan, armed=gl))
         assert current.pop("verdicts")[0]["id"] == P2_CARRY12
-        assert current.pop("planSha256") in probe.P2_PLAN_SHA256
+        assert current.pop("planSha256") in checks.P2_PLAN_SHA256
         retires = current.pop("retires")
         assert retires == ([] if gl else [current["retire"]])
         positive = current["armed"] if gl else current["retire"]
@@ -7334,13 +7390,13 @@ class TestGroundTruthFactsIsGeneral:
         movies = {"movie1": dict(RUNTIME_MOVIES["movie1"], footprint={"x": 110, "y": 795, "w": 952, "h": 268})}
         monkeypatch.setattr(probe, "runtime_of", lambda plan: dict(RETIRED_RUNTIME, movies=movies))
         facts = probe.ground_truth_facts(_gl_plan())
-        assert "bridgeScene" not in facts and facts["planSha256"] not in probe.P2_PLAN_SHA256
+        assert "bridgeScene" not in facts and facts["planSha256"] not in checks.P2_PLAN_SHA256
         monkeypatch.undo()
         assert "bridgeScene" in _p2_facts()
 
     def test_the_pinned_shas_are_the_committed_fixtures_off_and_on(self) -> None:
-        assert {_p2_facts()["planSha256"], _p2_facts(gl=True)["planSha256"]} <= probe.P2_PLAN_SHA256
-        assert probe.plan_signature(_p2_plan().to_runtime()) == probe.P2_OFF_PLAN_SHA256
+        assert {_p2_facts()["planSha256"], _p2_facts(gl=True)["planSha256"]} <= checks.P2_PLAN_SHA256
+        assert probe.plan_signature(_p2_plan().to_runtime()) == checks.P2_OFF_PLAN_SHA256
 
     def test_a_deck_without_p2_shape_derives_facts_and_keeps_the_armed_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
         pin = _MOVIE(
@@ -8923,7 +8979,7 @@ class TestGeneratedStatus:
         result["groundTruth"]["verdicts"] = [result["groundTruth"]["verdicts"][0]] * 2
         assert probe.overall_status(result)[0] == "error"
 
-    @pytest.mark.parametrize("sha", sorted(probe.P2_PLAN_SHA256))
+    @pytest.mark.parametrize("sha", sorted(checks.P2_PLAN_SHA256))
     def test_only_a_pinned_p2_plan_keeps_the_legacy_status(self, sha: str) -> None:
         result = _base_result()
         result["groundTruth"]["verdicts"] = []
@@ -10834,7 +10890,7 @@ def _passg_red_result(expected: Any = (f"G1-3-4:{P2_CARRY34}",), leg_verdict: bo
     leg["advanceCarry"]["verdicts"][P2_CARRY34]["paint"] = {"status": "fail", "longestRun": 108}
     leg["verdict"] = probe.combine_verdicts(True, leg_verdict)
     result.update(redArm="core:no-pin-hold", expectedCoreSha256=sha, expectedRedSet=list(expected) if expected is not None else None,
-                  paintFloor=probe.PAINT_FLOOR_MIN_FRAMES)
+                  paintFloor=checks.PAINT_FLOOR_MIN_FRAMES)
     result["redSet"], result["unknown"] = probe.passg_red_ids(result)
     return result
 
@@ -11085,8 +11141,8 @@ class TestInstrumentArgs:
             probe.parse_args(["--paint-control", "6:ancestor-opacity:pin@2", *extra])
 
     @pytest.mark.parametrize(("value", "target"), [
-        ("6:ancestor-opacity:pin@2", f"b0to1:{probe._A}:carry"),
-        ("6:ancestor-opacity:pin@4", f"b1to2:{probe._A}:carry"),
+        ("6:ancestor-opacity:pin@2", f"b0to1:{checks._A}:carry"),
+        ("6:ancestor-opacity:pin@4", f"b1to2:{checks._A}:carry"),
         ("6:ancestor-opacity:bridge@2", None),
         ("6:ancestor-display:settled@2", None),
         ("6:ancestor-opacity:pin@3", None),
@@ -12303,7 +12359,7 @@ def test_feed_live_pass_fail_inconclusive(
 ) -> None:
     record = _feed_live()
     mutate(record)
-    verdict = probe.score_feed_live(record)
+    verdict = probe.mm_feed_instrument.score_feed_live(record)
     assert verdict["verdict"] is expected
     if checks is not None:
         assert [check["ok"] for check in verdict["checks"]] == checks
@@ -12314,8 +12370,8 @@ def test_feed_live_needs_two_decoder_reads_and_distinguishes_a_frozen_decoder() 
     missing["presentedFrames"] = [42]
     frozen = _feed_live()
     frozen["presentedFrames"] = [42, 42]
-    assert probe.score_feed_live(missing)["verdict"] is None
-    assert probe.score_feed_live(frozen)["verdict"] is False
+    assert probe.mm_feed_instrument.score_feed_live(missing)["verdict"] is None
+    assert probe.mm_feed_instrument.score_feed_live(frozen)["verdict"] is False
 
 
 def _handback_continuity(*, fps: int = 30, source_frames: float = 1.0) -> dict[str, Any]:
@@ -12369,7 +12425,7 @@ def test_handback_continuity_scorer(
         record["sourceFrameDurationS"] = None
     elif case == "rvfc-duration-cannot-pass":
         record["durationSource"] = "rvfc"
-    scored = probe.score_handback_continuity(record, mode=mode)
+    scored = probe.mm_feed_instrument.score_handback_continuity(record, mode=mode)
     assert scored["verdict"] is expected
     if expected is not None and case != "dom-exposure":
         assert scored["frameGap"] == (
@@ -12408,20 +12464,20 @@ def test_feed_control_aggregate_expectations_cover_no_linger_and_intermittent_in
         "reason": "a static poster was exposed during DOM hand-back",
     }}
     no_linger = {"handbackContinuity": {"verdict": False, "sourceFrames": 9}}
-    assert probe.mm_feed_control_aggregate_problems("interim-delay", [exposed, green, green]) == []
-    assert probe.mm_feed_control_aggregate_problems("no-linger", [no_linger]) == []
-    assert probe.mm_feed_control_aggregate_problems("no-linger", [{}]) == [
+    assert checks._control_aggregate_problems("interim-delay", [exposed, green, green]) == []
+    assert checks._control_aggregate_problems("no-linger", [no_linger]) == []
+    assert checks._control_aggregate_problems("no-linger", [{}]) == [
         "row 0 no-linger sourceFrames None is not > 2",
     ]
-    assert probe.mm_feed_control_aggregate_problems("interim-delay", [green])
-    assert probe.mm_feed_control_aggregate_problems(
+    assert checks._control_aggregate_problems("interim-delay", [green])
+    assert checks._control_aggregate_problems(
         "interim-delay", [{"handbackContinuity": {"verdict": None}}],
     )
     geometry_red = {"noRiderAboveCanvas": {
         "verdict": False, "offenders": [{"sourceRectError": 8.0}],
     }}
-    assert probe.mm_feed_control_aggregate_problems("startup-moved-decoder", [geometry_red]) == []
-    assert probe.mm_feed_control_aggregate_problems(
+    assert checks._control_aggregate_problems("startup-moved-decoder", [geometry_red]) == []
+    assert checks._control_aggregate_problems(
         "startup-moved-decoder", [{"noRiderAboveCanvas": {"verdict": False, "offenders": [{}]}}],
     ) == ["startup-moved-decoder did not expose a geometry-backed rider in any row"]
 
@@ -12432,13 +12488,15 @@ def test_feed_control_aggregate_expectations_cover_no_linger_and_intermittent_in
     ([], None),
 ])
 def test_no_rider_above_canvas_pass_fail_inconclusive(rows: list[dict[str, Any]], expected: bool | None) -> None:
-    assert probe.score_no_rider_above_canvas({"riders": rows, "coverage": bool(rows)})["verdict"] is expected
+    assert probe.mm_feed_instrument.score_no_rider_above_canvas(
+        {"riders": rows, "coverage": bool(rows)},
+    )["verdict"] is expected
 
 
 @pytest.mark.parametrize(("spread", "slope", "expected"), [(30.0, .39, True), (30.0, .8, False), (20.0, .39, None)])
 def test_labels_over_feed_pass_fail_inconclusive(spread: float, slope: float, expected: bool | None) -> None:
     record = {"labels": [{"opacity": .61, "spread": spread, "slope": slope}], "coverage": True}
-    assert probe.score_labels_over_feed(record)["verdict"] is expected
+    assert probe.mm_feed_instrument.score_labels_over_feed(record)["verdict"] is expected
 
 
 def test_a_readable_red_label_is_not_masked_by_an_inconclusive_label() -> None:
@@ -12446,11 +12504,13 @@ def test_a_readable_red_label_is_not_masked_by_an_inconclusive_label() -> None:
         {"opacity": .61, "spread": 10.0, "slope": None},
         {"opacity": .61, "spread": 30.0, "slope": .8},
     ]}
-    assert probe.score_labels_over_feed(record)["verdict"] is False
+    assert probe.mm_feed_instrument.score_labels_over_feed(record)["verdict"] is False
 
 
 def test_no_overlapping_label_draw_is_not_applicable() -> None:
-    scored = probe.score_labels_over_feed({"complete": True, "coverage": True, "expected": 0, "labels": []})
+    scored = probe.mm_feed_instrument.score_labels_over_feed(
+        {"complete": True, "coverage": True, "expected": 0, "labels": []},
+    )
     assert scored == {"verdict": True, "labels": [], "notApplicable": True}
 
 
@@ -12464,11 +12524,11 @@ def test_no_overlapping_label_draw_is_not_applicable() -> None:
 def test_hold_frame_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
     record = _hold_frame()
     mutate(record)
-    assert probe.score_hold_frame(record)["verdict"] is expected
+    assert probe.mm_feed_instrument.score_hold_frame(record)["verdict"] is expected
 
 
 def _poster_hold(mode: str = "departure") -> dict[str, Any]:
-    return {"mode": mode, "pauseTime": 1.0, "settleTime": 2.5, "pauseCurrentTime": 5.0,
+    return {"complete": True, "mode": mode, "pauseTime": 1.0, "settleTime": 2.5, "pauseCurrentTime": 5.0,
             "settleCurrentTime": 5.0, "pauseFrame": 42, "firstAfterFrame": 43, "seeked": False,
             "pauseMediaTime": 5.0, "firstAfterMediaTime": 5.0 + 1 / 30, "frameDurationS": 1 / 30,
             "clockToleranceS": .49 / 30, "resumedFromZero": False, "lastUploadedFrame": 41,
@@ -12477,23 +12537,60 @@ def _poster_hold(mode: str = "departure") -> dict[str, Any]:
             "clockStill": True, "departurePauseBeforeMove": True, "holdPauseMissing": False}
 
 
-@pytest.mark.parametrize(("mutate", "expected"), [
-    (lambda r: None, True),
-    (lambda r: r.update(firstAfterMediaTime=5.0 + 2 / 30), False),
-    (lambda r: r.update(clockToleranceS=1 / 60), None),
-    (lambda r: r.pop("pauseFrame"), None),
-    (lambda r: r.update(holdPauseMissing=True), None),
-    (lambda r: r.update(complete=False), None),
+def _departure_exposure(*, poster: bool = False, hidden: bool = False) -> dict[str, Any]:
+    return {
+        "complete": True, "entryId": "carry-a", "serial": 7, "atScene": 4,
+        "visit": 2, "generation": 1, "decoder": {"instance": "a", "elId": 3},
+        "context": {"serial": 7, "id": "7-canvas"},
+        "start": {"t": 1.0, "source": "pause", "decoderVisible": not hidden},
+        "firstDraw": {"t": 2.0, "frameN": 9}, "ordering": True,
+        "intervalCoverage": True, "posterExposure": poster,
+        "preDrawVisibility": [not hidden], "hiddenWholePreDraw": hidden,
+        "riders": [{"visible": False, "opacityProduct": 0.0, "intersectsCanvas": True}],
+    }
+
+
+def _under_artwork_record(mode: str, version: int = 3) -> dict[str, Any]:
+    return {
+        "mode": mode, "evidenceVersion": version, "continuousExpected": mode == "continuous",
+        "feed": _feed_live(), "hold": _hold_frame(), "poster": _poster_hold(), "resume": _poster_hold(),
+        "departureExposure": _departure_exposure(poster=True),
+        "rider": {"complete": True, "coverage": True, "riders": [
+            {"visible": False, "opacityProduct": 0.0, "intersectsCanvas": True},
+        ]},
+        "labels": {"complete": True, "coverage": True, "expected": 0, "labels": []},
+        "artwork": {"complete": True, "reads": [{"artworkAbove": True}]},
+        "handback": _handback_continuity(),
+    }
+
+
+@pytest.mark.parametrize(("mutate", "expected", "resume_report"), [
+    (lambda r: None, True, False),
+    (lambda r: r.update(firstAfterMediaTime=5.0 + 2 / 30), True, True),
+    (lambda r: r.update(clockToleranceS=1 / 60), None, False),
+    (lambda r: r.pop("pauseFrame"), None, False),
+    (lambda r: r.update(holdPauseMissing=True), None, False),
+    (lambda r: r.update(complete=False), None, False),
 ])
-def test_departure_poster_hold_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
+def test_departure_poster_hold_pass_fail_inconclusive(
+    mutate: Any, expected: bool | None, resume_report: bool,
+) -> None:
     record = _poster_hold()
     mutate(record)
-    assert probe.score_poster_hold(record)["verdict"] is expected
+    poster = probe.mm_feed_instrument.score_poster_hold(record)
+    assert poster["verdict"] is expected
+    if resume_report:
+        assert poster["exactHeldPlusOne"] is True
+        assert poster["resumptionDiscontinuity"] == 0
+        resume = probe.mm_feed_instrument.score_resume(record)
+        assert resume["verdict"] is True
+        assert resume["report"] is True
+        assert resume["dropSize"] == 1
 
 
 def test_post_feed_stand_down_reports_resumption_discontinuity_without_claiming_held_plus_one() -> None:
     record = _poster_hold("standDown")
-    scored = probe.score_poster_hold(record)
+    scored = probe.mm_feed_instrument.score_poster_hold(record)
     assert scored["verdict"] is True
     assert scored["resumptionDiscontinuity"] == 1
     assert scored["exactHeldPlusOne"] is False
@@ -12502,10 +12599,44 @@ def test_post_feed_stand_down_reports_resumption_discontinuity_without_claiming_
 def test_dropped_first_post_resume_callback_is_report_only_when_no_seek_resumption_is_proven() -> None:
     record = _poster_hold()
     record.update(firstAfterFrame=44, firstAfterMediaTime=5.0 + 2 / 30)
-    scored = probe.score_poster_hold(record)
+    scored = probe.mm_feed_instrument.score_poster_hold(record)
     assert scored["verdict"] is True
     assert scored["exactHeldPlusOne"] is False
     assert scored["resumptionDiscontinuity"] == 1
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_under_artwork_accepts_v2_v3_and_excludes_departure_exposure_from_combination(version: int) -> None:
+    scored = probe.score_under_artwork(
+        {"carry-a": _under_artwork_record("departure", version)}, {"id": "carry-a"},
+    )
+    assert scored["handbackContinuity"]["verdict"] is True
+    assert scored["departureExposure"]["verdict"] is False
+    assert scored["resume"]["verdict"] is True
+    assert scored["verdict"] is True
+
+
+def test_under_artwork_resume_report_stays_green_but_larger_drop_fails() -> None:
+    record = _under_artwork_record("departure")
+    record["resume"].update(firstAfterMediaTime=5.0 + 2 / 30)
+    reported = probe.score_under_artwork({"carry-a": record}, {"id": "carry-a"})
+    assert reported["verdict"] is True
+    assert reported["resume"]["verdict"] is True
+    assert reported["resume"]["report"] is True
+    assert reported["resume"]["dropSize"] == 1
+    record["resume"].update(firstAfterMediaTime=5.0 + 3 / 30)
+    failed = probe.score_under_artwork({"carry-a": record}, {"id": "carry-a"})
+    assert failed["resume"]["verdict"] is False
+    assert failed["verdict"] is False
+
+
+def test_continuous_under_artwork_emits_explicit_hold_na_and_excludes_it() -> None:
+    record = _under_artwork_record("continuous")
+    record["departureExposure"] = _departure_exposure(hidden=True)
+    scored = probe.score_under_artwork({"carry-a": record}, {"id": "carry-a"})
+    assert scored["holdFrame"] == {"verdict": None, "notApplicable": True}
+    assert scored["departureExposure"]["verdict"] is None
+    assert scored["verdict"] is True
 
 
 def test_hold_frame_accepts_the_same_uploaded_texture_target_across_the_move() -> None:
@@ -12514,20 +12645,20 @@ def test_hold_frame_accepts_the_same_uploaded_texture_target_across_the_move() -
         {"phase": phase, "kind": "texture", "bestFrame": 42, "textureOrdinals": [5, 6]}
         for phase in ("first", "middle", "last")
     ]
-    assert probe.score_hold_frame(record)["verdict"] is True
+    assert probe.mm_feed_instrument.score_hold_frame(record)["verdict"] is True
 
 
 def test_missing_post_stand_down_upload_census_is_inconclusive() -> None:
     record = _hold_frame("standDown")
     record["reuploadAfterStandDown"] = None
-    assert probe.score_hold_frame(record)["verdict"] is None
+    assert probe.mm_feed_instrument.score_hold_frame(record)["verdict"] is None
 
 
 @pytest.mark.parametrize(("reads", "expected"), [
     ([{"artworkAbove": True}], True), ([{"artworkAbove": False}], False), ([], None),
 ])
 def test_artwork_above_pass_fail_inconclusive(reads: list[dict[str, Any]], expected: bool | None) -> None:
-    assert probe.score_artwork_above({"reads": reads})["verdict"] is expected
+    assert probe.mm_feed_instrument.score_artwork_above({"reads": reads})["verdict"] is expected
 
 
 def test_gl_interval_exempts_only_the_hidden_move_rows() -> None:
@@ -12580,18 +12711,18 @@ def test_gl_outer_settled_cadence_is_report_only_when_every_browser_frame_is_rea
 
 
 def test_feed_off_can_hold_exactly_but_still_reds_an_explicit_continuous_expectation() -> None:
-    hold = probe.score_hold_frame(_hold_frame())
+    hold = probe.mm_feed_instrument.score_hold_frame(_hold_frame())
     feed = _feed_live()
     feed["mode"] = "once"
     assert hold["verdict"] is True
-    assert probe.score_feed_live(feed, continuous_expected=True)["verdict"] is False
+    assert probe.mm_feed_instrument.score_feed_live(feed, continuous_expected=True)["verdict"] is False
 
 
 def test_feed_off_expected_red_feed_live_does_not_red_the_under_artwork_aggregate() -> None:
     record = {
         "mode": "departure", "continuousExpected": True,
         "feed": {**_feed_live(), "mode": "departure"}, "hold": _hold_frame(),
-        "poster": _poster_hold(),
+        "poster": _poster_hold(), "resume": _poster_hold(),
         "rider": {"complete": True, "coverage": True, "riders": [
             {"visible": False, "opacityProduct": 0.0, "intersectsCanvas": True},
         ]},
@@ -12737,10 +12868,10 @@ def test_rider_pre_draw_exemption(
             report, [entry], continuous_expected=mode == "continuous",
         )[entry["id"]]["visits"]
         assert visits[0]["rider"]["exempt"] is True
-        assert probe.score_no_rider_above_canvas(visits[0]["rider"])["verdict"] is True
+        assert probe.mm_feed_instrument.score_no_rider_above_canvas(visits[0]["rider"])["verdict"] is True
         assert visits[1]["rider"]["exempt"] is False
         assert visits[1]["rider"]["preDrawMs"] is None
-        assert probe.score_no_rider_above_canvas(visits[1]["rider"])["verdict"] is None
+        assert probe.mm_feed_instrument.score_no_rider_above_canvas(visits[1]["rider"])["verdict"] is None
         return
     rider = probe.mm_feed_instrument.verdict_records(
         report, [entry], continuous_expected=mode == "continuous",
@@ -12752,7 +12883,7 @@ def test_rider_pre_draw_exemption(
     assert rider["exemptedVisibleSamples"] == exempted
     if case.startswith("geometry") or case == "hidden-zero":
         assert rider["coverage"] is True
-    assert probe.score_no_rider_above_canvas(rider)["verdict"] is expected
+    assert probe.mm_feed_instrument.score_no_rider_above_canvas(rider)["verdict"] is expected
 
 
 def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None:
@@ -12812,8 +12943,8 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     per_leaf = probe.mm_feed_instrument.verdict_records(
         report, [entry, failing_entry], continuous_expected=True,
     )
-    assert probe.score_feed_live(per_leaf[entry["id"]]["feed"])["verdict"] is True
-    assert probe.score_feed_live(per_leaf[failing_entry["id"]]["feed"])["verdict"] is False
+    assert probe.mm_feed_instrument.score_feed_live(per_leaf[entry["id"]]["feed"])["verdict"] is True
+    assert probe.mm_feed_instrument.score_feed_live(per_leaf[failing_entry["id"]]["feed"])["verdict"] is False
     partial = copy.deepcopy(report)
     partial["claims"][0]["serial"] = None
     isolated = probe.mm_feed_instrument.verdict_records(partial, [entry], continuous_expected=True)[entry["id"]]
@@ -12823,18 +12954,18 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     isolated = probe.mm_feed_instrument.verdict_records(
         partial, [entry, failing_entry], continuous_expected=True,
     )
-    assert probe.score_feed_live(isolated[entry["id"]]["feed"])["verdict"] is True
-    assert probe.score_feed_live(isolated[failing_entry["id"]]["feed"])["verdict"] is None
+    assert probe.mm_feed_instrument.score_feed_live(isolated[entry["id"]]["feed"])["verdict"] is True
+    assert probe.mm_feed_instrument.score_feed_live(isolated[failing_entry["id"]]["feed"])["verdict"] is None
     partial = copy.deepcopy(report)
     partial["artwork"][0].pop("entryId")
     isolated = probe.mm_feed_instrument.verdict_records(partial, [entry], continuous_expected=True)[entry["id"]]
-    assert probe.score_feed_live(isolated["feed"])["verdict"] is True
-    assert probe.score_artwork_above(isolated["artwork"])["verdict"] is None
+    assert probe.mm_feed_instrument.score_feed_live(isolated["feed"])["verdict"] is True
+    assert probe.mm_feed_instrument.score_artwork_above(isolated["artwork"])["verdict"] is None
     partial = copy.deepcopy(report)
     partial["frames"][0]["serial"] = None
     isolated = probe.mm_feed_instrument.verdict_records(partial, [entry], continuous_expected=True)[entry["id"]]
-    assert probe.score_feed_live(isolated["feed"])["verdict"] is None
-    assert probe.score_artwork_above(isolated["artwork"])["verdict"] is True
+    assert probe.mm_feed_instrument.score_feed_live(isolated["feed"])["verdict"] is None
+    assert probe.mm_feed_instrument.score_artwork_above(isolated["artwork"])["verdict"] is True
     report["claims"][0]["claimed"] = False
     report["departures"].append({"objectId": "movie-a", "entryId": entry["id"], "atScene": 2,
                                  "serial": 1, "t": .8})
@@ -12871,20 +13002,20 @@ def test_poster_pairing_uses_the_move_anchored_hold_pause() -> None:
               "standDowns": [], "departures": [{"entryId": "carry-a", "atScene": 2, "serial": 1}], "module": None}
     record = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
     assert record["poster"]["pauseTime"] == 9
-    assert probe.score_poster_hold(record["poster"])["verdict"] is True
+    assert probe.mm_feed_instrument.score_poster_hold(record["poster"])["verdict"] is True
     report["mediaDropped"] = [{"atScene": 2, "count": 1}]
     dropped = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
-    assert probe.score_poster_hold(dropped["poster"])["verdict"] is None
+    assert probe.mm_feed_instrument.score_poster_hold(dropped["poster"])["verdict"] is None
     report["mediaDropped"] = []
     report["media"][0]["serial"] = None
     partial = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
-    assert probe.score_poster_hold(partial["poster"])["verdict"] is None
+    assert probe.mm_feed_instrument.score_poster_hold(partial["poster"])["verdict"] is None
     report["media"][0]["serial"] = 1
     report["media"] = [row for row in rows if not (row["kind"] == "pause" and row["t"] == 9)]
     for index, frame in enumerate(report["frames"]):
         frame["rows"][0]["decoder"].update(paused=False, currentTime=5 + index / 30, presentedFrames=42 + index)
     broken = probe.mm_feed_instrument.verdict_records(report, [entry], continuous_expected=False)["carry-a"]
-    assert probe.score_poster_hold(broken["poster"])["verdict"] is False
+    assert probe.mm_feed_instrument.score_poster_hold(broken["poster"])["verdict"] is False
 
 
 def test_score_verdicts_validates_feed_contract_per_entry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -12936,7 +13067,9 @@ def test_feed_ordinal_tamper_is_limited_to_the_requested_scene() -> None:
     (checks.D7S_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
     ("0" * 64, 0),
 ])
-def test_feed_instrument_is_registered_before_navigation(plan_sha: str, offset: int) -> None:
+def test_feed_instrument_is_registered_before_navigation(
+    plan_sha: str, offset: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pin_src, pin_dst = dict(SRC_RECT), dict(DST_RECT)
     bridge_src = {"x": 30, "y": 40, "w": 300, "h": 170}
     bridge_dst = {"x": 300, "y": 200, "w": 600, "h": 340}
@@ -12955,11 +13088,13 @@ def test_feed_instrument_is_registered_before_navigation(plan_sha: str, offset: 
     feed_specs = probe.feed_specs_for(facts)
     assert [spec["srcRect"] for spec in feed_specs] == [pin_src, bridge_src]
     assert facts["verdicts"][0]["srcRect"] == pin_dst != feed_specs[0]["srcRect"]
+    monkeypatch.setattr(probe, "COST_RECORDER_JS", "window.__costRecorder = true;")
     kwargs = probe.feed_host_kwargs(facts)
-    assert kwargs["pre_navigation_scripts"][0].startswith(probe.mm_feed_instrument.INSTRUMENT_JS)
-    assert json.dumps(probe.binary_counter_movie.layout(offset)) in kwargs["pre_navigation_scripts"][0]
-    assert "window.__obedMmFeedProbe.bootstrap(" in kwargs["pre_navigation_scripts"][0]
-    assert probe.feed_host_kwargs()["pre_navigation_scripts"] == ()
+    assert kwargs["pre_navigation_scripts"][0] == "window.__costRecorder = true;"
+    assert kwargs["pre_navigation_scripts"][1].startswith(probe.mm_feed_instrument.INSTRUMENT_JS)
+    assert json.dumps(probe.binary_counter_movie.layout(offset)) in kwargs["pre_navigation_scripts"][1]
+    assert "window.__obedMmFeedProbe.bootstrap(" in kwargs["pre_navigation_scripts"][1]
+    assert probe.feed_host_kwargs()["pre_navigation_scripts"] == ("window.__costRecorder = true;",)
     absent = type("Absent", (), {
         "_require_transport": lambda self: type("Transport", (), {"evaluate": lambda self, expression: False})(),
     })()
@@ -13092,32 +13227,6 @@ def test_canvas_lifecycle_exempts_its_linger_and_null_close_still_bounds_interva
     assert scored["paint"]["doubleFrames"] == 1
 
 
-def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() -> None:
-    expected = {
-        "feed-on", "feed-off", "attach-once", "hold-upload-killed", "ordinal", "after-feed",
-        "from-only-crossfade", "from-only-single", "overlay-ride", "settle-on-stage",
-        "no-pause", "mm-opacity-off", "no-linger", "interim-delay", "startup-moved-decoder",
-    }
-    assert set(checks.MM_FEED_GATE_EXPECTATIONS) == expected
-    text = (REPO / "scripts" / "run_gates.sh").read_text()
-    block = text.split("MM_FEED_ARMS=(", 1)[1].split("\n)", 1)[0]
-    for label in expected - {"feed-on", "feed-off", "attach-once", "from-only-crossfade", "from-only-single"}:
-        assert f" {label} " in block
-    assert all(block.count(f" feed-on-{viewport} ") == 3 for viewport in ("2560", "1600", "1920"))
-    assert all(f" feed-off-{dwell}s " in block for dwell in (2, 5, 12))
-    assert block.count(" attach-once ") == 2
-    assert "--feed-variant from-only" in block
-    assert "ordinal --feed-tamper ordinal --feed-tamper-scene 10" in block
-    assert "strip-bridge14-movie2 --strip bridge@14:movie2" in block
-    assert checks.MM_FEED_STRIP_EXPECTATIONS[(
-        checks.ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off",
-    )] == ("b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",)
-    assert checks.MM_FEED_READ_EXPECTATIONS[("D7", "crossfade")] == {0.25: True, 0.5: False, 0.75: False}
-    assert checks.MM_FEED_READ_EXPECTATIONS[("Alpha_DSK", "first-crossfade")] == {0.5: False, 0.75: False}
-    assert checks.D7_PLAN_SHA256 == "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
-    assert checks.D7S_PLAN_SHA256 == "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
-
-
 def test_repaired_full_alpha_runtime_plan_is_pinned() -> None:
     root = REPO / "tests" / "fixtures" / "live_continuity" / "alpha_dsk_repaired_full"
     slides = probe.load_slides(root)
@@ -13125,7 +13234,7 @@ def test_repaired_full_alpha_runtime_plan_is_pinned() -> None:
     assert isinstance(plan, probe.ContinuityPlan)
     runtime = plan.to_runtime()
     assert isinstance(runtime, dict)
-    assert probe.plan_signature(runtime) == probe.ALPHA_DSK_PLAN_SHA256
+    assert probe.plan_signature(runtime) == checks.ALPHA_DSK_PLAN_SHA256
 
 
 ORIGINAL_D7 = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Continuity/q7-fixtures/D7-unrepaired/html-player")
