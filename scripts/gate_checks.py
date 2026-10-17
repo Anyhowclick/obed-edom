@@ -216,6 +216,13 @@ class GateResult:
     candidate: Verdict
 
 
+@dataclass(frozen=True)
+class RoundBuildResult:
+    ok: bool
+    chrome_build: str | None
+    lines: tuple[str, ...]
+
+
 _RESULTS = {
     Verdict.MATCH: (0, "pass"),
     Verdict.RECORDED: (3, "recorded"),
@@ -1051,7 +1058,85 @@ def _load(path: str) -> dict[str, Any]:
     return record
 
 
+def _holder_chrome_builds(validity: Mapping[str, Any]) -> list[str | None]:
+    holders = validity.get("holders")
+    if not isinstance(holders, Mapping):
+        return []
+    builds: set[str | None] = set()
+    for holder in holders.values():
+        measured = holder.get("measured") if isinstance(holder, Mapping) else None
+        environment = measured.get("environment") if isinstance(measured, Mapping) else None
+        build = environment.get("chromeBuild") if isinstance(environment, Mapping) else None
+        if build is None or isinstance(build, str):
+            builds.add(build)
+    return sorted(builds, key=lambda value: (value is not None, value or ""))
+
+
+def round_chrome_build(
+    records: Sequence[tuple[str, Mapping[str, Any]]], *, validity_na: frozenset[str] = frozenset()
+) -> RoundBuildResult:
+    lines: list[str] = []
+    builds: list[tuple[str, str]] = []
+    invalid: list[str] = []
+    for label, record in records:
+        if "_loadError" in record:
+            if label in validity_na:
+                lines.append(f"[ROUND BUILD {label}] P2 report unreadable (validity N/A)")
+            else:
+                invalid.append(label)
+                lines.append(f"[ROUND BUILD {label}] artifact unreadable: {record['_loadError']}")
+            continue
+        validity = record.get("runValidity")
+        if not isinstance(validity, Mapping):
+            if label in validity_na:
+                lines.append(f"[ROUND BUILD {label}] build not recorded (validity N/A)")
+            else:
+                invalid.append(label)
+                lines.append(f"[ROUND BUILD {label}] runValidity absent")
+            continue
+        measured = validity.get("measured")
+        environment = measured.get("environment") if isinstance(measured, Mapping) else None
+        build = environment.get("chromeBuild") if isinstance(environment, Mapping) else None
+        if not isinstance(build, str) or not build:
+            invalid.append(label)
+            holder_suffix = ""
+            if build is None:
+                holder_builds = _holder_chrome_builds(validity)
+                holder_suffix = f"; holders.*.measured.environment.chromeBuild={holder_builds!r}"
+            lines.append(
+                f"[ROUND BUILD {label}] MISSING: runValidity.measured.environment.chromeBuild{holder_suffix}"
+            )
+            continue
+        builds.append((label, build))
+        lines.append(f"[ROUND BUILD {label}] chromeBuild={build}")
+    distinct = sorted({build for _, build in builds})
+    if invalid:
+        lines.append(f"ROUND BUILD INVALID: unusable build evidence in {len(invalid)} artifact(s)")
+    if len(distinct) > 1:
+        detail = ", ".join(f"{build} ({sum(value == build for _, value in builds)})" for build in distinct)
+        lines.append(f"ROUND BUILD INVALID: mixed exact chromeBuild values: {detail}")
+    if not distinct:
+        lines.append("ROUND BUILD INVALID: no artifact recorded a Chrome build")
+    build = distinct[0] if len(distinct) == 1 else None
+    ok = not invalid and len(distinct) == 1
+    if ok:
+        lines.append(f"ROUND BUILD MATCH: chromeBuild={build if build is not None else 'N/A'}")
+    return RoundBuildResult(ok=ok, chrome_build=build, lines=tuple(lines))
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "check_round_build":
+        parser = argparse.ArgumentParser()
+        parser.add_argument("gate_kind", choices=("check_round_build",))
+        parser.add_argument("--validity-na", action="append", default=[])
+        parser.add_argument("paths", nargs="*")
+        args = parser.parse_args()
+        paths = [*args.paths, *args.validity_na]
+        result = round_chrome_build(
+            [(path, _load(path)) for path in paths], validity_na=frozenset(args.validity_na)
+        )
+        print("\n".join(result.lines))
+        raise SystemExit(0 if result.ok else 1)
     parser = argparse.ArgumentParser()
     parser.add_argument("gate_kind", choices=(
         "check_mm_feed", "expect", "check_host_red", "check_passg", "check_passg_red", "check_paint_control", "check_cc",

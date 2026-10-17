@@ -229,9 +229,11 @@ PYEOF
 }
 # Every check prints its evidence and returns 0 (MATCH), 3 (RECORDED: integrity held, no set registered) or anything
 # else (FAILED). FAIL / PENDING count them; a failing arm never stops the later arms.
-FAIL=0; PENDING=0
+FAIL=0; PENDING=0; ROUND_ARTIFACTS=(); ROUND_ARTIFACTS_NA=()
 fail(){ FAIL=$((FAIL+1)); echo "    GATE FAILED: $1"; }
 tally(){ case $1 in 0) ;; 3) PENDING=$((PENDING+1)); echo "    PENDING REGISTRATION: $2";; *) fail "$2";; esac; }
+round_artifact(){ ROUND_ARTIFACTS+=("$1"); }
+round_artifact_na(){ ROUND_ARTIFACTS_NA+=("$1"); }
 # Pre-registered expectation per P2 arm: the EXACT complete red set and the EXACT complete inconclusive set
 # (space-separated ids, "" = none). MATCH iff observed red == the red set, observed inconclusive == the inconclusive
 # set, all 15 findings reported, source unchanged, `success` True exactly when both sets are empty, the process exit
@@ -429,7 +431,7 @@ while LAUNCH_LOAD=$(load1) && (( LAUNCH_LOAD > GATE_MAX_START_LOAD )); do
 done
 [[ -n $LAUNCH_LOAD ]] || { echo "cannot read the 1-minute load average (sysctl -n vm.loadavg); no run launched" >&2; exit 2; }
 echo "load average (1 min) at launch $LAUNCH_LOAD"
-check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" "${HOST_SKIP[$1]}" || fail "HOST $1 status"
+check_host(){ round_artifact $O/host-$1.json; rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" "${HOST_SKIP[$1]}" || fail "HOST $1 status"
   paint_report $O/host-$1.json "HOST $1"; }
 # Host red arms (gate_checks.py pre-registered sets, keyed by plan sha, arm and GL mode). The artifact contract is
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
@@ -441,7 +443,7 @@ check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $
 run_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); fix=$F/html-player; idx=$F/html-unmodified/index.html
   if [[ -n ${HOST_DECK:-} ]]; then fix=$Q/$HOST_DECK/html-unmodified; idx=$fix/index.html; fi
   queue $O/host-red$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --viewport 1920x1080 --artifact $O/host-red$n.json "$@"; }
-check_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); rc=$(status_of $O/host-red$n)
+check_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); round_artifact $O/host-red$n.json; rc=$(status_of $O/host-red$n)
   [[ $rc == <-> ]] || { echo "[HOST ${HOST_DECK:+$HOST_DECK }$*] no fresh status ($rc) -> MISMATCH"; return 1; }
   $PY scripts/gate_checks.py check_host_red "$O/host-red$n.json" "$rc" AUTO "headless Chrome" "$@"
   local r=$?; paint_report "$O/host-red$n.json" "HOST ${HOST_DECK:+$HOST_DECK }$*"; return $r; }
@@ -450,7 +452,7 @@ check_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); rc=$(status_of $O/ho
 run_passg(){ fix=$F/html-player; idx=$F/html-unmodified/index.html
   if [[ $1 != P2 ]]; then fix=$Q/$1/html-unmodified; idx=$fix/index.html; fi
   queue $O/passG-$1 $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --pass G --artifact $O/passG-$1.json; }
-check_passg(){ $PY scripts/gate_checks.py check_passg "$O/passG-$1.json" "$(status_of $O/passG-$1)" "$1" "headless Chrome" || fail "PASSG $1"
+check_passg(){ round_artifact $O/passG-$1.json; $PY scripts/gate_checks.py check_passg "$O/passG-$1.json" "$(status_of $O/passG-$1)" "$1" "headless Chrome" || fail "PASSG $1"
   paint_report "$O/passG-$1.json" "PASSG $1"; }
 # Painted-instrument report (S2 instrument plan §5), report only: per scored carry its unpainted/partial/double/substitute
 # frames and longest run, each sampler's schema and selfCheck, and every paint census entry, which is a finding whatever
@@ -494,7 +496,7 @@ PYEOF
 # artifact, a missing or stale status: FAILED, never pending.
 run_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' '); fix=$Q/$1/html-unmodified
   queue $O/passG-red$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html --pass G --artifact $O/passG-red$n.json "${@[2,-1]}"; }
-check_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' ')
+check_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' '); round_artifact $O/passG-red$n.json
   $PY scripts/gate_checks.py check_passg_red "$O/passG-red$n.json" "$(status_of $O/passG-red$n)" AUTO "headless Chrome" "$1" "${@[2,-1]}" || fail "PASSG-RED $*"
   paint_report "$O/passG-red$n.json" "PASSG-RED $*"; }
 # A paint control run matches only with this round's exit 0 and a paint-control artifact whose control is the arm's,
@@ -507,7 +509,7 @@ check_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' ')
 pc_name(){ print -r -- "$1-${2//:/_}"; }
 run_paint_control(){ n=$(pc_name $1 $2); fix=$Q/$1/html-unmodified
   queue $O/paint-control$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html --viewport 1920x1080 --paint-control $2 --artifact $O/paint-control$n.json; }
-check_paint_control(){ n=$(pc_name $1 $2); $PY scripts/gate_checks.py check_paint_control "$O/paint-control$n.json" "$(status_of $O/paint-control$n)" "$2" "headless Chrome" "$1" || fail "PAINT-CONTROL $1 $2"; }
+check_paint_control(){ n=$(pc_name $1 $2); round_artifact $O/paint-control$n.json; $PY scripts/gate_checks.py check_paint_control "$O/paint-control$n.json" "$(status_of $O/paint-control$n)" "$2" "headless Chrome" "$1" || fail "PAINT-CONTROL $1 $2"; }
 # A carry-cover run matches only with this round's exit (0 for pass, 1 for fail), a carry-cover artifact whose status is
 # the expected one, whose fixture is its deck's, whose control and core variant are the ones its arguments imply, whose
 # installed continuity core sha is that variant's (else today's), and, but on the null arm, whose bridges are non-empty
@@ -517,7 +519,7 @@ cc_fixture(){ fix=$F/html-player; idx=$F/html-unmodified/index.html
   if [[ $1 != P2 ]]; then fix=$Q/$1/html-unmodified; idx=$fix/index.html; fi; }
 run_cc(){ cc_fixture $1; n=${1:#P2}$(echo "${@[3,-1]}" | tr -d ' ')
   queue $O/carry-cover$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --viewport 1920x1080 --carry-cover --artifact $O/carry-cover$n.json "${@[3,-1]}"; }
-check_cc(){ cc_fixture $1; label=${(j: :)@[3,-1]}; n=${1:#P2}${label// /}; label=${${1:#P2}:+$1 }${label:-green}
+check_cc(){ cc_fixture $1; label=${(j: :)@[3,-1]}; n=${1:#P2}${label// /}; round_artifact $O/carry-cover$n.json; label=${${1:#P2}:+$1 }${label:-green}
   $PY scripts/gate_checks.py check_cc "$O/carry-cover$n.json" "$(status_of $O/carry-cover$n)" AUTO "headless Chrome" "$label" "$2" "$fix" AUTO "${@[3,-1]}" || fail "CARRY-COVER $label"; }
 # Texture-feed gates accept the probe's normal 0/1 exit only when every registered per-verdict expectation matches.
 # `from-only` is entry-sensitive: a crossfade (`feed.to` non-null) must red feedLive, while a single-texture entry stays
@@ -527,13 +529,13 @@ run_mm_feed(){ local deck=$1 label=$2; shift 2; mm_feed_fixture $deck
   local n=$deck-$label
   queue $O/mm-feed-$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html \
     --viewport 1920x1080 --artifact $O/mm-feed-$n.json "$@"; }
-check_mm_feed(){ local deck=$1 label=$2; shift 2; local n=$deck-$label rc=$(status_of $O/mm-feed-$deck-$label)
+check_mm_feed(){ local deck=$1 label=$2; shift 2; local n=$deck-$label rc=$(status_of $O/mm-feed-$deck-$label); round_artifact $O/mm-feed-$n.json
   $PY scripts/gate_checks.py check_mm_feed "$O/mm-feed-$n.json" "$rc" "$label" "headless Chrome" "$deck"; tally $? "MM-FEED $deck $label"
   paint_report "$O/mm-feed-$n.json" "MM-FEED $deck $label"; }
 # Each P2 arm runs in its own --out-dir.
 run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')
   queue "$O/p2$n" $PY scripts/p2_recovery_html_adversarial.py --reuse-export --disposable --out-dir "$O/p2$n" "$@"; }
-check_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); rc=$(status_of "$O/p2$n"); echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; if [[ $rc == <-> ]]; then expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; else echo "    no fresh status ($rc) -> MISMATCH"; false; fi; tally $? "P2 $*"; }
+check_p2(){ spec=$1; inc=$2; shift 2; n=$(echo "$*" | tr -d ' '); rc=$(status_of "$O/p2$n"); echo "[P2 $*] exit=$rc $(grep -m1 '^success' "$O/p2$n.log") True=$(grep -cE '^- [A-Za-z0-9]+: \*\*True\*\*' "$O/p2$n.log") False: $(grep -oE '^- [A-Za-z0-9]+: \*\*False\*\*' "$O/p2$n.log" | tr '\n' ' ')"; r=$O/p2$n/report.json; [[ "$*" == *"--gl-replay auto"* ]] && r=$O/p2$n/gl-replay/report.json; cp $r "$O/p2$n.report.json" 2>/dev/null; round_artifact_na $O/p2$n.report.json; if [[ $rc == <-> ]]; then expect "$O/p2$n.log" "$rc" "$spec" "$inc" "$@"; else echo "    no fresh status ($rc) -> MISMATCH"; false; fi; tally $? "P2 $*"; }
 for A in "${P2_ARMS[@]}"; do [[ $A == *--skip-freeze-bracket* ]] || run_p2 "${(@Q)${(z)A}}"; done
 for P in $PASSG_FIXTURES; do run_passg $P; done
 for V in $HOST_VIEWPORTS; do
@@ -556,6 +558,9 @@ for PC in "${PAINT_CONTROL_ARMS[@]}"; do check_paint_control ${=PC}; done
 for A in $CARRY_COVER_ARMS; do check_cc ${=A}; done
 for A in "${MM_FEED_ARMS[@]}"; do check_mm_feed ${=A}; done
 for A in "${P2_ARMS[@]}"; do check_p2 "${(@Q)${(z)A}}"; done
+ROUND_BUILD_ARGS=("${ROUND_ARTIFACTS[@]}")
+for round_na in "${ROUND_ARTIFACTS_NA[@]}"; do ROUND_BUILD_ARGS+=(--validity-na "$round_na"); done
+$PY scripts/gate_checks.py check_round_build "${ROUND_BUILD_ARGS[@]}" || fail "round Chrome build"
 $PY -c "from obed_edom.live_continuity_js import js_sha256; print('runtime sha at end', js_sha256())"
 pgrep -fl obed-live-chrome | cut -c1-80 | head -2
 echo "load average (1 min) at start $START_LOAD, at launch $LAUNCH_LOAD, at end $(load1 || echo unreadable); wall ${SECONDS}s"
