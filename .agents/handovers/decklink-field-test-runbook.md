@@ -96,9 +96,13 @@ the external monitor (only Route C would). Times are rough; total ≈ 2½ h plus
   git status --short     # must be empty (output/ is git-ignored)
   ```
 - [x] **3 · ≈ 2 min.** Peer sanity check (above) — 2026-10-17: 1280 passed.
-- [ ] **3b · ≈ 8 min, headless Chrome.** One full gate round on the field build (none has run on `76452a91`):
+- [x] **3b · ≈ 14 min, headless Chrome.** One full gate round on the field build:
       `$W/scripts/run_gates.sh $W <fresh empty dir outside $W>` → exit 0. 1-min load under 4, never right after a suite,
-      never on the day of the test.
+      never on the day of the test. 2026-10-17: **PASS** (`DONE tier=full failed=0`, 815 s, GATE_JOBS=3). A first round
+      failed only its 8 P2 arms, because `Minimal Alpha_DSK.key` had moved to the main checkout's `output/source-decks/`
+      and this build reads the old path; **keep the temporary symlink** `~/Desktop/Convert wall to 16x9 CGs/Minimal
+      Alpha_DSK.key` → `output/source-decks/Minimal Alpha_DSK.key` until the field test is done (results in the main
+      checkout `output/evidence/decklink-dryrun-2026-10-17/gates2-76452a91/`).
 - [x] **4 · [OBS] · ≈ 5 min.** Managed engine lifecycle (§0a), OBS 32.2.2 in `/Applications`, the owner's own OBS open
       alongside (it must stay untouched): `cd $W && PYTHONPATH=$W/src $PY -m obed_edom dashboard` → Alpha Keynote →
       Output settings: Output = Keyer, Output rate 25 fps, Enable Keyer ticked → **Take output** → **Output engine ·
