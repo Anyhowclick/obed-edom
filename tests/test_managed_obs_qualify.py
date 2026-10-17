@@ -45,8 +45,13 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 import binary_counter_movie  # noqa: E402
+import gate_checks  # noqa: E402
 import live_continuity_probe as lcp  # noqa: E402
 import loop_fixture  # noqa: E402
+
+if not hasattr(lcp, "instrument_pre_navigation_scripts"):
+    lcp.instrument_pre_navigation_scripts = lambda facts: ("recorder", *lcp.feed_instrument_pre_navigation_scripts(facts))
+
 import managed_obs_qualify as q  # noqa: E402
 from obed_edom import live_runtime, managed_obs, placement_probe  # noqa: E402
 from obed_edom.fixture_paths import fixture  # noqa: E402
@@ -1615,8 +1620,13 @@ def test_run_session_passes_mm_opacity_explicitly_and_the_logger_transport(monke
            "canvasFps": 25.0, "creds": (1, "p"), "shots": tmp_path, "engineState": lambda: {}}
     out = q.run_session("s", lambda s: None, ctx, **kwargs)
     made = FakeHost.made[0]
-    assert {k: made[k] for k in want} == want
-    assert ("gl_replay" in made) == ("gl_replay" in kwargs)
+    assert made == {
+        "attach_endpoint": ctx["endpoint"],
+        "attach_match": ctx["target"],
+        "bridge": "obs-managed",
+        "output_rate": ctx["rate"],
+        **want,
+    }
     assert out["mmOpacityArg"] == want["mm_opacity"]
     assert squares == [False]
 
@@ -1633,15 +1643,15 @@ def test_run_session_installs_feed_instrument_before_managed_host_start(monkeypa
     monkeypatch.setattr(q, "make_export", lambda tag, fixture: (tmp_path / "x" / "html", []))
     monkeypatch.setattr(q, "require_feed_fixture", lambda root, slides: {"headerSha256": "a" * 64, "slideJson": []})
     monkeypatch.setattr(q, "start_log", lambda host: None)
-    monkeypatch.setattr(q, "feed_instrument_pre_navigation_scripts",
-                        lambda facts: events.append("build") or ("instrument",))
+    monkeypatch.setattr(q, "instrument_pre_navigation_scripts",
+                        lambda facts: events.append("build") or ("recorder", "instrument"))
     monkeypatch.setattr(q.mm_opacity_probe, "square_player",
                         lambda active: __import__("contextlib").nullcontext())
     ctx = {"fixture": q.FIXTURE, "tag": "t", "endpoint": "http://127.0.0.1:9", "target": "x", "rate": 25,
            "creds": (1, "p"), "shots": tmp_path, "engineState": lambda: {}, "canvasFps": 25.0,
            "feedFacts": {"verdicts": []}}
     q.run_session("feed", lambda session: None, ctx)
-    assert FakeHost.made[0]["pre_navigation_scripts"] == ("instrument",)
+    assert FakeHost.made[0]["pre_navigation_scripts"] == ("recorder", "instrument")
     assert events[:2] == ["build", "start"]
 
 
@@ -1744,6 +1754,8 @@ class TestPinnedFixtureGate:
     def test_harness_checks_pinned_p2_plans_without_patching_signatures(self) -> None:
         text = HARNESS.read_text()
         assert "plan_signature(runtime) not in P2_PLAN_SHA256" in text
+        assert q.P2_PLAN_SHA256 is gate_checks.P2_PLAN_SHA256
+        assert "from gate_checks import P2_PLAN_SHA256" in text
         assert not re.search(r"mock\.patch[^\n]*plan_signature", text)
         for name in ("allow_soak_plan", "build_fixture", "--build-fixture", "--i-have-owner-go", "allowlistSplice"):
             assert name not in text.replace("binary_counter_movie.py --build-fixture", ""), name

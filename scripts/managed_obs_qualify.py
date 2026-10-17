@@ -106,12 +106,12 @@ import dissolve_probe  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
 import mm_opacity_probe  # noqa: E402
 import obs_cadence_decode  # noqa: E402
+from gate_checks import P2_PLAN_SHA256  # noqa: E402
 from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
     HOST_MANAGED_OBS_25,
     HOST_MANAGED_OBS_30,
     PAINTING_VIDEOS_JS,
-    P2_PLAN_SHA256,
     _carried_el_id,
     _el_id,
     _events_readable,
@@ -126,7 +126,7 @@ from live_continuity_probe import (  # noqa: E402
     forced_fail_seed,
     ground_truth_facts,
     ground_truth_plan,
-    feed_instrument_pre_navigation_scripts,
+    instrument_pre_navigation_scripts,
     require_feed_fixture,
     load_slides,
     matches_asset_keys,
@@ -2047,7 +2047,7 @@ def run_session(name: str, script: Callable[[Session], None], ctx: dict[str, Any
     if mm_feed_qualify_once:
         kwargs["mm_feed_qualify_once"] = True
     if ctx.get("feedFacts"):
-        kwargs["pre_navigation_scripts"] = feed_instrument_pre_navigation_scripts(ctx["feedFacts"])
+        kwargs["pre_navigation_scripts"] = instrument_pre_navigation_scripts(ctx["feedFacts"])
     session: Session | None = None
     out: dict[str, Any] = {"session": name, "glReplayArg": gl_replay, "mmOpacityArg": mm_opacity, "mmFeedArg": mm_feed,
                            "mmFeedQualifyOnce": mm_feed_qualify_once, "seed": seed, "square": square}
