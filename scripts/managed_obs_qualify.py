@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 from collections import Counter
 import contextlib
 import hashlib
@@ -82,7 +83,7 @@ from concurrent.futures import Future
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 from unittest import mock
 
 import imageio_ffmpeg
@@ -104,13 +105,12 @@ from obed_edom.obs_websocket import ObsWebsocket  # noqa: E402
 import binary_counter_movie  # noqa: E402
 import dissolve_probe  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
+import live_run_validity  # noqa: E402
 import mm_opacity_probe  # noqa: E402
 import obs_cadence_decode  # noqa: E402
 from gate_checks import P2_PLAN_SHA256  # noqa: E402
 from live_continuity_probe import (  # noqa: E402
     GL_REPLAY_READ_JS,
-    HOST_MANAGED_OBS_25,
-    HOST_MANAGED_OBS_30,
     PAINTING_VIDEOS_JS,
     _carried_el_id,
     _el_id,
@@ -123,6 +123,7 @@ from live_continuity_probe import (  # noqa: E402
     combine_verdicts,
     complete_facts,
     expected_stage_fit,
+    feed_specs_for,
     forced_fail_seed,
     ground_truth_facts,
     ground_truth_plan,
@@ -2266,15 +2267,19 @@ def g2_script(kb: str | None, armed: dict[str, Any]) -> Callable[[Session], None
 def feed_script(continuous_expected: bool) -> Callable[[Session], None]:
     def script(s: Session) -> None:
         facts = s.ctx["feedFacts"]
-        host_kind = {25: HOST_MANAGED_OBS_25, 30: HOST_MANAGED_OBS_30}.get(s.ctx["rate"])
+        host_kind = {
+            25: live_run_validity.HOST_MANAGED_OBS_25,
+            30: live_run_validity.HOST_MANAGED_OBS_30,
+        }.get(s.ctx["rate"])
         if host_kind is None:
             raise ValueError(f"unsupported managed OBS rate {s.ctx['rate']!r}")
-        environment = feed_environment(s, host_kind)
+        environment = static_environment(s.host, host_kind)
         s.host.execute("show")
         capture = capture_arm(
             s.host, facts, continuous_expected=continuous_expected,
             host_kind=host_kind, environment=environment,
         )
+        capture["environment"] = feed_environment(s, host_kind, capture.get("environment"))
         source_settings = s.ctx.get("sourceSettings") or {}
         viewport = {"width": source_settings.get("width"), "height": source_settings.get("height")}
         expected_stage = expected_stage_fit(facts["canvas"], viewport) if all(
@@ -2282,6 +2287,11 @@ def feed_script(continuous_expected: bool) -> Callable[[Session], None]:
             for key in ("width", "height")
         ) else {}
         scored = score_arm(capture, facts, expected_stage)
+        scored["runValidity"] = live_run_validity.run_validity(
+            scored,
+            live_run_validity.qualification(host_kind),
+            gl_intervals=feed_gl_intervals(scored, facts),
+        )
         scored["sampleRows"] = scored.pop("samples")
         s.out.update(scored)
     return script
@@ -2296,10 +2306,11 @@ def _settings_fps(settings: Any) -> float | None:
     return numerator / denominator
 
 
-def feed_environment(s: Session, host_kind: str) -> dict[str, Any]:
+def feed_environment(s: Session, host_kind: str, captured: Mapping[str, Any]) -> dict[str, Any]:
     source_settings = s.ctx.get("sourceSettings") or {}
-    environment = static_environment(s.host, host_kind)
+    environment = copy.deepcopy(dict(captured))
     environment.update({
+        "qualificationIdentity": host_kind,
         "obsVersion": s.ctx.get("obsVersion"),
         "gitHead": s.ctx.get("head"),
         "outputRate": {"configuredHz": s.ctx["rate"], "observedHz": _settings_fps(s.ctx.get("videoSettings"))},
@@ -2310,6 +2321,24 @@ def feed_environment(s: Session, host_kind: str) -> dict[str, Any]:
         },
     })
     return environment
+
+
+def feed_gl_intervals(scored: dict[str, Any], facts: dict[str, Any]) -> list[dict[str, Any]] | None:
+    specs = feed_specs_for(facts)
+    if not specs:
+        return []
+    verdicts = scored.get("feedVerdicts")
+    if not isinstance(verdicts, dict):
+        return None
+    intervals = []
+    for spec in specs:
+        record = verdicts.get(spec.get("id"))
+        under = record.get("underArtwork") if isinstance(record, dict) else None
+        interval = under.get("interval") if isinstance(under, dict) else None
+        if not isinstance(interval, dict):
+            return None
+        intervals.append(copy.deepcopy(interval))
+    return intervals
 
 
 def g2_state(s: Session) -> Any:
@@ -4852,6 +4881,8 @@ def run_take(arm: str, rate: int, take: int, home: Path, out_dir: Path, args: ar
     except Exception:
         run["gates"] = {"error": gate([{"check": "gate computation", "value": traceback.format_exc()[-2000:], "limit": "",
                                         "ok": False, "enforced": True}])}
+    if arm == "feed":
+        invalid.extend(feed_session_validity_problems(run))
     if arm == "placement":
         timing["rendererScoring"] = (run["gates"].get("placementVerdict") or {}).get("timingS") or {}
     timing["scoring"] = round(time.monotonic() - t, 6)
@@ -4879,6 +4910,29 @@ def contract_problem(run: dict[str, Any]) -> str | None:
     """Why the run's page reads are outside the producer contract (`live_evidence_contract.managed_run`), else None."""
     errors = contract.first_errors(contract.managed_run(run))
     return f"evidence contract: {'; '.join(errors)}" if errors else None
+
+
+def feed_session_validity_problems(run: dict[str, Any]) -> list[str]:
+    sessions = {
+        session.get("session"): session
+        for session in run.get("sessions") or []
+        if isinstance(session, dict) and isinstance(session.get("session"), str)
+    }
+    problems = []
+    for name in ("feed", "feed-off"):
+        validity = (sessions.get(name) or {}).get("runValidity")
+        if not isinstance(validity, dict) or "ok" not in validity or not (
+            validity["ok"] is True or validity["ok"] is False or validity["ok"] is None
+        ):
+            problems.append(f"{name} run validity is missing or malformed")
+            continue
+        if validity.get("ok") is True:
+            continue
+        state = "failed" if validity.get("ok") is False else "is inconclusive"
+        reasons = validity.get("reasons")
+        detail = "; ".join(str(reason) for reason in reasons) if isinstance(reasons, list) and reasons else "no reason recorded"
+        problems.append(f"{name} run validity {state}: {detail}")
+    return problems
 
 
 def arm_gates(arm: str, run: dict[str, Any], args: argparse.Namespace, armed: dict[str, Any] | None,

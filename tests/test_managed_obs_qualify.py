@@ -1451,9 +1451,9 @@ def test_feed_capture_scores_both_retirements_with_final_environment(monkeypatch
     }
     seen: dict[str, Any] = {}
     observations = iter((
-        {"at": 1.0, "loadAverage": [1.0], "uptime": "before", "chromeCounts": {"owned": 0, "foreign": 1}},
-        {"at": 2.0, "loadAverage": [1.5], "uptime": "during", "chromeCounts": {"owned": 0, "foreign": 1}},
-        {"at": 3.0, "loadAverage": [2.0], "uptime": "after", "chromeCounts": {"owned": 0, "foreign": 1}},
+        {"at": 1.0, "loadAverage": [1.0, 1.0, 1.0], "uptime": "before", "chromeCounts": {"owned": 0, "foreign": 1}},
+        {"at": 2.0, "loadAverage": [1.5, 1.5, 1.5], "uptime": "during", "chromeCounts": {"owned": 0, "foreign": 1}},
+        {"at": 3.0, "loadAverage": [2.0, 2.0, 2.0], "uptime": "after", "chromeCounts": {"owned": 0, "foreign": 1}},
     ))
 
     def drive(player, *, observer, feed_sink, **kwargs):
@@ -1498,7 +1498,9 @@ def test_feed_capture_scores_both_retirements_with_final_environment(monkeypatch
     assert session.out["environment"]["gitHead"] == "abc123"
     assert session.out["environment"]["outputRate"] == {"configuredHz": 30, "observedHz": 30.0}
     assert session.out["environment"]["browserSourceRate"] == {"configuredHz": 60, "settingHz": 60}
+    assert session.out["environment"]["browserVersion"] == {"product": "Chrome/127.0.0.0", "userAgent": "CEF"}
     assert list(session.out["environment"]["observations"]) == ["before", "during", "after"]
+    assert session.out["runValidity"]["measured"]["environment"]["ok"] is True
     assert set(session.out["feedVerdicts"]) == set(keys)
     assert "samples" not in session.out
     assert session.out["sampleRows"][0]["seq"] == 1
@@ -1512,8 +1514,197 @@ def test_feed_capture_scores_both_retirements_with_final_environment(monkeypatch
 def test_feed_environment_reports_only_raw_obs_output_rate(video_settings, observed):
     session = feed_capture_session(FeedCaptureHost(), {"verdicts": []}, rate=30)
     session.ctx["videoSettings"] = video_settings
-    environment = q.feed_environment(session, lcp.HOST_MANAGED_OBS_30)
+    environment = q.feed_environment(session, lcp.HOST_MANAGED_OBS_30, {})
     assert environment["outputRate"] == {"configuredHz": 30, "observedHz": observed}
+
+
+def _complete_instrument_cost() -> dict[str, Any]:
+    return {
+        hook: {
+            "applicable": True, "installed": True, "count": 0,
+            "p95": None, "max": None, "overBudget": 0,
+        }
+        for hook in q.live_run_validity.REQUIRED_HOOKS
+    }
+
+
+@pytest.mark.parametrize("rate", [25, 30])
+def test_feed_script_finalizes_obs_environment_before_scoring_and_validity(monkeypatch, rate):
+    spec_id = "b0to1:a->a:carry"
+    facts = {
+        "canvas": {"width": 1920, "height": 1080},
+        "verdicts": [{"id": spec_id, "kind": "carry", "underArtwork": True, "feed": {}}],
+    }
+    observed = {
+        label: {
+            "at": float(index), "loadAverage": [1.0, 2.0, 3.0], "uptime": label,
+            "chromeCounts": {"owned": 1, "foreign": 0},
+        }
+        for index, label in enumerate(("before", "during", "after"), 1)
+    }
+    capture = {
+        "hostKind": getattr(q.live_run_validity, f"HOST_MANAGED_OBS_{rate}"),
+        "environment": {
+            "qualificationIdentity": "stale", "gitHead": "stale",
+            "browserVersion": {"product": "Chrome/127.0.0.0", "userAgent": "CEF"},
+            "observations": observed,
+        },
+        "instrumentCost": _complete_instrument_cost(),
+        "samples": [],
+    }
+    seen: list[dict[str, Any]] = []
+
+    def score(value, selected, expected):
+        seen.append(copy.deepcopy(value))
+        return {
+            **copy.deepcopy(value),
+            "feedVerdicts": {spec_id: {"underArtwork": {"interval": {"start": 1.0, "end": 2.0}}}},
+        }
+
+    monkeypatch.setattr(q, "capture_arm", lambda *args, **kwargs: copy.deepcopy(capture))
+    monkeypatch.setattr(q, "score_arm", score)
+    session = feed_capture_session(FeedCaptureHost(), facts, rate=rate)
+    q.feed_script(True)(session)
+
+    host_kind = getattr(q.live_run_validity, f"HOST_MANAGED_OBS_{rate}")
+    environment = seen[0]["environment"]
+    assert seen[0]["hostKind"] == host_kind
+    assert environment == session.out["environment"]
+    assert environment["qualificationIdentity"] == host_kind
+    assert environment["gitHead"] == "abc123"
+    assert environment["obsVersion"] == "32.2.2"
+    assert environment["outputRate"] == {"configuredHz": rate, "observedHz": float(rate)}
+    assert environment["browserSourceRate"] == {"configuredHz": rate * 2, "settingHz": rate * 2}
+    assert environment["browserVersion"] == {"product": "Chrome/127.0.0.0", "userAgent": "CEF"}
+    assert environment["observations"] == observed
+    validity = session.out["runValidity"]
+    assert validity["ok"] is None
+    assert validity["measured"]["cost"]["ok"] is True
+    assert validity["measured"]["environment"]["ok"] is True
+    assert validity["measured"]["cadence"]["glIntervals"] == [{"start": 1.0, "end": 2.0}]
+    assert validity["reasons"] == ["cadence: settled-cadence statistic is open (owner Q2, gate 5a); measured only"]
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), [
+    ("videoSettings", {"fpsNumerator": 24, "fpsDenominator": 1}, "outputRate.observedHz"),
+    ("sourceSettings", {"fps": 59, "width": 1920, "height": 1080}, "browserSourceRate.settingHz"),
+])
+def test_feed_script_rejects_wrong_obs_readback_rates(monkeypatch, field, value, reason):
+    facts = {"canvas": {"width": 1920, "height": 1080}, "verdicts": []}
+    observations = {
+        label: {"at": float(index), "loadAverage": [1.0, 2.0, 3.0], "uptime": label,
+                "chromeCounts": {"owned": 1, "foreign": 0}}
+        for index, label in enumerate(("before", "during", "after"), 1)
+    }
+    capture = {
+        "hostKind": q.live_run_validity.HOST_MANAGED_OBS_30,
+        "environment": {"browserVersion": {"product": "CEF/127"}, "observations": observations},
+        "instrumentCost": _complete_instrument_cost(), "samples": [],
+    }
+    monkeypatch.setattr(q, "capture_arm", lambda *args, **kwargs: copy.deepcopy(capture))
+    monkeypatch.setattr(q, "score_arm", lambda value, selected, expected: copy.deepcopy(value))
+    session = feed_capture_session(FeedCaptureHost(), facts, rate=30)
+    session.ctx[field] = value
+    q.feed_script(True)(session)
+    assert session.out["runValidity"]["ok"] is False
+    assert any(reason in item for item in session.out["runValidity"]["reasons"])
+
+
+@pytest.mark.parametrize(("validity", "problem"), [
+    (None, "missing or malformed"),
+    ({"ok": None, "reasons": ["cadence open"]}, "is inconclusive"),
+    ({"ok": False, "reasons": ["wrong rate"]}, "failed"),
+    ({"ok": True, "reasons": []}, None),
+])
+def test_feed_session_validity_problems_fail_closed(validity, problem):
+    sessions = []
+    for name in ("feed", "feed-off"):
+        session = {"session": name}
+        if validity is not None:
+            session["runValidity"] = copy.deepcopy(validity)
+        sessions.append(session)
+    run = {"sessions": sessions}
+    problems = q.feed_session_validity_problems(run)
+    assert (problems == []) is (problem is None)
+    if problem is not None:
+        assert len(problems) == 2 and all(problem in item for item in problems)
+
+
+def test_run_take_applies_feed_session_validity_once_after_arm_gates(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    out = tmp_path / "out"
+    (out / "runs").mkdir(parents=True)
+
+    class Engine:
+        def __init__(self, engine_home, **kwargs):
+            self.home = engine_home
+            self.tree = engine_home / "tree"
+            self.cdp_endpoint = "http://127.0.0.1:9"
+            self.target_id = "target"
+
+        def calibration_adapter(self):
+            return None
+
+        def quit(self):
+            self.home.mkdir(parents=True, exist_ok=True)
+            (self.home / "ak-engine.json").write_text('{"cleanExit": true}')
+
+        def wait_idle(self, timeout):
+            pass
+
+        def state(self):
+            return {"state": "stopped", "warnings": []}
+
+        def close(self):
+            pass
+
+    def launch(engine, rate, source, launch_mode, run):
+        run.update(
+            readyS=0.1,
+            obsVersion="32.2.2",
+            videoSettings={"fpsNumerator": rate, "fpsDenominator": 1},
+            sourceSettings={"fps": source, "width": 1920, "height": 1080},
+        )
+        return 9, "password"
+
+    sessions = [
+        {"session": "feed", "runValidity": {"ok": False, "reasons": ["wrong rate"]}},
+        {"session": "feed-off", "runValidity": {"ok": True, "reasons": []}},
+    ]
+    monkeypatch.setattr(q, "ManagedObs", Engine)
+    monkeypatch.setattr(q, "launch_engine", launch)
+    monkeypatch.setattr(q, "sessions_for", lambda *args: copy.deepcopy(sessions))
+    monkeypatch.setattr(q, "arm_gates", lambda *args, **kwargs: {
+        "feed": {"verdict": "PASS", "invalid": None, "failing": [], "checks": []},
+    })
+    monkeypatch.setattr(q, "tree_snapshot", lambda path: {})
+    monkeypatch.setattr(q, "snapshot_diff", lambda before, after: {"unchanged": True})
+    monkeypatch.setattr(q, "sleep_events", lambda started, ended: [])
+    monkeypatch.setattr(q, "obs_running", lambda: False)
+    monkeypatch.setattr(q, "fixture_counter", lambda fixture: "grey")
+    monkeypatch.setattr(q, "fixture_loops", lambda fixture: False)
+    monkeypatch.setattr(q, "print_run", lambda run, dest: None)
+    args = types.SimpleNamespace(
+        launch="hidden", kb=None, kb_splice=None, fixture=tmp_path / "fixture",
+        fixture_identity=None, soak_minutes=5, precheck=False, tier="full", dev_profile=None,
+        keep_recordings=True,
+    )
+
+    run = q.run_take("feed", 25, 1, home, out, args, {"verdicts": []})
+
+    assert run["invalid"] == ["feed run validity failed: wrong rate"]
+    assert run["valid"] is False
+    assert run["passed"] is False
+
+
+def test_non_feed_arm_ignores_session_run_validity_byte_for_byte(monkeypatch):
+    run = {"sessions": [{"session": "mo3-off-on", "runValidity": {"ok": False, "reasons": ["wrong rate"]}}]}
+    invalid = ["existing"]
+    gates = {"MO-3": {"verdict": "PASS"}}
+    monkeypatch.setattr(q, "contract_problem", lambda value: None)
+    monkeypatch.setattr(q, "mmo_cef_gates", lambda value: gates)
+    assert q.arm_gates("mmo-cef", run, types.SimpleNamespace(), None, invalid) is gates
+    assert invalid == ["existing"]
 
 
 def test_feed_gate_requires_continuous_green_and_feed_off_exact_hold_green_with_continuous_red() -> None:
