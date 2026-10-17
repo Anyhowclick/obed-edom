@@ -124,7 +124,7 @@ the external monitor (only Route C would). Times are rough; total ≈ 2½ h plus
       2026-10-17: done except the continuity-off comparison — results and finding D1 in "Home dry run — 2026-10-17".
 - [x] **7 · [KN] · optional, ≈ 15 min.** §4 through the managed engine with a deck prepared by **Qualify Keynote** — the
       only way to see GL replay under the managed engine (the fixture has no product route there).
-      2026-10-17: Minimal Alpha_DSK ready and its 2→3 clean; F2 did not prepare (D3); findings D2–D3 below.
+      2026-10-17: Minimal Alpha_DSK ready and its 2→3 clean (F2 cancelled by the owner, D3); finding D2 below.
 - [ ] **8 · owner's call.** A **25 fps** copy of the grating-with-counter movie (§3 cadence note), in a deck for step 7 and
       the hardware-day GL-replay item. Qualify Keynote converts non-H.264 (e.g. HEVC) movies to H.264 itself and lists
       them under **Deck ready**; a 30 fps movie is listed under "Some movies do not match the output rate".
@@ -319,9 +319,8 @@ Evidence (results only): main checkout `output/evidence/decklink-dryrun-2026-10-
 - **D2 — first Keyer calibration fails.** Right after Start output session: `placementProbeRejected` `persistence-failed`
   ("persistence: scene collection differs after cleanup"); one **Recalibrate output** → `valid` / `frac`. Operator step
   added to §4; cause open.
-- **D3 — F2.key did not prepare.** Qualify Keynote on `F2.key` (754 MB, 13 slides): "HTML export failed … Keynote
-  Creator Studio got an error: Can’t get document id … (-1728)", Keynote peak RSS 1.17 GB (limit 6 GB). The owner did not
-  close or switch the document. Open.
+- **D3 — F2.key prepare stopped: not a defect.** The owner cancelled it to switch decks; the Keynote -1728 "Can’t get
+  document id" error is what that cancel looks like mid-export.
 - The owner's external monitor (XG27UCDMG, 4K60) blanked during one 3→4 replay; macOS logged no display event and the
   owner attributes it to the cable. Not product.
 
