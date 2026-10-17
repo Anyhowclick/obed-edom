@@ -52,6 +52,67 @@ def _rows(n: int = 120, videos: Callable[[int], list[dict[str, Any]]] = lambda i
     return rows
 
 
+def test_read_phases_and_carry_window() -> None:
+    def video(identity: int, ready: int, *, el_id: int | None = None, instance: str | None = None) -> dict[str, Any]:
+        return {
+            "id": identity, "elId": el_id if el_id is not None else identity + 10, "instance": instance,
+            "src": "movie-a.mov-0.0000-46.0333.mov", "readyState": ready, "isConnected": True,
+            "rect": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+        }
+
+    def row(t: float, scene: int, videos: list[dict[str, Any]], *, state: str = "IdleAtFinalState",
+            busy: bool = False, hash_value: str | None = None, next_scene: int | None = None) -> dict[str, Any]:
+        return {
+            "t": t, "ts": t, "seq": int(t), "scene": scene, "playerState": state, "busy": busy,
+            "hash": hash_value or f"#{scene}", "nextSceneId": next_scene, "videos": videos,
+        }
+
+    rows = [
+        row(800.0, 7, []),
+        row(1000.0, 8, [video(1, 0, el_id=11, instance="old")], hash_value="#9", next_scene=9),
+        row(1200.0, 8, [video(1, 1, el_id=11, instance="old")], hash_value="#9", next_scene=9),
+        row(1300.0, 8, [video(1, 2, el_id=11, instance="old")], hash_value="#9", next_scene=9),
+        row(1400.0, 8, [video(1, 4, el_id=11, instance="old")], hash_value="#9", next_scene=9),
+        row(1500.0, 9, [video(1, 4, el_id=11, instance="old")], state="Playing", busy=True),
+        row(1600.0, 9, [video(1, 1, el_id=11, instance="old")]),
+        row(1650.0, 9, [video(2, 4, el_id=12, instance="new")]),
+        row(1700.0, 10, [video(2, 4, el_id=12, instance="new")]),
+        row(1800.0, 10, [video(2, 4, el_id=12, instance="new")]),
+        row(2000.0, 11, [video(2, 4, el_id=12, instance="new")]),
+    ]
+    spec = {
+        "id": "alpha", "kind": "carry", "asset": "movie-a.mov", "atScene": 10,
+        "transitionScene": 9, "sourceScene": 8, "untilScene": 12,
+        "srcRect": SLOT, "dstRect": SLOT,
+    }
+    phases = pi.read_phases(rows, {"verdicts": [spec]})
+    assert pi.read_phases(rows, {"verdicts": None})["entryColdStart"] == phases["entryColdStart"]
+    window = pi.carry_window(
+        phases, spec, forced_seek={"seekedT": 250.0}, gl_interval={"start": 1450.0, "end": 1550.0},
+    )
+    assert phases["rows"][1]["scene"] == 8 and phases["rows"][1]["hash"] == "#9"
+    assert phases["entryColdStart"]["1"] == {
+        "asset": "movie-a.mov", "firstSeenT": 1000.0, "firstDecodedT": 1300.0,
+        "durationMs": 300.0, "rows": 2, "visibleUndecodedRows": 2,
+        "visibleUndecodedDurationMs": 300.0, "scene": 8, "scenes": [8],
+        "missingEndpoints": {"mountTime": False, "firstDecoded": False},
+    }
+    assert set(phases["mounts"]) == {(1, "movie-a.mov"), (2, "movie-a.mov")}
+    assert "chainClip" not in window
+    assert window["forcedSeek"] == {"seekedT": 250.0, "start": 1250.0}
+    assert pi.window_bounds(phases, window, 1) == (1250.0, 2000.0)
+    assert window["coldStart"] == {"rows": 0, "durationMs": 0.0, "firstSeenT": None}
+    assert window["glSegments"][1] == [
+        {"start": 1250.0, "end": 1400.0},
+        {"start": 1600.0, "end": 2000.0},
+    ]
+    assert window["unreadable"] == []
+    clipped = pi.carry_window(phases, spec)
+    assert clipped["chainClip"] == {"start": 1000.0, "end": pytest.approx(1999.999999)}
+    assert pi.window_bounds(phases, clipped, 1) == (1300.0, pytest.approx(1999.999999))
+    assert clipped["coldStart"] == {"rows": 2, "durationMs": 300.0, "firstSeenT": 1000.0}
+
+
 # ---------------------------------------------------------------- painted_state truth table (§2.3)
 
 TRUTH = [

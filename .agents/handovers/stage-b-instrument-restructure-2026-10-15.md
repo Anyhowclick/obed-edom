@@ -1,4 +1,4 @@
-# Handover: Stage B instrument restructure (updated 2026-10-16 evening)
+# Handover: Stage B instrument restructure (soft stop 2026-10-16 23:00 SGT)
 
 **Coordinator (owner 2026-10-16):** session `local_4b825e27-26e0-4d7b-a4af-de1cc7d9d4c2`, worktree
 `funny-pasteur-751a72`; merges happen in worktree `stage-b-coord` (on `claude/stage-b-arch`). The old "Stage B
@@ -7,42 +7,58 @@ and `alpha-b3to4-stall-2026-10-15.md`.
 
 ## Resume here
 
-**Where things are** (`claude/stage-b-arch` @ `33cb7729`, pushed)
-- Merged today: C2 offline validity (`61b8082d`), gate 4 historical inventory (`733cd70f`), the Chrome rule (any 155.x,
-  one build per round, plan §4 amended; `749b63a0`), the Chrome 155.0.8059.80 requal record (`69c84865`), and **C1**
-  (`33cb7729`: review r1/r2/r3 READY, records `c1-review-r1..r3.md`).
-- Full suites on the C1 tree: 3.13 and 3.10 both 11366 passed / 38 skipped / 1 xfailed.
+**Where things are** (`claude/stage-b-arch` @ `3cc337f5` + this handover, pushed)
+- Merged 2026-10-16: C2 offline validity, gate 4 historical inventory, the Chrome rule (any 155.x, one build per round;
+  plan §4 amended), the Chrome 155.0.8059.80 requal record, **C1** (`33cb7729`), the MM-FEED diagnosis (`ab2553ea`) and
+  **C3** (`3cc337f5`; r1–r7, `c3-gate-record.md`; suites 3.13/3.10 11382 / 38 / 1 on the code-identical tree).
 - A fresh worktree needs the main checkout's git-ignored fixtures symlinked (`output/{bank,evidence,fixtures}`,
-  `Sermon Outlines/*.docx`) or ~50 extra tests skip (88 vs 38).
+  `Sermon Outlines/*.docx`) or tests skip (88 vs 38; one W1-bank test needs `output/bank`).
 
-**C1 gate 2** (`.agents/reviews/stage-b/instrument-restructure/c1-gate2-record.md`)
-- Timing PASS: `callbackCostP95Ms` 106–109 → 3.0–3.7 ms; scene 8/10/12 medians 100/100/200 → 33/17/33 ms.
-- **OPEN, due before gate 5a (owner 2026-10-16):** the feed-control colours and the holdMatch/poster positive/red
-  separation are not re-proved, and the D1 counter-policy obligations (D7 crossfade/from-only, at least one positive GL
-  counter decode) are open. All 25 MM-FEED arms fail in a full run_gates round, identically on the pre-C1 tree:
-  D7/D7s `feedLive` None (GL counter `coveredByLaterDraw`, flat 66.7 levels; F4 item 2, not a cost effect), and every
-  Alpha_DSK carry INCONCLUSIVE on the gate's repaired fixture ("movie never decoded" / "core feed seam did not identify a
-  feed or departure mode"; the q7 Alpha fixture scores normally). Diagnosis session: "Diagnose Stage B MM-FEED baseline
-  failures" (`local_6bc69277-054d-426a-b337-94574bac08fe`), on the C1 tree; it hands back before fixing.
-- Every host, P2, Pass G and carry-cover gate MATCHed in that round (wall 1251 s at GATE_JOBS=3).
+**FIRST on resume: the MM-FEED fix** (session "Diagnose Stage B MM-FEED baseline failures",
+`local_6bc69277-054d-426a-b337-94574bac08fe`; its notes `mmfeed-fix-handover.md`; diagnosis
+`.agents/reviews/stage-b/instrument-restructure/mmfeed-baseline-diagnosis.md`)
+- Code: `claude/stage-b-mmfeed-fix` @ `a25a5db5` (Sol high; Opus 5.5 high r1/r2/r3 READY, lows folded). Owner decisions:
+  Alpha gate staging restores the 5 movies from the complete q7 Alpha export and refuses a timed run on an unreadable
+  movie; D7/D7s counter movies carry a second strip at source x=704 read through a per-deck `counterLayout`; the D7/D7s
+  two-strip re-exports are in `~/Desktop/Convert wall to 16x9 CGs/Continuity/strip2/` (plan hashes equal the pins; posters
+  decode both strips). r2/r3 folds are test-only on `claude/stage-b-mmfeed-fix-r23` @ `628b4973`: **rerun
+  `tests/test_run_gates.py` and `tests/test_live_continuity_probe.py` on it**.
+- Suites on `a25a5db5`: 3.13 11372 / 39 (extra skip = W1-bank link, fixed) / 1; 3.10 11373 / 38 / 1; UI 331/331.
+- Gate round on `a25a5db5` (full tier, `QUAL_B_SOURCE=strip2`): **13 failed (was 25)**. Feed checks now MATCH for D7/D7s
+  feed-on, no-linger, attach-once and Alpha feed-on. Still red:
+  1. D7/D7s from-only: the crossfade blends the strip, so the GL counter decodes `ambiguous` (the D1 band edge from C1
+     review r1). Needs a read rule: **owner decision** (do not loosen the band silently).
+  2. 9 Alpha feed-off / control arms: holdFrame / posterHold / handbackContinuity. First real scoring of those arms
+     (the movie-less fixture hid them); undiagnosed.
+  3. HOST red D2 pin@6 mismatch: unrelated to the fix; check it on `3cc337f5` (C3 merged after the fix branch was cut).
+- **Do not merge on that round.** Then: merge `claude/stage-b-arch` into the fix branch (probe/probe-test overlap with
+  C3), rerun suites, diagnose 1–3, and re-run the round. That round closes C1's open item.
 
-**C3** (session `local_a393024c-7f20-4969-9cdf-f4fe6eec32ab`, branch `claude/stage-b-c3-adadcc`): fold rounds r4/r5 in
-progress; it merges `claude/stage-b-arch` (now with C1: expect a small probe/probe-test merge), runs full suites in a
-window, then hands back. The Alpha arm A b6to7/b7to8 `wa0125` carry=False (`missingSamples` inside the glInterval)
-reproduces on both trees; C3's GL excuse fixes it.
+**OPEN, due before gate 5a (owner 2026-10-16):** C1's feed-control colours and holdMatch/poster positive/red separation,
+and the D1 counter-policy obligations (D7 crossfade/from-only; a positive GL counter decode now exists on the strip2 D7
+feed-on arms). C1 gate 2 timing passed (`c1-gate2-record.md`).
+
+**Owner to confirm**
+- C3: the carry-window start deviates from the plan's literal "first decoded settled source row" to keep the old
+  coverage (`c3-gate-record.md`).
+- D7 from-only crossfade read rule (above).
+- Gate 4 decisions 2–5 (accept the inventory, cost `>` vs `>=` 8 ms, wrf-rule scope, Q2 cadence) at gate 5a.
 
 **Next, in order (plan)**
-C3 merge → MM-FEED baseline fix + C1 separation re-proof → bounded C4 (stream F, same file as C1) → C5 → C10 audit →
-**gate 5a (owner: Q1 host rows, Q2 cadence statistic, gate 4's historical list and its decisions 2–5)** → 6a full
-suites → gates 7–15 → Q7 attempt 4 (the owner's live check).
+MM-FEED fix merge + C1 separation re-proof → bounded C4 (stream F; also: refuse scoring a counter deck with Alpha
+distances, the diagnosis side-finding) → C5 → C10 audit → **gate 5a (owner: Q1 host rows, Q2 cadence statistic, gate 4
+list and decisions)** → 6a full suites → gates 7–15 → Q7 attempt 4 (the owner's live check).
 
 **Open items carried**
-- F4 (2): D7/D7s feedLive None: coverage, not cost (see C1 gate 2). In the diagnosis session.
-- F4 (3): the Alpha b5to6 / b7to8:wa0121 flips. Re-check after C3.
+- F4 (3): the Alpha b5to6 / b7to8:wa0121 flips. Re-check on the merged tree.
 - `PRE_DRAW_GRACE_MS` = 320 ms: thin margin (D7 controls 306.5 ms); widening it is the owner's call.
-- C2 integration items (`c2-offline-gate-record.md` §Open): hook names, `gl_intervals`, attach profile field, probe
-  imports host kinds from `live_run_validity`.
+- C2 integration items (`c2-offline-gate-record.md` §Open).
 - Kernel measured only at the integer 10× downscale; non-integer ratios rely on the separation re-proof.
+
+**Worktrees** (all clean of uncommitted work at 23:00 unless a session says otherwise; check `list_sessions` cwd before
+trashing any): `stage-b-coord` (merges), `funny-pasteur-751a72` (coordinator, `claude/stage-b-c1`), `g2-old` / `g2-c1`
+(gate 2 trees, detached; trash once the fix merges), `distracted-cartwright-b450e1` (C3, done), `inspiring-feynman-06914e`
+(gate 4, done), the MM-FEED fix session's worktree(s), `stage-b-chrome`, `stage-b-q7` (kept until Q7).
 
 **Roster** (until 2026-10-27; memory `feedback-delegate-implementation`)
 - Codex GPT-5.6 Sol high implements: `codex exec -m gpt-5.6-sol -c model_reasoning_effort=high -s workspace-write -c 'sandbox_workspace_write.writable_roots=["<scratch>"]' -C <worktree> -o <report> "<brief>" < /dev/null`.

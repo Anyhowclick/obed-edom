@@ -255,7 +255,7 @@ global.performance = {now: function(){ return now; }};
 var snapshotFails = false;
 window.__obedLive = {snapshot: function(){
   if (snapshotFails) throw new Error('mid-teardown');
-  return {sceneId: 2, playerState: 'IdleAtFinalState', busy: false, ready: true, sceneCount: 12};
+  return {sceneId: 2, nextSceneId: 3, playerState: 'IdleAtFinalState', busy: false, ready: true, sceneCount: 12};
 }};
 window.__OBED_CONTINUITY__ = {movies: {movie1: {assetKeys: ['movie-a.mov']}}};
 window.__OBED_P2_PRESERVE__ = {footprintOwnerDecoderId: function(q){
@@ -309,9 +309,17 @@ def test_producer_js_meets_the_contract() -> None:
     sampled = _node(SAMPLER_HARNESS.replace("__SAMPLER__", probe.SAMPLER_JS))
     rows, schema = sampled["rows"], sampled["meta"]["schema"]
     assert len(rows) == 3 and rows[0]["videos"][0]["elId"] is None and "playerState" not in rows[2]
+    assert [row["nextSceneId"] for row in rows] == [3, 3, None]
     assert contract.first_errors(contract.sample_rows(rows, schema=schema), limit=20) == []
     converted, _ = probe.convert_samples_to_authored(rows)
+    assert converted[0]["nextSceneId"] == 3
     assert contract.first_errors(contract.sample_rows(converted, schema=schema), limit=20) == []
+    historical = copy.deepcopy(rows)
+    for row in historical:
+        row.pop("nextSceneId")
+    assert contract.first_errors(contract.sample_rows(historical, schema=schema), limit=20) == []
+    rows[0]["nextSceneId"] = 1.5
+    assert "row.nextSceneId" in contract.first_errors(contract.sample_rows(rows, schema=schema), limit=20)[0]
 
     painted = _run_js("""
 const v = video(7, 'movie-a.mov', {x: 100, y: 100, w: 400, h: 225});
