@@ -16,7 +16,7 @@ from unittest.mock import ANY
 import pytest
 
 from obed_edom import live_runtime
-from obed_edom.fixture_paths import fixture, main_checkout
+from obed_edom.fixture_paths import fixture, main_checkout, source_deck
 
 
 def test_unknown_player_is_refused():
@@ -165,7 +165,7 @@ FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "live_continuity"
 EFFECT_1_TO_2 = FIXTURE_ROOT / "effect_1_to_2.json"
 EFFECT_7_TO_8 = FIXTURE_ROOT / "effect_7_to_8.json"
 F2_SLIDE3_MM_SUBTREE = FIXTURE_ROOT / "f2_slide3_mm_subtree.json"
-SOURCE_DECK = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Minimal Alpha_DSK.key")
+SOURCE_DECK = source_deck("Minimal Alpha_DSK.key")
 SLOT4_ALPHA = 0.29468628764152527
 ALPHA_DSK_OPACITY = 0.6117682456970215
 EB_EFFECTS = {"apple:magic-move-implied-motion-path", "apple:ca-text-shimmer", "apple:ca-text-sparkle"}

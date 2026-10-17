@@ -45,7 +45,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from obed_edom import live_host  # noqa: E402
-from obed_edom.fixture_paths import fixture, main_checkout  # noqa: E402
+from obed_edom.fixture_paths import fixture, main_checkout, source_deck  # noqa: E402
 from obed_edom.html_preview import PreviewError, PreviewStale, file_sha256, read_jsonish, source_slides  # noqa: E402
 from obed_edom.live_continuity import canonical_asset_name, derive_plan  # noqa: E402
 
@@ -53,13 +53,14 @@ PREVIEWS = Path("/Users/anyhowclick/Desktop/Convert wall to 16x9 CGs/Continuity/
 ALPHA_7E3C = "7e3c930194d00effe3a21ee0e86a20baddb74223f661b9fa23186282aaf7081d"
 ALPHA_3B9019 = "3b9019f068d8ef1c14e586c86e75274a2bebad3c65116fd2247362ed9f39a7e3"
 MINIMAL_59CB = "59cb220d674317326e710ccdc7d65fe1d7e473c83646227d2f691e6373d6fa0c"
-F2_SOURCE = Path.home() / "Desktop" / "Convert wall to 16x9 CGs" / "F2.key"
+F2_SOURCE = source_deck("F2.key")
 F2_EXPORT = F2_SOURCE.with_name("F2-html")
-F2_SOURCE_SHA256 = "f99a68ef3dc53f5e46e639e8607954b7fa4a8d69ba9a863b453f93b5320cc51b"
-F2_WINNER = "DF3DB700EEDF01B099F884EDCEAB50D3"
-F2_GLYPH_BASE = "B7E3456D7527E4649B2EF0E511D06632"
+F2_SOURCE_SHA256 = "1693eb34646948b498b6a52e9039e94d10a65663b29edae376f33f87b4ebf3b0"
+F2_WINNER = "B37026D59346E052B9E3697C923C552D"
+F2_GLYPH_BASE = "9C60C2B5091E393B7691FBE632EBA011"
 F2_GLYPH_EFFECT = "9C60C2B5091E393B7691FBE632EBA011"
-F2_D2_TO = "32960D80133984B95E511FFD85B6061B"
+F2_D1G_TO = "A7274F8DE0598A590B1831441C62F647"
+F2_D1_TO = "52233E09F9315C5E5D2F7230B83BF97D"
 
 
 class F2Row(NamedTuple):
@@ -73,14 +74,14 @@ class F2Row(NamedTuple):
 F2_ROWS = {
     "F2": F2Row(
         F2_EXPORT,
-        "c664279eeb4ac5d1bb75164984e03ba2de343c55dd558ac5691fd3ec1385d9da",
-        ((4, "D2", F2_D2_TO),),
+        "ed44a7dce536185b85e3f5eba82e3e366682482f6309cc3e4636d39a3549d00e",
+        ((4, "D1g", F2_D1G_TO), (11, "D1", F2_D1_TO)),
         {F2_WINNER},
         False,
     ),
     "F2/synthetic-glyph-i-both": F2Row(
         F2_EXPORT,
-        "c664279eeb4ac5d1bb75164984e03ba2de343c55dd558ac5691fd3ec1385d9da",
+        "ed44a7dce536185b85e3f5eba82e3e366682482f6309cc3e4636d39a3549d00e",
         (),
         {F2_WINNER},
         True,

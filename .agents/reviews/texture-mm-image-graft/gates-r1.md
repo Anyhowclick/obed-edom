@@ -20,6 +20,7 @@ Branch `claude/texture-mm-image-graft` (from main `25849a82`, incl. #277). Plan 
 | G3 owner eye on the repaired F2 copy (stock + patched player) | **PASS for the repair**: correct Malaysia map in place of the squashed Asia map. Owner also saw two duplicate small maps after MM 3→4 in both players. A JSON diff shows the repair changed only the Malaysia leaf id, so this is a separate, pre-existing MM end-of-transition bug, tracked separately. |
 | Re-export after the owner's deck edit (F2.key `6fea812c…`, export tree `a2c7fd9a…`) | Keynote collided **both** maps for real. The new route repaired both (D2, slide 3 pages 11 and 12; corr 0.996 / 0.985). G1 re-pinned to this export. |
 | Re-export after the 2 % Asia-map edit, 2026-10-15 (F2.key `f99a68ef…`, export tree `c664279e…`) | Only the 357×235 map collides now (`DF3DB700`, slide 3 page 12): D2×1, corr 0.985. The page-11 pair no longer collides. G1 re-pinned: **PASS**, 29 rows, 0 failed, 0 inconclusive. |
+| Re-pin after the owner's F2 edits, 2026-10-17 (F2.key `1693eb34…`, 13 slides; moved to the main checkout's `output/source-decks/`) | Three exports of the same deck differ: `f413dee5` refused (slide 12, 582×327 image), `64a5899c` refused (slide 4 88×88 + slide 12 287×77 images), `ed44a7dc` repaired D1g×1 (slide 4 glyph `B37026D5`→`A7274F8D`) + D1×1 (slide 11 label `30971840`→`52233E09`). G1 pinned to `ed44a7dc`; synthetic glyph row re-derived (glyph 6 `9C60C2B5` → winner `B37026D5`): **PASS**, 30 rows, 0 failed, 0 inconclusive. |
 
 G1 rows:
 - **F2:** 1 hit → D2×1 → 0 hits.

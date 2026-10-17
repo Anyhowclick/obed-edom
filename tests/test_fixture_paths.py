@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from obed_edom import fixture_paths
-from obed_edom.fixture_paths import FIXTURE_NAMES, fixture, main_checkout
+from obed_edom.fixture_paths import FIXTURE_NAMES, fixture, main_checkout, source_deck
 
 REPO = Path(__file__).resolve().parents[1]
 SCANNED_DIRS = ("src", "scripts", "tests")
@@ -52,6 +52,7 @@ def _hits(pattern: re.Pattern[str]) -> list[str]:
 def test_fixture_resolves_under_the_main_checkout_output_fixtures() -> None:
     for name in FIXTURE_NAMES:
         assert fixture(name) == main_checkout() / "output" / "fixtures" / name
+    assert source_deck("F2.key") == main_checkout() / "output" / "source-decks" / "F2.key"
 
 
 def test_the_fixture_set_is_the_plans() -> None:
