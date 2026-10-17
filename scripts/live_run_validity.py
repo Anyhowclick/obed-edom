@@ -24,13 +24,14 @@ HOST_MANAGED_OBS_30 = "managed OBS 30"
 QUALIFIED_CHROME_MAJORS = (155,)
 COST_BUDGET_P95_MS = 8.0
 REQUIRED_HOOKS = ("sampler.tick", "paint.prePaint", "feed.rvfc", "feed.raf", "feed.draw", "frame.total")
+INSTRUMENT_COST_HOOK_KEYS = frozenset({"applicable", "installed", "count", "p95", "max", "overBudget"})
 
-COST_POLICY_STATUS = "draft: 8 ms p95 per hook and aggregate, from the C1 timing split; gate 3 calibration pending"
+COST_POLICY_STATUS = "approved: whole-capture linear p95; invalid only when p95 > 8 ms per applicable hook"
 CADENCE_POLICY_STATUS = "OPEN: owner Q2 at gate 5a; measurement only"
 HOST_ROWS_POLICY_STATUS = "OPEN: owner Q1 at gate 5a"
-REQUIRED_HOOKS_POLICY_STATUS = "proposed names; frozen with the F/P producers at C2 integration"
+REQUIRED_HOOKS_POLICY_STATUS = "frozen C2 accounting hooks"
 LOAD_POLICY_STATUS = "OPEN: recorded, no threshold"
-PERCENTILE_POLICY_STATUS = "numpy linear"
+PERCENTILE_POLICY_STATUS = "whole-capture linear"
 POLICY_STATUS = {
     "cost": COST_POLICY_STATUS, "cadence": CADENCE_POLICY_STATUS, "hostRows": HOST_ROWS_POLICY_STATUS,
     "requiredHooks": REQUIRED_HOOKS_POLICY_STATUS, "load": LOAD_POLICY_STATUS, "percentile": PERCENTILE_POLICY_STATUS,
@@ -75,18 +76,34 @@ def _finite_number(value: Any) -> float | None:
 
 
 def _well_formed_hook(entry: Any) -> bool:
-    if not isinstance(entry, Mapping):
+    if not isinstance(entry, Mapping) or set(entry) != INSTRUMENT_COST_HOOK_KEYS:
         return False
+    applicable, installed = entry.get("applicable"), entry.get("installed")
     count, p95, maximum = entry.get("count"), entry.get("p95"), entry.get("max")
     over = entry.get("overBudget")
-    return (
-        isinstance(count, int) and not isinstance(count, bool) and count >= 0
-        and all(value is None or (_finite_number(value) is not None and value >= 0) for value in (p95, maximum))
-        and (over is None or (isinstance(over, int) and not isinstance(over, bool) and over >= 0))
-        and ((count > 0 and p95 is not None) or (count == 0 and all(
-            value in (None, 0, 0.0) for value in (p95, maximum)
-        )))
-    )
+    if not (
+        isinstance(applicable, bool) and isinstance(installed, bool)
+        and isinstance(count, int) and not isinstance(count, bool) and count >= 0
+        and isinstance(over, int) and not isinstance(over, bool) and over >= 0
+    ):
+        return False
+    if count == 0:
+        if p95 is not None or maximum is not None or over != 0:
+            return False
+    else:
+        p95_number = _finite_number(p95)
+        maximum_number = _finite_number(maximum)
+        if (
+            p95_number is None or p95_number < 0
+            or maximum_number is None or maximum_number < p95_number
+            or over > count
+        ):
+            return False
+    if not applicable:
+        return not installed and count == 0
+    if not installed:
+        return count == 0
+    return True
 
 
 def _cost(capture: Mapping[str, Any], row: Mapping[str, Any] | None) -> tuple[bool | None, list[str], dict[str, Any]]:
@@ -94,7 +111,8 @@ def _cost(capture: Mapping[str, Any], row: Mapping[str, Any] | None) -> tuple[bo
     measured = {
         "ok": None, "budgetP95Ms": None,
         "hooks": copy.deepcopy(dict(raw)) if isinstance(raw, Mapping) else {},
-        "missingHooks": [], "malformedHooks": [], "overBudgetHooks": [],
+        "missingHooks": [], "malformedHooks": [], "uninstalledHooks": [],
+        "inapplicableHooks": [], "overBudgetHooks": [],
     }
     if row is None:
         return None, [], measured
@@ -106,17 +124,37 @@ def _cost(capture: Mapping[str, Any], row: Mapping[str, Any] | None) -> tuple[bo
     missing = [hook for hook in required if hook not in raw]
     well_formed = {hook: _well_formed_hook(entry) for hook, entry in raw.items()}
     malformed = [str(hook) for hook, valid in well_formed.items() if not valid]
+    inapplicable = [
+        str(hook) for hook, entry in raw.items()
+        if well_formed[hook] and entry.get("applicable") is False
+    ]
+    uninstalled = [
+        str(hook) for hook, entry in raw.items()
+        if well_formed[hook] and entry.get("applicable") is True and entry.get("installed") is False
+    ]
     over_budget = [
         str(hook)
         for hook, entry in raw.items()
-        if well_formed[hook] and entry.get("p95") is not None and entry.get("p95") > budget
+        if well_formed[hook] and entry.get("applicable") is True and entry.get("installed") is True
+        and entry.get("p95") is not None and entry.get("p95") > budget
     ]
-    measured.update(missingHooks=missing, malformedHooks=malformed, overBudgetHooks=over_budget)
+    frame_total_inapplicable = (
+        isinstance(raw.get("frame.total"), Mapping)
+        and raw["frame.total"].get("applicable") is not True
+    )
+    measured.update(
+        missingHooks=missing, malformedHooks=malformed, uninstalledHooks=uninstalled,
+        inapplicableHooks=inapplicable, overBudgetHooks=over_budget,
+    )
     reasons = []
     if missing:
         reasons.append("cost: required hooks are missing: " + ", ".join(missing))
     if malformed:
         reasons.append("cost: malformed hook entries: " + ", ".join(malformed))
+    if uninstalled:
+        reasons.append("cost: applicable hooks were not installed: " + ", ".join(uninstalled))
+    if frame_total_inapplicable:
+        reasons.append("cost: frame.total must be applicable")
     if over_budget:
         reasons.append(f"cost: hook p95 exceeds {budget:g} ms: " + ", ".join(over_budget))
         measured["ok"] = False
@@ -144,6 +182,25 @@ def _matches(label: str, observed: Any, expected: Any, tolerance: float = 0.0) -
     )
 
 
+def _environment_observation_problem(label: str, value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return f"environment: observations.{label} is missing or malformed"
+    if _finite_number(value.get("at")) is None:
+        return f"environment: observations.{label}.at is missing or malformed"
+    load = value.get("loadAverage")
+    if not isinstance(load, list) or len(load) != 3 or any(_finite_number(item) is None for item in load):
+        return f"environment: observations.{label}.loadAverage is missing or malformed"
+    if not isinstance(value.get("uptime"), str) or not value["uptime"].strip():
+        return f"environment: observations.{label}.uptime is missing or malformed"
+    counts = value.get("chromeCounts")
+    if not isinstance(counts, Mapping) or any(
+        not isinstance(counts.get(key), int) or isinstance(counts.get(key), bool) or counts[key] < 0
+        for key in ("owned", "foreign")
+    ):
+        return f"environment: observations.{label}.chromeCounts is missing or malformed"
+    return None
+
+
 def _environment(capture: Mapping[str, Any], row: Mapping[str, Any] | None) -> tuple[bool | None, list[str], dict[str, Any]]:
     raw = capture.get("environment")
     measured: dict[str, Any] = {
@@ -167,6 +224,14 @@ def _environment(capture: Mapping[str, Any], row: Mapping[str, Any] | None) -> t
     checks.append(status)
     if status is None:
         reasons.append("environment: gitHead is missing")
+    observations = raw.get("observations")
+    for label in ("before", "during", "after"):
+        problem = _environment_observation_problem(
+            label, observations.get(label) if isinstance(observations, Mapping) else None,
+        )
+        checks.append(True if problem is None else None)
+        if problem is not None:
+            reasons.append(problem)
     if row is None:
         return None, reasons, measured
     check_specs = [("qualificationIdentity", raw.get("qualificationIdentity"), row["hostKind"])]
@@ -255,10 +320,24 @@ def _cadence(capture: Mapping[str, Any], row: Mapping[str, Any] | None,
     open_reason = "cadence: settled-cadence statistic is open (owner Q2, gate 5a); measured only"
     reasons = []
     ranges = None if gl_intervals is None else _gl_ranges(gl_intervals)
-    if gl_intervals is None:
-        reasons.append("cadence: GL intervals were not supplied")
+    gl = capture.get("glReplay")
+    requested = gl.get("requested") if isinstance(gl, Mapping) else gl
+    continuity = capture.get("continuity")
+    runtime_gl = continuity.get("glReplay") if isinstance(continuity, Mapping) else None
+    replay = requested == "auto" or isinstance(runtime_gl, Mapping) and runtime_gl.get("mode") == "injected"
+    if replay and ranges == []:
+        ranges = None
+        reasons.append("cadence: GL intervals unavailable (GL replay)")
+    elif gl_intervals is None:
+        reasons.append(
+            "cadence: GL intervals unavailable (GL replay)" if replay
+            else "cadence: GL intervals were not supplied"
+        )
     elif ranges is None:
         return None, ["cadence: GL intervals are malformed", open_reason], measured
+    scope = capture.get("scope")
+    if isinstance(scope, Mapping) and scope.get("kind") == "visible":
+        return None, reasons + [open_reason], measured
     rows = _capture_rows(capture)
     if rows is None:
         return None, reasons + ["cadence: samples are missing or malformed", open_reason], measured
