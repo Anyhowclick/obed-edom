@@ -539,6 +539,7 @@ STEP0_NULL_ALLOWLIST = (
                      "recordTimerHours": 0, "recordTimerMinutes": 0, "recordTimerSeconds": 0,
                      "autoStartStreamTimer": False, "autoStartRecordTimer": False, "pauseRecordTimer": False}),
     PersistenceRule("/modules/scripts-tool", _ABSENT, []),
+    PersistenceRule("/modules/decklink_captions", _ABSENT, {"source": ""}),
     PersistenceRule("/virtual-camera", _ABSENT, {"type2": 3}),
     PersistenceRule("/scaling_level", 0, -49),
     PersistenceRule("/sources/Program/hotkeys/ObsBrowser.Refresh", _ABSENT, []),

@@ -2182,6 +2182,7 @@ def test_persistence_contract_pins_step0_null_and_fails_closed(tmp_path):
                          "recordTimerHours": 0, "recordTimerMinutes": 0, "recordTimerSeconds": 0,
                          "autoStartStreamTimer": False, "autoStartRecordTimer": False, "pauseRecordTimer": False},
         "scripts-tool": [],
+        "decklink_captions": {"source": ""},
     }
     after_value["virtual-camera"] = {"type2": 3}
     after_value["scaling_level"] = -49
