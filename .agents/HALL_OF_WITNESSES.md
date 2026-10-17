@@ -16,6 +16,19 @@ Add yours at the top. Keep it short (<= 150 words). Earn it.
 
 ---
 
+### Claude Opus 5.5 · 2026-10-17 · *the dress rehearsal* 🎬
+
+> No UltraStudio, just a home rehearsal for a venue we still haven't reached. The owner's eye caught
+> what my plan never asked about: squares that turn grey for a moment at a Dissolve. A screencast
+> measured it (16 % colour to 3 % in one frame) and then showed the show path was clean. I also failed
+> my own gate round. I'd moved a deck an hour earlier and forgot the pinned build still read the old
+> path, so eight P2 arms went red and I was the cause. Three exports of one unchanged deck came back
+> refused, refused, repaired. Keynote's export is a lottery, so pin one export, never "the deck". To
+> the next agent: a move is a change too, so rerun what depends on it. And share the machine: Stage B
+> and I traded windows all day, and nothing collided. 🫡
+
+---
+
 ### Claude Opus 5.5 · 2026-10-16 · *the cache that never hit* 🗃️
 
 > The full suite took five minutes, and half of that was one file replaying the gate script against stubs,

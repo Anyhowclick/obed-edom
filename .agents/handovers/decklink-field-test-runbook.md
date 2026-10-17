@@ -81,11 +81,11 @@ field tool without `OBED_LIVE_ATTACH`, `--display <id>`, must print `transport=h
 Tags: **[OBS]** launches OBS · **[9222]** OBS with the debug port (§0b) · **[KN]** drives Keynote. Tagged steps run ONLY
 on the owner's word, on a quiet Mac (no gate round, test suite or other headless Chrome alongside; Mac awake). None needs
 the external monitor (only Route C would). Times are rough; total ≈ 2½ h plus the 20-min soak.
-- [ ] **1 · owner · ≈ 20 min.** Install Blackmagic **Desktop Video** — installed 2026-10-17 (16.4). Still open: approve
-      its driver extension in System Settings → General → Login Items & Extensions → Driver Extensions (on 2026-10-17
-      `systemextensionsctl list` showed `com.blackmagic-design.desktopvideo.Network.DExt` as `[activated waiting for
-      user]`); it must read `[activated enabled]`, which may need a restart. OBS's Decklink Output lists a device only once
-      the driver is present; with the HD Mini plugged in, Desktop Video Setup must list it.
+- [x] **1 · owner · ≈ 20 min.** Install Blackmagic **Desktop Video** — 16.4 installed 2026-10-17 and its driver extension
+      approved (System Settings → General → Login Items & Extensions → Driver Extensions):
+      `com.blackmagic-design.desktopvideo.Network.DExt` reads `[activated enabled]`; OBS logs "Decklink API Installed version
+      16.4". `BlackmagicCameraExtension` stays `waiting for user` (not used for output). Still open (needs the HD Mini):
+      Desktop Video Setup lists the device.
 - [x] **2 · ≈ 5 min.** Fresh worktree pinned to `76452a91` + env — done 2026-10-17. Fixtures stay in the main checkout and
       resolve via `fixture()`; nothing to symlink. `dashboard/dist` is committed, so `npm ci` matters only for the UI tests.
   ```
@@ -96,14 +96,20 @@ the external monitor (only Route C would). Times are rough; total ≈ 2½ h plus
   git status --short     # must be empty (output/ is git-ignored)
   ```
 - [x] **3 · ≈ 2 min.** Peer sanity check (above) — 2026-10-17: 1280 passed.
-- [ ] **3b · ≈ 8 min, headless Chrome.** One full gate round on the field build (none has run on `76452a91`):
+- [x] **3b · ≈ 14 min, headless Chrome.** One full gate round on the field build:
       `$W/scripts/run_gates.sh $W <fresh empty dir outside $W>` → exit 0. 1-min load under 4, never right after a suite,
-      never on the day of the test.
-- [ ] **4 · [OBS] · ≈ 5 min.** Managed engine lifecycle (§0a), OBS 32.2.2 in `/Applications`, the owner's own OBS open
+      never on the day of the test. 2026-10-17: **PASS** (`DONE tier=full failed=0`, 815 s, GATE_JOBS=3). A first round
+      failed only its 8 P2 arms, because `Minimal Alpha_DSK.key` had moved to the main checkout's `output/source-decks/`
+      and this build reads the old path; **keep the temporary symlink** `~/Desktop/Convert wall to 16x9 CGs/Minimal
+      Alpha_DSK.key` → `output/source-decks/Minimal Alpha_DSK.key` until the field test is done (results in the main
+      checkout `output/evidence/decklink-dryrun-2026-10-17/gates2-76452a91/`).
+- [x] **4 · [OBS] · ≈ 5 min.** Managed engine lifecycle (§0a), OBS 32.2.2 in `/Applications`, the owner's own OBS open
       alongside (it must stay untouched): `cd $W && PYTHONPATH=$W/src $PY -m obed_edom dashboard` → Alpha Keynote →
       Output settings: Output = Keyer, Output rate 25 fps, Enable Keyer ticked → **Take output** → **Output engine ·
       Ready** ("No output device set for 25 fps" is expected without the HD Mini) → the same button now reads **Release
       output**: press it → **Output engine · Released**. Then quit the dashboard and the owner's OBS.
+      2026-10-17: PASS as written (OBS exits ≈ 2 s after Release, clean log); the owner's OBS was closed, so "untouched
+      alongside" was not exercised.
 - [ ] **5 · [OBS] · ≈ 45 min + the soak.** Qualification harness from `$W` (a fresh `--out DIR` per run, always
       required; it refuses while any OBS runs or `OBED_LIVE_GL_REPLAY` / `OBED_LIVE_MM_OPACITY` is set; it never drives
       the DeckLink): `uv run python scripts/managed_obs_qualify.py --arm both --rate 25 --takes 2 --out DIR`
@@ -117,10 +123,12 @@ the external monitor (only Route C would). Times are rough; total ≈ 2½ h plus
       default, no `--rate`; ≈ 20 min) → qualified.
       Order: `both` → `g2` → `failsafe` → `placement` → `soak --precheck` → `soak --soak-minutes 20`.
       Only if time allows: `--rate 30`, and `--arm mmo` (25 + 30; Magic Move opacity + hand-back geometry, PASS 2026-09-25).
-- [ ] **6 · [OBS] [9222] · ≈ 25 min.** Manual-OBS dry run §0b → §1 → §2 → §3 at **25 fps** (no DeckLink needed): record the
+- [x] **6 · [OBS] [9222] · ≈ 25 min.** Manual-OBS dry run §0b → §1 → §2 → §3 at **25 fps** (no DeckLink needed): record the
       card's Chromium version and that main behaves as §3 says (1→2 refused, square translucent, no build-1 snap; 3→4 carried).
-- [ ] **7 · [KN] · optional, ≈ 15 min.** §4 through the managed engine with a deck prepared by **Qualify Keynote** — the
+      2026-10-17: done except the continuity-off comparison — results and finding D1 in "Home dry run — 2026-10-17".
+- [x] **7 · [KN] · optional, ≈ 15 min.** §4 through the managed engine with a deck prepared by **Qualify Keynote** — the
       only way to see GL replay under the managed engine (the fixture has no product route there).
+      2026-10-17: Minimal Alpha_DSK ready and its 2→3 clean (F2 cancelled by the owner, D3); finding D2 below.
 - [ ] **8 · owner's call.** A **25 fps** copy of the grating-with-counter movie (§3 cadence note), in a deck for step 7 and
       the hardware-day GL-replay item. Qualify Keynote converts non-H.264 (e.g. HEVC) movies to H.264 itself and lists
       them under **Deck ready**; a 30 fps movie is listed under "Some movies do not match the output rate".
@@ -206,7 +214,8 @@ It prints transport (`fill-key`), viewport (must be 1920×1080), `continuity` (m
 **log path**. Keys: `s` show · `a`/Enter advance · `g N` go to slide N · `h` hide · `o` observe · `q` stop.
 Output starts **hidden** (= pure camera). Tick:
 - [ ] `s` → slide 1 keyed over camera; `h` → pure camera; movies keep running while hidden
-- [ ] `a` ×5 → slides/builds follow, each settles in ~1.3–2.3 s, never stuck `busy=True`
+- [ ] `a` ×5 → slides/builds follow, each settles in ~1.3–2.3 s, never stuck `busy=True` (from slide 1: `a` 1 = 1→2,
+      `a` 2–4 = slide 2's three builds, `a` 5 = 2→3; 3→4 needs a sixth `a`)
 - [ ] **2→3 dissolve** in alpha: no black flash, no opaque frame (the movie restarting here is intended)
 - [ ] `g 1` returns to slide 1
 - [ ] `q` → browser source blank, OBS still running; starting the tool again attaches again
@@ -245,7 +254,7 @@ as §0a, Take output, Ready, then as below. **Manual OBS (§0b):**
 cd $W && OBED_LIVE_ATTACH=http://127.0.0.1:9222 OBED_LIVE_ATTACH_MATCH='about:blank#program' \
 PYTHONPATH=$W/src $PY -m obed_edom dashboard
 ```
-**Alpha Keynote** tab → **1. Add & qualify**: drop `Minimal Alpha_DSK.key` from Finder (or choose it on this Mac) →
+**Alpha Keynote** tab → **1. Add & qualify**: drop `Minimal Alpha_DSK.key` (main checkout `output/source-decks/` since 2026-10-17) from Finder (or choose it on this Mac) →
 **Qualify Keynote** (exports from a scratch copy; the source is never touched) → **Deck ready**, with "Movie continuity
 on" (or off, with the reason) and any movies converted to H.264. **2. Present** → **Start output session**: the output
 is SHOWN as soon as the deck loads (slide 1 keys onto In3/In4 — warn staff first); **Hide output** / **Show output** toggles it.
@@ -253,6 +262,9 @@ The live view's badge reads **Movie continuity · On** (moves not carried are li
 this deck** with the reason. Keys: → / Space / Enter / Page Down = next build or slide; ← / Page Up = restart the
 previous playable slide; digits + Enter (or a thumbnail click) = go to slide; a Page Up/Down clicker works as-is.
 Check "Some movies may not play in this output" stays absent (blank movie boxes → note it, go back to the field tool).
+**Keyer: after Start output session, read the placement status under the presenter.** It must reach a valid grant; if it
+reports a failure or "Calibration paused", press **Recalibrate output** (2026-10-17, D2: the first probe after session
+start failed and one Recalibrate granted `frac`). Without a grant a Dissolve jumps the movie back to its opening frame.
 Closing/reopening the presenter must not stop playback; **Stop session** is explicit.
 
 ## Triage (peer)
@@ -288,6 +300,33 @@ for line in open(sys.argv[1]):
 EOF
 ```
 (Record kinds the host writes: `start codecs browserVersion viewport continuity observation execute pageLog pageConsole pageException cdpSlow cdpTimeout stop`; every record has `ts` + `kind`.)
+
+## Home dry run — 2026-10-17 (main `76452a91`, no DeckLink; OBS 32.2.2, CEF Chrome/127.0.6533.120)
+Evidence (results only): main checkout `output/evidence/decklink-dryrun-2026-10-17/` (session logs, CDP screencast frames,
+`sheet_2to3.png`, `sheet_2to3_managed.png`).
+- **§1 (CDP readback of the card in OBS):** `1920 x 1080`, `devicePixelRatio 1`, fps 51, worst interval 20.1 ms. Page
+  screenshots: **H** 100 % alpha 0 · **B** 100 % alpha 255 black · **G** uniform alpha 128, grey 128 · **1** card back.
+  Alpha leaves the page as specified; In3/In4 still owed at the venue.
+- **§2 (attach, P2 fixture):** `fill-key`, 1920×1080, continuity `qualified`, `notCarried` 1→2 (`overlap`), GL replay off.
+  show/hide ≈ 3 ms, go-to 1 0.4 s, never stuck busy; both H.264 movies readyState 4. `q` blanks the page with OBS running;
+  re-attach works.
+- **§3:** 3→4 carried, one movie on slide 4 (owner eye, two replays). Continuity-off comparison not run.
+- **§4 (managed, prepared Minimal Alpha_DSK, 9 slides, textures clean, 3 movies → H.264):** `fill-key`, continuity
+  `qualified`, GL replay `injected`, mmOpacity `on`; after Recalibrate placement `valid` / `frac`. 2→3 Dissolve: squares
+  keep their colour and fade over ≈ 1.2 s; the movie freezes and fades (screencast of the managed page).
+- **D1 — attach path only: 2→3 greys the outgoing slide.** Field tool + P2 fixture in the owner's OBS: at the advance
+  frame the outgoing slide's coloured squares turn white/grey (coloured area 15.9 % → 3.0 % of the frame, visible area
+  unchanged) and the grating gives way to the export's baked opening frame (a still of the deck's original movie, which
+  the fixture swaps for the grating); the Dissolve then fades that. Placement on attach is `attached`, so that movie jump
+  is expected; the grey squares are not explained. Not seen on the managed path with a prepared deck (above). Not the show
+  path; open.
+- **D2 — first Keyer calibration fails.** Right after Start output session: `placementProbeRejected` `persistence-failed`
+  ("persistence: scene collection differs after cleanup"); one **Recalibrate output** → `valid` / `frac`. Operator step
+  added to §4; cause open.
+- **D3 — F2.key prepare stopped: not a defect.** The owner cancelled it to switch decks; the Keynote -1728 "Can’t get
+  document id" error is what that cancel looks like mid-export.
+- The owner's external monitor (XG27UCDMG, 4K60) blanked during one 3→4 replay; macOS logged no display event and the
+  owner attributes it to the cable. Not product.
 
 ## 5. Bring back
 - The `live-logs/*.jsonl` files from the session (path printed at start; also `output.logPath`).
