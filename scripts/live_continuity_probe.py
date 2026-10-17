@@ -122,28 +122,7 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
     GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
-from gate_checks import (  # noqa: E402
-    _A,
-    ALPHA_DSK_PLAN_SHA256,
-    D7_COUNTER_MDAT_SHA256,
-    D7_PLAN_SHA256,
-    D7S_PLAN_SHA256,
-    DECK_PLAN_SHA256,
-    MM_FEED_GATE_EXPECTATIONS,
-    MM_FEED_READ_EXPECTATIONS,
-    MM_FEED_REPORT_ROWS,
-    MM_FEED_STRIP_EXPECTATIONS,
-    PAINT_FLOOR_MIN_FRAMES,
-    PAINT_RED_ARMS,
-    PASSG_RED_EXPECTATIONS,
-    PASSG_RED_PAINT_FLOOR,
-    P2_OFF_PLAN_SHA256,
-    P2_PLAN_SHA256,
-    RECORD,
-    RED_ARM_EXPECTATIONS,
-    RED_ARM_PAINT_FLOOR,
-    RED_ARM_REQUIRED,
-)
+import gate_checks  # noqa: E402
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
 import mm_feed_variants  # noqa: E402
 import paint_instrument  # noqa: E402
@@ -151,6 +130,11 @@ import binary_counter_movie  # noqa: E402
 import mm_feed_instrument  # noqa: E402
 import live_evidence_contract as contract  # noqa: E402
 from live_evidence_contract import stage_map_valid  # noqa: E402
+
+try:
+    COST_RECORDER_JS = paint_instrument.COST_RECORDER_JS
+except AttributeError:
+    COST_RECORDER_JS = None
 
 FIXTURE = fixture("p2-recovery") / "html-adversarial/html-player"
 ORIGINAL_INDEX = fixture("p2-recovery") / "html-adversarial/html-unmodified/index.html"
@@ -1048,48 +1032,6 @@ def feed_fixture_required(args: argparse.Namespace) -> bool:
     )
 
 
-def mm_feed_control_aggregate_problems(label: str, rows: Sequence[dict[str, Any]]) -> list[str]:
-    if label == "startup-moved-decoder":
-        rider_verdicts = [row.get("noRiderAboveCanvas") if isinstance(row, dict) else None for row in rows]
-        problems = [
-            f"row {index} startup-moved-decoder noRiderAboveCanvas is unreadable"
-            for index, rider in enumerate(rider_verdicts)
-            if not isinstance(rider, dict) or rider.get("verdict") is None
-        ]
-        separated = any(
-            rider.get("verdict") is False and any(
-                _finite_number(offender.get("sourceRectError")) is not None
-                and offender["sourceRectError"] > mm_feed_instrument.SOURCE_RECT_TOLERANCE_PX
-                for offender in rider.get("offenders") or [] if isinstance(offender, dict)
-            )
-            for rider in rider_verdicts if isinstance(rider, dict)
-        )
-        if not separated:
-            problems.append("startup-moved-decoder did not expose a geometry-backed rider in any row")
-        return problems
-    handbacks = [row.get("handbackContinuity") for row in rows if isinstance(row, dict)]
-    if label == "no-linger":
-        problems = []
-        for index, handback in enumerate(handbacks):
-            source_frames = handback.get("sourceFrames") if isinstance(handback, dict) else None
-            if not isinstance(source_frames, int) or source_frames <= 2:
-                problems.append(f"row {index} no-linger sourceFrames {source_frames!r} is not > 2")
-        return problems
-    if label != "interim-delay":
-        return []
-    problems = [
-        f"row {index} interim-delay handbackContinuity is unreadable"
-        for index, handback in enumerate(handbacks)
-        if not isinstance(handback, dict) or handback.get("verdict") is None
-    ]
-    exposed = [handback for handback in handbacks if isinstance(handback, dict)
-               and handback.get("verdict") is False
-               and handback.get("reason") == "a static poster was exposed during DOM hand-back"]
-    if not exposed:
-        problems.append("interim-delay did not expose a static poster in any hand-back row")
-    return problems
-
-
 def force_viewport(width: int, height: int) -> None:
     forced = OutputDisplay(0, 0, 0, width, height + _HEIGHT_PAD, True)
     live_host_module.choose_display = lambda *_a, **_k: forced
@@ -1099,7 +1041,7 @@ def feed_host_kwargs(facts: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "mm_feed": MM_FEED_REQUEST,
         "mm_opacity": MM_OPACITY_REQUEST,
-        "pre_navigation_scripts": feed_instrument_pre_navigation_scripts(facts),
+        "pre_navigation_scripts": instrument_pre_navigation_scripts(facts),
     }
 
 
@@ -1590,7 +1532,7 @@ def ground_truth_facts(
     specs = verdict_specs(plan)
     runtime = runtime_of(plan)
     sha = plan_signature(runtime)
-    legacy = p2_shape_facts(plan) if sha in P2_PLAN_SHA256 else None
+    legacy = p2_shape_facts(plan) if sha in gate_checks.P2_PLAN_SHA256 else None
     facts: dict[str, Any] = {**(legacy or {}), "canvas": dict(plan.canvas), "verdicts": specs, "planSha256": sha}
     boundary_keys = {
         spec["atScene"]: spec_key(spec)
@@ -1828,7 +1770,9 @@ def feed_specs_for(facts: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 
 def counter_layout_for(facts: dict[str, Any] | None) -> dict[str, Any]:
-    second_strip = (facts or {}).get("planSha256") in {D7_PLAN_SHA256, D7S_PLAN_SHA256}
+    second_strip = (facts or {}).get("planSha256") in {
+        gate_checks.D7_PLAN_SHA256, gate_checks.D7S_PLAN_SHA256,
+    }
     offset = binary_counter_movie.SECOND_STRIP_X if second_strip else 0
     return binary_counter_movie.layout(offset)
 
@@ -1844,6 +1788,11 @@ def feed_instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tupl
     }
     source = mm_feed_instrument.INSTRUMENT_JS + "\nwindow.__obedMmFeedProbe.bootstrap(" + json.dumps(config) + ");"
     return (source,)
+
+
+def instrument_pre_navigation_scripts(facts: dict[str, Any] | None) -> tuple[str, ...]:
+    recorder = (COST_RECORDER_JS,) if isinstance(COST_RECORDER_JS, str) and COST_RECORDER_JS else ()
+    return (*recorder, *feed_instrument_pre_navigation_scripts(facts))
 
 
 def drive_and_sample(
@@ -3722,15 +3671,6 @@ def _feed_record_for_spec(evidence: Any, spec: dict[str, Any]) -> Any:
     return None
 
 
-score_feed_live = mm_feed_instrument.score_feed_live
-score_no_rider_above_canvas = mm_feed_instrument.score_no_rider_above_canvas
-score_labels_over_feed = mm_feed_instrument.score_labels_over_feed
-score_hold_frame = mm_feed_instrument.score_hold_frame
-score_poster_hold = mm_feed_instrument.score_poster_hold
-score_artwork_above = mm_feed_instrument.score_artwork_above
-score_handback_continuity = mm_feed_instrument.score_handback_continuity
-
-
 def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
     """All applicable GL/hold verdicts for one flagged carry and its evidenced substitution interval."""
     record = _feed_record_for_spec(evidence, spec)
@@ -3744,30 +3684,48 @@ def score_under_artwork(evidence: Any, spec: dict[str, Any]) -> dict[str, Any]:
     mode = record.get("mode")
     if mode == "unavailable":
         return _inconclusive(record.get("reason") or "the under-artwork feed mode is unavailable")
-    rider = score_no_rider_above_canvas(record.get("rider"))
-    artwork = score_artwork_above(record.get("artwork"))
+    rider = mm_feed_instrument.score_no_rider_above_canvas(record.get("rider"))
+    artwork = mm_feed_instrument.score_artwork_above(record.get("artwork"))
+    departure = mm_feed_instrument.score_departure_exposure(record.get("departureExposure"))
     handback = (
-        score_handback_continuity(record.get("handback"), mode=mode)
-        if record.get("evidenceVersion") == 2 else None
+        mm_feed_instrument.score_handback_continuity(record.get("handback"), mode=mode)
+        if record.get("evidenceVersion") in (2, 3) else None
     )
-    results: dict[str, Any] = {"noRiderAboveCanvas": rider, "artworkAbove": artwork}
+    results: dict[str, Any] = {
+        "noRiderAboveCanvas": rider,
+        "artworkAbove": artwork,
+        "departureExposure": departure,
+    }
     if handback is not None:
         results["handbackContinuity"] = handback
     if mode == "continuous":
-        primary = score_feed_live(record.get("feed"), continuous_expected=record.get("continuousExpected", True) is True)
-        labels = score_labels_over_feed(record.get("labels"))
-        results.update(feedLive=primary, labelsOverFeed=labels)
+        primary = mm_feed_instrument.score_feed_live(
+            record.get("feed"), continuous_expected=record.get("continuousExpected", True) is True,
+        )
+        labels = mm_feed_instrument.score_labels_over_feed(record.get("labels"))
+        results.update(
+            feedLive=primary,
+            labelsOverFeed=labels,
+            holdFrame={"verdict": None, "notApplicable": True},
+        )
         applicable = (primary, rider, labels, artwork, *((handback,) if handback is not None else ()))
-        applicable_names = set(results)
+        applicable_names = {"feedLive", "noRiderAboveCanvas", "labelsOverFeed", "artworkAbove"}
+        if handback is not None:
+            applicable_names.add("handbackContinuity")
         interval = mm_feed_instrument.feed_interval(record.get("feed"))
     elif mode in ("once", "departure", "standDown"):
-        hold = score_hold_frame(record.get("hold"))
-        poster = score_poster_hold(record.get("poster"))
-        results.update(holdFrame=hold, posterHold=poster)
+        hold = mm_feed_instrument.score_hold_frame(record.get("hold"))
+        poster = mm_feed_instrument.score_poster_hold(record.get("poster"))
+        resume = mm_feed_instrument.score_resume(record.get("resume"))
+        results.update(holdFrame=hold, posterHold=poster, resume=resume)
         if record.get("continuousExpected") is True:
-            results["feedLive"] = score_feed_live(record.get("feed"), continuous_expected=True)
-        applicable = (hold, poster, rider, artwork, *((handback,) if handback is not None else ()))
-        applicable_names = set(results) - {"feedLive"}
+            results["feedLive"] = mm_feed_instrument.score_feed_live(
+                record.get("feed"), continuous_expected=True,
+            )
+        applicable = (hold, poster, resume, rider, artwork, *((handback,) if handback is not None else ()))
+        applicable_names = {"holdFrame", "posterHold", "resume", "noRiderAboveCanvas", "artworkAbove"}
+        if handback is not None:
+            applicable_names.add("handbackContinuity")
         interval = mm_feed_instrument.feed_interval(record.get("hold"))
     else:
         return _inconclusive(f"unknown under-artwork evidence mode {mode!r}")
@@ -5473,7 +5431,10 @@ def run_visible_pass(
     not an arm."""
     force_viewport(*viewport)
     result: dict[str, Any] = {"pass": name, "status": "ok", "viewport": {"width": viewport[0], "height": viewport[1]}}
-    player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay)
+    player = LiveOutputHost(
+        export_root, slides, headless=True, gl_replay=gl_replay,
+        pre_navigation_scripts=instrument_pre_navigation_scripts(None),
+    )
     try:
         instances = slide_instances_of(plan)
         player.start()
@@ -6734,7 +6695,7 @@ def _run_goto_arm(
     evidence_dir: Path, character_rect: dict[str, float] | None, onset_scene_id: str, gl_replay: str = "off",
     matrix: Sequence[Sequence[int]] = GOTO_MATRIX, click_builds: bool | None = None,
     auto_kinds: Sequence[str] | None = None, carry_specs: Sequence[dict[str, Any]] = (),
-    host_kind: str, continuous_expected: bool,
+    pre_navigation_scripts: Sequence[str], host_kind: str, continuous_expected: bool,
 ) -> dict[str, Any]:
     """One armed or null-control goTo session: start, warm up, drive every `matrix` case (an
     advance leg, scored per frame against the matching `carry_specs`, only when armed), stop.
@@ -6742,7 +6703,10 @@ def _run_goto_arm(
     result: dict[str, Any] = {}
     evidence = visible_evidence_writer(evidence_dir, tag)
     with env_override(env):
-        player = LiveOutputHost(export_root, slides, headless=True, gl_replay=gl_replay)
+        player = LiveOutputHost(
+            export_root, slides, headless=True, gl_replay=gl_replay,
+            pre_navigation_scripts=pre_navigation_scripts,
+        )
         try:
             player.start()
             shown = warm_up_for_screenshots(player)
@@ -6785,6 +6749,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
     plan_slides = load_slides(plan_export)
     plan = ground_truth_plan(plan_export, plan_slides)
     facts = complete_facts(plan, plan_export, plan_slides)
+    pre_navigation_scripts = instrument_pre_navigation_scripts(facts)
     instances = slide_instances_of(plan)
     v_expectations = facts["rectExpectations"]["V"]
 
@@ -6815,13 +6780,13 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
     if args.core_variant is not None:
         sha = plan_signature(runtime_of(plan))
         label = f"core:{args.core_variant}"
-        expected = PASSG_RED_EXPECTATIONS.get((sha, label))
+        expected = gate_checks.PASSG_RED_EXPECTATIONS.get((sha, label))
         result.update(
             redArm=label, planSha256=sha, expectedCoreSha256=variant_sha(args.core_variant),
             expectedRedSet=list(expected) if expected is not None else None,
         )
-        if (sha, label) in PASSG_RED_PAINT_FLOOR:
-            result["paintFloor"] = PASSG_RED_PAINT_FLOOR[(sha, label)]
+        if (sha, label) in gate_checks.PASSG_RED_PAINT_FLOOR:
+            result["paintFloor"] = gate_checks.PASSG_RED_PAINT_FLOOR[(sha, label)]
     with ExitStack() as stack:
         if args.core_variant is not None:
             stack.enter_context(injected_core_variant(args.core_variant))
@@ -6839,6 +6804,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
             gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
             carry_specs=[spec for spec in facts["verdicts"] if spec["kind"] == "carry" and spec["expect"] is True],
+            pre_navigation_scripts=pre_navigation_scripts,
             host_kind=host_kind, continuous_expected=continuous_expected,
         )
 
@@ -6848,6 +6814,7 @@ def run_pass_g(args: argparse.Namespace) -> dict[str, Any]:
             instances=instances_g, expectations=goto_rect_expectations(expectations_g, armed=False),
             viewport=viewport, evidence_dir=evidence_dir, character_rect=character_rect, onset_scene_id=onset_scene_id,
             gl_replay=args.gl_replay, matrix=matrix, click_builds=click_builds, auto_kinds=auto_kinds,
+            pre_navigation_scripts=pre_navigation_scripts,
             host_kind=host_kind, continuous_expected=continuous_expected,
         )
 
@@ -6888,9 +6855,13 @@ def paint_floor_reasons(floor: Any, red: Sequence[str], runs: dict[str, Any], ar
     """Decision 3: with a registered `paintFloor`, every red carry id's longest unpainted run (`runs`) must reach it,
     and the floor itself must be at least `PAINT_FLOOR_MIN_FRAMES`; a `PAINT_RED_ARMS` arm needs one."""
     if floor is None:
-        return [f"{arm} needs a registered paintFloor of at least {PAINT_FLOOR_MIN_FRAMES}"] if arm in PAINT_RED_ARMS else []
-    if not isinstance(floor, int) or isinstance(floor, bool) or floor < PAINT_FLOOR_MIN_FRAMES:
-        return [f"paintFloor {floor!r} is not a frame count of at least {PAINT_FLOOR_MIN_FRAMES}"]
+        return [
+            f"{arm} needs a registered paintFloor of at least {gate_checks.PAINT_FLOOR_MIN_FRAMES}"
+        ] if arm in gate_checks.PAINT_RED_ARMS else []
+    if not isinstance(floor, int) or isinstance(floor, bool) or floor < gate_checks.PAINT_FLOOR_MIN_FRAMES:
+        return [
+            f"paintFloor {floor!r} is not a frame count of at least {gate_checks.PAINT_FLOOR_MIN_FRAMES}"
+        ]
     reasons = []
     for red_id in red:
         run = runs.get(red_id)
@@ -7342,7 +7313,8 @@ def overall_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     if unsampled:
         return "error", unsampled
     ground = result.get("groundTruth")
-    if isinstance(ground, dict) and "verdicts" in ground and ground.get("planSha256") not in P2_PLAN_SHA256:
+    if isinstance(ground, dict) and "verdicts" in ground \
+            and ground.get("planSha256") not in gate_checks.P2_PLAN_SHA256:
         return generated_status(result)
     a, b, c = arms.get("A", {}), arms.get("B", {}), arms.get("C", {})
     a_armed, c_armed = gl_replay_mode(a) == "injected", gl_replay_mode(c) == "injected"
@@ -7666,7 +7638,7 @@ def red_arm_status(result: dict[str, Any]) -> tuple[str, list[str]]:
     expected = result.get("expectedRedSet")
     if expected is None:
         return "unregistered", [f"no pre-registered red set for {result.get('redArm')!r} on this deck; red={result.get('redSet')}"]
-    if expected == RECORD:
+    if expected == gate_checks.RECORD:
         missing = sorted(set(result.get("requiredRed") or []) - set(result.get("redSet") or []))
         if missing:
             return "fail", [f"required red but green: {red_id}" for red_id in missing]
@@ -7700,18 +7672,18 @@ def run_red_arm(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit(str(exc)) from None
     sha = plan_signature(runtime_of(plan))
     label = red_arm_label(args.core_variant, args.strip, runtime)
-    expected = RED_ARM_EXPECTATIONS.get(
-        (sha, label, args.gl_replay), MM_FEED_STRIP_EXPECTATIONS.get((sha, label, args.gl_replay)),
+    expected = gate_checks.RED_ARM_EXPECTATIONS.get(
+        (sha, label, args.gl_replay), gate_checks.MM_FEED_STRIP_EXPECTATIONS.get((sha, label, args.gl_replay)),
     )
     result: dict[str, Any] = {
         "redArm": label, "planSha256": sha,
         "expectedRedSet": list(expected) if isinstance(expected, tuple) else expected,
-        "requiredRed": list(RED_ARM_REQUIRED.get((sha, label, args.gl_replay), ())),
+        "requiredRed": list(gate_checks.RED_ARM_REQUIRED.get((sha, label, args.gl_replay), ())),
         "expectedCoreSha256": variant_sha(args.core_variant) if args.core_variant else js_sha256(),
         "groundTruth": {key: facts[key] for key in GROUND_TRUTH_KEYS if key in facts},
     }
-    if (sha, label, args.gl_replay) in RED_ARM_PAINT_FLOOR:
-        result["paintFloor"] = RED_ARM_PAINT_FLOOR[(sha, label, args.gl_replay)]
+    if (sha, label, args.gl_replay) in gate_checks.RED_ARM_PAINT_FLOOR:
+        result["paintFloor"] = gate_checks.RED_ARM_PAINT_FLOOR[(sha, label, args.gl_replay)]
     if facts_on is not None:
         result["groundTruthGl"] = {"armed": facts_on["armed"], "verdicts": facts_on["verdicts"]}
     expected_stage = expected_stage_fit(facts["canvas"], {"width": viewport[0], "height": viewport[1]})
@@ -8469,7 +8441,10 @@ def run_force_wrap(args: argparse.Namespace) -> dict[str, Any]:
     source, scene = gt["source"], gt["scene"]
     result: dict[str, Any] = {"source": source, "boundaryScene": scene}
     force_viewport(*args.viewport)
-    player = LiveOutputHost(gt["export"], gt["slides"], headless=True, gl_replay=args.gl_replay)
+    player = LiveOutputHost(
+        gt["export"], gt["slides"], headless=True, gl_replay=args.gl_replay,
+        pre_navigation_scripts=instrument_pre_navigation_scripts(gt.get("factsOn") or gt.get("facts")),
+    )
     try:
         player.start()
         result["continuity"] = player.output["continuity"]
@@ -9406,7 +9381,10 @@ def capture_carry_cover(
     carried <video> from `CARRY_COVER_PREROLL_S` before the advance press until the transition plus
     `CARRY_COVER_TAIL_S` after it."""
     capture: dict[str, Any] = {}
-    player = LiveOutputHost(export, slides, headless=True)
+    player = LiveOutputHost(
+        export, slides, headless=True,
+        pre_navigation_scripts=instrument_pre_navigation_scripts(None),
+    )
     try:
         player.start()
         capture["continuity"] = player.output.get("continuity")
