@@ -1,0 +1,51 @@
+{
+  "armed": {
+    "continuity": {
+      "sha256": "59134e5e0a0f9ab61035507ccffc678a7ac7e0732b3560fc1ce0307c4323993e"
+    },
+    "destinations": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {
+        "advanceCarry": {
+          "verdicts": {
+            "b2to3:counter-a.mov#1->counter-a.mov#1:carry": {
+              "paint": {
+                "longestRun": 119
+              }
+            }
+          }
+        },
+        "advanceTo": 4,
+        "fromOrdinal": 1,
+        "toOrdinal": 3
+      }
+    ]
+  },
+  "expectedCoreSha256": "59134e5e0a0f9ab61035507ccffc678a7ac7e0732b3560fc1ce0307c4323993e",
+  "expectedRedSet": [
+    "G1-3-4:b2to3:counter-a.mov#1->counter-a.mov#1:carry",
+    "G1-3-4:destination"
+  ],
+  "kind": "live-continuity-probe-pass-g",
+  "nullControl": {
+    "continuity": {
+      "sha256": "59134e5e0a0f9ab61035507ccffc678a7ac7e0732b3560fc1ce0307c4323993e"
+    }
+  },
+  "paintFloor": 60,
+  "pass": "G",
+  "planSha256": "4d466b2f0ee035928486dc3e61f23a5d92e3cc4e76d5d02f367e115331cc0b00",
+  "redArm": "core:no-pin-hold",
+  "redSet": [
+    "G1-3-4:b2to3:counter-a.mov#1->counter-a.mov#1:carry",
+    "G1-3-4:destination"
+  ],
+  "status": "pass",
+  "unknown": []
+}

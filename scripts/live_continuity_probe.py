@@ -122,6 +122,28 @@ except ImportError:  # pragma: no cover - stream B is landing this constant conc
     GOTO_AUTOPLAY_ENV = "OBED_LIVE_GOTO_AUTOPLAY"
 
 import live_host_probe  # noqa: E402 - reuse the headless window-size compensation
+from gate_checks import (  # noqa: E402
+    _A,
+    ALPHA_DSK_PLAN_SHA256,
+    D7_COUNTER_MDAT_SHA256,
+    D7_PLAN_SHA256,
+    D7S_PLAN_SHA256,
+    DECK_PLAN_SHA256,
+    MM_FEED_GATE_EXPECTATIONS,
+    MM_FEED_READ_EXPECTATIONS,
+    MM_FEED_REPORT_ROWS,
+    MM_FEED_STRIP_EXPECTATIONS,
+    PAINT_FLOOR_MIN_FRAMES,
+    PAINT_RED_ARMS,
+    PASSG_RED_EXPECTATIONS,
+    PASSG_RED_PAINT_FLOOR,
+    P2_OFF_PLAN_SHA256,
+    P2_PLAN_SHA256,
+    RECORD,
+    RED_ARM_EXPECTATIONS,
+    RED_ARM_PAINT_FLOOR,
+    RED_ARM_REQUIRED,
+)
 from continuity_core_variants import VARIANTS, parse_strip, strip_entries, strip_label, variant_core, variant_sha  # noqa: E402
 import mm_feed_variants  # noqa: E402
 import paint_instrument  # noqa: E402
@@ -190,136 +212,6 @@ REFUSAL_VERDICT_KEY = {
     "restart2to3": "refused2to3",
     "continue3to4": "refused3to4",
 }
-# Red arms (plan §4): each arm's PRE-REGISTERED red set, keyed by (flag-off runtime plan sha,
-# arm label, --gl-replay). An id is a plan-generated verdict whose gated value differs from the
-# plan's expectation, or `stray:slide{ordinal}:{asset}` for a painting `<video>` the settled
-# slide's instances do not claim. RECORD = report the current behaviour, never pass/fail.
-RECORD = "record"
-# The schema-2 runtime plans (`CONTINUITY_VERSION` 6; `tests/fixtures/live_continuity/runtime_v2_examples.json`
-# for P2 off/on, D1, D3, D5; the rest derived from the S0 exports). D2 and D2-across derive the same plan:
-# the export does not encode play-across (plan §5, R-res-1).
-P2_OFF_PLAN_SHA256 = "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
-ALPHA_DSK_PLAN_SHA256 = "c9e546551300e44ff1765147def49257916f14f1c139fcee704d9accad7411d6"
-D7_PLAN_SHA256 = "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
-D7S_PLAN_SHA256 = "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
-D7_COUNTER_MDAT_SHA256 = {
-    "counter-a.mov": "71659a979a15ee609da711f5bfeddc61ff2fc420fae8dafed11aca820791a218",
-    "counter-b.mov": "b37ffd93027cfd3e692818e0f52ce109a0febec5a6a3aae16bb84207b450db39",
-}
-# The pinned P2 runtime plans (off, gl-replay on; p2-loop off, on): the only decks whose status
-# is P2's legacy slot table. Every other deck is scored by `generated_status`.
-P2_PLAN_SHA256 = frozenset({
-    P2_OFF_PLAN_SHA256,
-    "2fbf977277a5eef1cde701c12bb157905e40ac2b0a5ed85e30bf1056a3e65c18",
-    "866de785864ad19b11ecd8cdfb4ad1729798ccf9f1764aa59718de03034ba7a5",
-    "d860a09f4f6a8e24a81e2ad0c3b37bc8a3f2b4ce3947836ca315671031870131",
-})
-DECK_PLAN_SHA256 = {
-    "D1": "4d466b2f0ee035928486dc3e61f23a5d92e3cc4e76d5d02f367e115331cc0b00",
-    "D2": "029a4c427d2f7ebe2cf7410e2010fdc03834f370f5c6d25aeea9e05c2fbc20f7",
-    "D3": "01b74c88f4622e5a0650d334d7721a247a2039a1767f232d792e823405a21b1b",
-    "D4": "e166c385753364cdc159307b8f7d9092979533b71aee93ea4b8ebbea7a366076",
-    "D5": "73d1153f086381996b5490d6f66eae2ee6996eb05b4a1dcd0af0fce70a018f5e",
-    "D6": "149e813cfe68b6bac7c5c4ea0b5829f20e017ee1d0ce742ece3444fd1f60eed1",
-}
-_P2 = "untitled.mov#1->untitled.mov#1"
-_A = "counter-a.mov#1->counter-a.mov#1"
-_B = "counter-b.mov#1->counter-b.mov#1"
-_A_FAR = "counter-a.mov#2->counter-a.mov#1"
-_D1, _D2, _D3, _D4, _D5, _D6 = (DECK_PLAN_SHA256[f"D{n}"] for n in range(1, 7))
-# Derived from the plan and the v6 core's documented behaviour (WS-R, S2): a stripped carry's
-# destination plays raw and, when the next entry names that raw element's instance, the chain
-# resumes from it; a facaded pin no entry names is detached at the next slide change and stops;
-# a bridge overlay no entry names is held at its rect indefinitely (a stray on later slides); a
-# retire/restart of a raw (never carried) src is inert apart from `retire`'s preserve-refused notes.
-# `stage1/` below: main checkout output/evidence/s2-dev/instr-v-277c720b/stage1 (measured 2026-10-12 at 277c720b).
-RED_ARM_EXPECTATIONS: dict[tuple[str, str, str], tuple[str, ...] | str] = {
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): (
-        f"b0to1:{_P2}:retire", "stray:slide2:untitled.mov", "stray:slide3:untitled.mov", "stray:slide4:untitled.mov",
-        "stray:slide4:vid-20250608-wa0125.mp4",
-    ),
-    (P2_OFF_PLAN_SHA256, "strip:bridge@8", "off"): (f"b2to3:{_P2}:carry",),
-    # Nothing names slide 1's raw decoder, so nothing is pooled or noted: the carry reads False
-    # as the plan expects, and only the retire's note clause goes red.
-    (P2_OFF_PLAN_SHA256, "strip:retire@2", "off"): (f"b0to1:{_P2}:retire",),
-    (P2_OFF_PLAN_SHA256, "strip:glReplay@2", "auto"): (f"b0to1:{_P2}:armed",),
-    # The restart's src (slide 2) is retired at 2 and never carried, so the entry is inert.
-    (P2_OFF_PLAN_SHA256, "strip:restart@6", "off"): (),
-    (_D1, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
-    (_D1, "strip:bridge@4", "off"): (f"b1to2:{_A}:carry", "stray:slide3:counter-a.mov", "stray:slide4:counter-a.mov"),
-    # Re-registered 2026-10-12 (owner): the paint instrument reds the stripped pin's own carry (longest run 62); g1h's
-    # duplicate stays. Same set on the pre-fold core (glclock-v6/V4AB). stage1/V4/D1--strippin@6.json.
-    (_D1, "strip:pin@6", "off"): (f"b2to3:{_A}:carry", "duplicate:slide4:counter-a.mov#1"),
-    (_D2, "strip:bridge@2", "off"): (f"b0to1:{_A}:carry",),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D2, "strip:restart@4", "off"): (
-        f"b1to2:{_A}:restart", f"b2to3:{_A}:carry", f"b3to4:{_A}:carry",
-        "duplicate:slide3:counter-a.mov#1", "duplicate:slide4:counter-a.mov#1", "stray:slide5:counter-a.mov",
-    ),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D2, "strip:pin@6", "off"): (f"b2to3:{_A}:carry",),
-    (_D2, "strip:bridge@8", "off"): (f"b3to4:{_A}:carry",),
-    # V3 (owner 2026-10-12): longest unpainted run 108. stage1/V3/D2-red-npH.json.
-    (_D2, "core:no-pin-hold", "off"): (f"b2to3:{_A}:carry",),
-    (_D3, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
-    (_D3, "strip:bridge@2", "off"): (f"b0to1:{_B}:carry",),
-    (_D3, "strip:retire@4", "off"): ("b1to2:counter-a.mov#1->end:retire",),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D3, "strip:pin@4", "off"): (
-        f"b1to2:{_B}:carry", f"b2to3:{_B}:carry", "duplicate:slide3:counter-b.mov#1", "stray:slide4:counter-b.mov",
-    ),
-    (_D3, "strip:bridge@6", "off"): (f"b2to3:{_B}:carry",),
-    # V3 (owner 2026-10-12): longest unpainted run 107. stage1/V3/D3-red-npH.json.
-    (_D3, "core:no-pin-hold", "off"): (f"b0to1:{_A}:carry",),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D4, "core:wrong-instance", "off"): (
-        f"b0to1:{_A_FAR}:carry", f"b1to2:{_A}:carry", "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
-    ),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D4, "core:fifo-reuse", "off"): (
-        f"b0to1:{_A_FAR}:carry", f"b1to2:{_A}:carry", "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
-    ),
-    (_D4, "strip:bridge@3", "off"): (f"b0to1:{_A_FAR}:carry",),
-    # Re-registered 2026-10-12 (owner): the paint instrument reds the stripped pin's own carry (longest run 63); g1h's
-    # duplicate stays. Same set on the pre-fold core (glclock-v6/V4AB). stage1/V4/D4--strippin@5.json.
-    (_D4, "strip:pin@5", "off"): (f"b1to2:{_A}:carry", "duplicate:slide3:counter-a.mov#1"),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D5, "core:stash-any", "off"): ("stray:slide3:counter-a.mov", "stray:slide3:counter-b.mov"),
-    # Re-registered 2026-10-12 (owner): the reused decoder's carry reds (paint run 59; 59 owner mismatches with paint
-    # off) and duplicates on slide 3 instead of g1h's stray. Same set on the pre-fold core (glclock-v6/V4AB).
-    # stage1/V4/D5--core-variantfifo-reuse.json.
-    (_D5, "core:fifo-reuse", "off"): (f"b1to2:{_A}:carry", "duplicate:slide3:counter-a.mov#1"),
-    # Post-hoc from discovery g1h-089a0393 (2026-09-25), to be confirmed by the final round.
-    (_D5, "strip:pin@2", "off"): (f"b0to1:{_A}:carry",),
-    (_D5, "strip:pin@4", "off"): (f"b1to2:{_A}:carry",),
-    # V3 (owner 2026-10-12): longest unpainted runs 108 / 223. stage1/V3/D5-red-npH.json.
-    (_D5, "core:no-pin-hold", "off"): (f"b0to1:{_A}:carry", f"b1to2:{_A}:carry"),
-    (_D6, "strip:bridge@2", "off"): (f"b0to1:{_A_FAR}:carry",),
-    (_D6, "strip:retire@8", "off"): (f"b3to4:{_A}:retire",),
-}
-# Pass G red arms (`--pass G --core-variant NAME`), keyed by (flag-off runtime plan sha, arm label); ids
-# from `passg_red_ids`. `stage1/` as above.
-PASSG_RED_EXPECTATIONS: dict[tuple[str, str], tuple[str, ...]] = {
-    # V3 (owner 2026-10-12): the (1,3,4) leg's carry (longest unpainted run 229) and its destination (the slide-4 rect
-    # stays unpainted past arrival); the landed core passes this leg. stage1/V3/D1-passG-red-npH.json.
-    (_D1, "core:no-pin-hold"): (f"G1-3-4:b2to3:{_A}:carry", "G1-3-4:destination"),
-}
-# Floor on every red carry's longest unpainted run (frames), carried as `paintFloor` and enforced by the red status
-# functions (decision 3: at least PAINT_FLOOR_MIN_FRAMES). Keyed as the arm's expectations.
-PAINT_FLOOR_MIN_FRAMES = 60
-# Red arms whose registered ids only count with a registered floor (the paint-red mechanism, decision 3).
-PAINT_RED_ARMS = ("core:no-pin-hold",)
-RED_ARM_PAINT_FLOOR: dict[tuple[str, str, str], int] = {
-    (deck, "core:no-pin-hold", "off"): PAINT_FLOOR_MIN_FRAMES for deck in (_D2, _D3, _D5)
-}
-PASSG_RED_PAINT_FLOOR: dict[tuple[str, str], int] = {(_D1, "core:no-pin-hold"): PAINT_FLOOR_MIN_FRAMES}
-# Ids an arm must turn red whatever else it registers (plan §3.4 Q2/Q3, §4): the stray red and the
-# identity red. A RECORD arm missing one of these fails; a registered set must contain them.
-RED_ARM_REQUIRED: dict[tuple[str, str, str], tuple[str, ...]] = {
-    (P2_OFF_PLAN_SHA256, "core:stash-any", "off"): ("stray:slide4:vid-20250608-wa0125.mp4",),
-    (_D4, "core:wrong-instance", "off"): (f"b0to1:{_A_FAR}:carry",),
-}
 GROUND_TRUTH_KEYS = (
     "asset", "onset1to2", "boundaryPlayerIndex", "restartScene", "bridgeScene",
     "pinRect", "bridgeSrcRect", "destRect", "canvas",
@@ -362,37 +254,6 @@ HOST_KINDS = (
     HOST_MANAGED_OBS_25,
     HOST_MANAGED_OBS_30,
 )
-
-MM_FEED_GATE_EXPECTATIONS: dict[str, dict[str, bool | None]] = {
-    "feed-on": {"feedLive": True, "holdFrame": None, "noRiderAboveCanvas": True,
-                "labelsOverFeed": True, "artworkAbove": True, "handbackContinuity": True},
-    "feed-off": {"feedLive": False, "holdFrame": True, "posterHold": True, "handbackContinuity": True},
-    "attach-once": {"holdFrame": True, "posterHold": True,
-                    "noRiderAboveCanvas": True, "artworkAbove": True, "handbackContinuity": True},
-    "hold-upload-killed": {"holdFrame": False},
-    "ordinal": {"feedLive": False, "holdFrame": False, "posterHold": True},
-    "after-feed": {"feedLive": False, "holdFrame": True, "posterHold": True},
-    "from-only-crossfade": {"feedLive": False},
-    "from-only-single": {"feedLive": True},
-    "overlay-ride": {"noRiderAboveCanvas": False, "labelsOverFeed": True},
-    "settle-on-stage": {"artworkAbove": False},
-    "no-pause": {"posterHold": False},
-    "mm-opacity-off": {"labelsOverFeed": False},
-    "no-linger": {"handbackContinuity": False},
-    "interim-delay": {},
-    "startup-moved-decoder": {"labelsOverFeed": True},
-}
-MM_FEED_STRIP_EXPECTATIONS = {
-    (ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off"): (
-        "b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",
-    ),
-}
-MM_FEED_READ_EXPECTATIONS = {
-    ("D7", "crossfade"): {0.25: True, 0.5: False, 0.75: False},
-    ("D7s", "crossfade"): {0.25: True, 0.5: False, 0.75: False},
-    ("Alpha_DSK", "first-crossfade"): {0.5: False, 0.75: True},
-}
-
 # Pass G (goTo autoplay repair): (fromOriginalOrdinal, toOriginalOrdinal) pairs.
 GOTO_MATRIX: tuple[tuple[int, int], ...] = ((1, 2), (1, 3), (1, 4), (3, 1), (4, 3))
 # 8 shots with a nominal margin over the >=360ms floor `spacing_ok` checks on the measured timestamps.

@@ -1,0 +1,42 @@
+{
+  "bridges": [
+    {
+      "boundary": "b1to2",
+      "clock": {
+        "lagMs": 55.200000000186265,
+        "via": "fallback"
+      },
+      "result": {
+        "cleanShare": 1.0,
+        "maxStripPx": 7,
+        "undecidedFrames": 0,
+        "verdict": "fail"
+      }
+    },
+    {
+      "boundary": "b2to3",
+      "clock": {
+        "lagMs": 57.40000000037253,
+        "via": "fallback"
+      },
+      "result": {
+        "cleanShare": 1.0,
+        "maxStripPx": 0,
+        "undecidedFrames": 0,
+        "verdict": "pass"
+      }
+    }
+  ],
+  "continuity": {
+    "sha256": "b1089683b764a85c018e783297b821bed0bb0c9e665b2b75b3eafea7ad7a2394"
+  },
+  "control": "red",
+  "coreSha256": "b1089683b764a85c018e783297b821bed0bb0c9e665b2b75b3eafea7ad7a2394",
+  "coreVariant": "no-gl-clock",
+  "fixture": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D1/html-unmodified",
+  "kind": "live-continuity-probe-carry-cover",
+  "reasons": [
+    "b1to2: a 7 px strip of the poster shows beyond the overlay (max 5)"
+  ],
+  "status": "fail"
+}

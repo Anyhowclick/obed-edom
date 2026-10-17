@@ -1,0 +1,43 @@
+{
+  "arm": {
+    "census": {
+      "3": {
+        "duplicateVideos": [],
+        "unexpectedVideos": []
+      }
+    },
+    "sampler": {
+      "schema": 2,
+      "selfCheck": {
+        "ok": true
+      }
+    }
+  },
+  "expectedCoreSha256": "59134e5e0a0f9ab61035507ccffc678a7ac7e0732b3560fc1ce0307c4323993e",
+  "expectedRedSet": [
+    "b0to1:counter-a.mov#1->counter-a.mov#1:carry",
+    "b1to2:counter-a.mov#1->counter-a.mov#1:carry"
+  ],
+  "glReplay": {
+    "requested": "off"
+  },
+  "groundTruth": {
+    "planSha256": "73d1153f086381996b5490d6f66eae2ee6996eb05b4a1dcd0af0fce70a018f5e",
+    "verdicts": [
+      {
+        "id": "b0to1:counter-a.mov#1->counter-a.mov#1:carry"
+      },
+      {
+        "id": "b1to2:counter-a.mov#1->counter-a.mov#1:carry"
+      }
+    ]
+  },
+  "paintFloor": 60,
+  "redArm": "core:no-pin-hold",
+  "redSet": [
+    "b0to1:counter-a.mov#1->counter-a.mov#1:carry",
+    "b1to2:counter-a.mov#1->counter-a.mov#1:carry"
+  ],
+  "status": "pass",
+  "unknown": []
+}

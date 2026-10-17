@@ -1,0 +1,73 @@
+{
+  "arm": {
+    "b0to1:counter-a.mov#1->counter-a.mov#1:carry": {
+      "paint": {
+        "coverage": {},
+        "doubleFrames": 0,
+        "frames": 178,
+        "partialFrames": 0,
+        "partialSeqs": [],
+        "status": "fail",
+        "substituteFrames": 0,
+        "unobserved": [],
+        "unpaintedFrames": 6,
+        "unpaintedSeqs": [
+          198,
+          199,
+          200,
+          201,
+          202,
+          203
+        ],
+        "unreadable": []
+      }
+    },
+    "sampler": {
+      "schema": 2,
+      "selfCheck": {
+        "ok": true
+      }
+    }
+  },
+  "control": "6:ancestor-opacity:pin@2",
+  "controlRecord": {
+    "aborted": null,
+    "control": {
+      "atScene": 2,
+      "delayTicks": 10,
+      "depth": 1,
+      "n": 6,
+      "phase": "pin",
+      "timing": "early",
+      "variant": "ancestor-opacity"
+    },
+    "errors": [],
+    "events": [],
+    "fired": true,
+    "hiddenSeqs": [
+      198,
+      199,
+      200,
+      201,
+      202,
+      203
+    ],
+    "hiddenTicks": 6,
+    "lateSeqs": [],
+    "offSeq": 204,
+    "onSeq": 198,
+    "target": {},
+    "triggerSeq": 188
+  },
+  "expectedCoreSha256": "838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64",
+  "groundTruth": {
+    "planSha256": "73d1153f086381996b5490d6f66eae2ee6996eb05b4a1dcd0af0fce70a018f5e"
+  },
+  "kind": "live-continuity-probe-paint-control",
+  "redSet": [
+    "b0to1:counter-a.mov#1->counter-a.mov#1:carry"
+  ],
+  "status": "pass",
+  "targetVerdictId": "b0to1:counter-a.mov#1->counter-a.mov#1:carry",
+  "unknown": []
+}

@@ -1,0 +1,282 @@
+{
+  "attach": {
+    "b0to1:counter-a.mov#1->counter-a.mov#1:carry": {
+      "underArtwork": {
+        "artworkAbove": {
+          "verdict": true
+        },
+        "handbackContinuity": {
+          "verdict": true
+        },
+        "holdFrame": {
+          "verdict": true
+        },
+        "mode": "departure",
+        "noRiderAboveCanvas": {
+          "verdict": true
+        },
+        "posterHold": {
+          "verdict": true
+        },
+        "verdict": true
+      }
+    },
+    "b0to1:counter-b.mov#1->counter-b.mov#1:carry": {
+      "underArtwork": {
+        "artworkAbove": {
+          "verdict": true
+        },
+        "handbackContinuity": {
+          "verdict": true
+        },
+        "holdFrame": {
+          "verdict": true
+        },
+        "mode": "departure",
+        "noRiderAboveCanvas": {
+          "verdict": true
+        },
+        "posterHold": {
+          "verdict": true
+        },
+        "verdict": true
+      }
+    },
+    "b1to2:counter-a.mov#1->counter-a.mov#1:carry": {
+      "underArtwork": {
+        "artworkAbove": {
+          "verdict": true
+        },
+        "handbackContinuity": {
+          "verdict": true
+        },
+        "holdFrame": {
+          "verdict": true
+        },
+        "mode": "departure",
+        "noRiderAboveCanvas": {
+          "verdict": true
+        },
+        "posterHold": {
+          "verdict": true
+        },
+        "verdict": true
+      }
+    },
+    "b1to2:counter-b.mov#1->counter-b.mov#1:carry": {
+      "underArtwork": {
+        "artworkAbove": {
+          "verdict": true
+        },
+        "handbackContinuity": {
+          "verdict": true
+        },
+        "holdFrame": {
+          "verdict": true
+        },
+        "mode": "departure",
+        "noRiderAboveCanvas": {
+          "verdict": true
+        },
+        "posterHold": {
+          "verdict": true
+        },
+        "verdict": true
+      }
+    },
+    "b2to3:counter-a.mov#1->counter-a.mov#1:carry": {
+      "underArtwork": {
+        "artworkAbove": {
+          "verdict": true
+        },
+        "handbackContinuity": {
+          "verdict": true
+        },
+        "holdFrame": {
+          "verdict": true
+        },
+        "mode": "departure",
+        "noRiderAboveCanvas": {
+          "verdict": true
+        },
+        "posterHold": {
+          "verdict": true
+        },
+        "verdict": true
+      }
+    },
+    "b2to3:counter-b.mov#1->counter-b.mov#1:carry": {
+      "underArtwork": {
+        "artworkAbove": {
+          "verdict": true
+        },
+        "handbackContinuity": {
+          "verdict": true
+        },
+        "holdFrame": {
+          "verdict": true
+        },
+        "mode": "departure",
+        "noRiderAboveCanvas": {
+          "verdict": true
+        },
+        "posterHold": {
+          "verdict": true
+        },
+        "verdict": true
+      }
+    },
+    "entryColdStart": {
+      "1": {
+        "asset": "counter-a.mov",
+        "scene": 0,
+        "visibleUndecodedDurationMs": 0.0
+      },
+      "2": {
+        "asset": "counter-b.mov",
+        "scene": 0,
+        "visibleUndecodedDurationMs": 0.0
+      }
+    },
+    "verdicts": {
+      "b0to1:counter-a.mov#1->counter-a.mov#1:carry": {},
+      "b0to1:counter-b.mov#1->counter-b.mov#1:carry": {},
+      "b1to2:counter-a.mov#1->counter-a.mov#1:carry": {},
+      "b1to2:counter-b.mov#1->counter-b.mov#1:carry": {},
+      "b2to3:counter-a.mov#1->counter-a.mov#1:carry": {},
+      "b2to3:counter-b.mov#1->counter-b.mov#1:carry": {}
+    }
+  },
+  "groundTruth": {
+    "planSha256": "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584",
+    "verdicts": [
+      {
+        "atScene": 2,
+        "feed": {
+          "draw": 4,
+          "drawCount": 8,
+          "from": {
+            "size": [
+              800,
+              225
+            ],
+            "upload": 5
+          },
+          "to": {
+            "size": [
+              640,
+              180
+            ],
+            "upload": 6
+          }
+        },
+        "id": "b0to1:counter-a.mov#1->counter-a.mov#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 2,
+        "feed": {
+          "draw": 5,
+          "drawCount": 8,
+          "from": {
+            "size": [
+              800,
+              225
+            ],
+            "upload": 7
+          },
+          "to": {
+            "size": [
+              640,
+              180
+            ],
+            "upload": 8
+          }
+        },
+        "id": "b0to1:counter-b.mov#1->counter-b.mov#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 4,
+        "feed": {
+          "draw": 4,
+          "drawCount": 8,
+          "from": {
+            "size": [
+              640,
+              180
+            ],
+            "upload": 5
+          },
+          "to": {
+            "size": [
+              800,
+              225
+            ],
+            "upload": 6
+          }
+        },
+        "id": "b1to2:counter-a.mov#1->counter-a.mov#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 4,
+        "feed": {
+          "draw": 5,
+          "drawCount": 8,
+          "from": {
+            "size": [
+              640,
+              180
+            ],
+            "upload": 7
+          },
+          "to": {
+            "size": [
+              800,
+              225
+            ],
+            "upload": 8
+          }
+        },
+        "id": "b1to2:counter-b.mov#1->counter-b.mov#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 6,
+        "feed": {
+          "draw": 4,
+          "drawCount": 8,
+          "from": {
+            "size": [
+              800,
+              225
+            ],
+            "upload": 5
+          },
+          "to": null
+        },
+        "id": "b2to3:counter-a.mov#1->counter-a.mov#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 6,
+        "feed": {
+          "draw": 5,
+          "drawCount": 8,
+          "from": {
+            "size": [
+              800,
+              225
+            ],
+            "upload": 6
+          },
+          "to": null
+        },
+        "id": "b2to3:counter-b.mov#1->counter-b.mov#1:carry",
+        "underArtwork": true
+      }
+    ]
+  },
+  "status": "pass"
+}

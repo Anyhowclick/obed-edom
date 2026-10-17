@@ -1,0 +1,321 @@
+{
+  "carry-cover.json": {
+    "added": [],
+    "arm": "{\"label\": \"green\", \"wanted\": \"pass\", \"fixture\": \"/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-recovery/html-adversarial/html-player\", \"control\": \"green\", \"variant\": null}",
+    "gateKind": "check_cc",
+    "oldLines": [
+      "[CARRY-COVER green] control=green status=pass (want pass) exit=0 core sha 838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64 (want 838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64)",
+      "    b3to4: verdict=pass maxStripPx=0 cleanShare=1.0 undecidedFrames=0 clock=gl lagMs=5"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {},
+    "verdict": "MATCH"
+  },
+  "carry-coverD1--core-variantno-gl-clock.json": {
+    "added": [],
+    "arm": "{\"label\": \"D1 --core-variant no-gl-clock\", \"wanted\": \"fail\", \"fixture\": \"/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/qual-decks/D1/html-unmodified\", \"control\": \"red\", \"variant\": \"no-gl-clock\"}",
+    "gateKind": "check_cc",
+    "oldLines": [
+      "[CARRY-COVER D1 --core-variant no-gl-clock] control=red status=fail (want fail) exit=1 core sha b1089683b764a85c018e783297b821bed0bb0c9e665b2b75b3eafea7ad7a2394 (want b1089683b764a85c018e783297b821bed0bb0c9e665b2b75b3eafea7ad7a2394)",
+      "    b1to2: a 7 px strip of the poster shows beyond the overlay (max 5)",
+      "    b1to2: verdict=fail maxStripPx=7 cleanShare=1.0 undecidedFrames=0 clock=fallback lagMs=55.200000000186265",
+      "    b2to3: verdict=pass maxStripPx=0 cleanShare=1.0 undecidedFrames=0 clock=fallback lagMs=57.40000000037253"
+    ],
+    "rc": 1,
+    "removed": [],
+    "runtimeFields": {},
+    "verdict": "MATCH"
+  },
+  "host-red--core-variantstash-any.json": {
+    "added": [],
+    "arm": "core:stash-any",
+    "gateKind": "check_host_red",
+    "oldLines": [
+      "[HOST --core-variant stash-any] core:stash-any status=pass exit=0 expectedCoreSha256=2b730098a4963bc5c8a9f6ff7fd6cd047fb21339a4f7435a122f8d1643bda811 (want 2b730098a4963bc5c8a9f6ff7fd6cd047fb21339a4f7435a122f8d1643bda811) unknown=[]",
+      "    expected red: ['b0to1:untitled.mov#1->untitled.mov#1:retire', 'stray:slide2:untitled.mov', 'stray:slide3:untitled.mov', 'stray:slide4:untitled.mov', 'stray:slide4:vid-20250608-wa0125.mp4']",
+      "    observed red: ['b0to1:untitled.mov#1->untitled.mov#1:retire', 'stray:slide2:untitled.mov', 'stray:slide3:untitled.mov', 'stray:slide4:untitled.mov', 'stray:slide4:vid-20250608-wa0125.mp4'] -> MATCH",
+      "    slide 2: unexpected=['Untitled.mov-0.0000-46.0333.mov'] duplicates=0",
+      "    slide 3: unexpected=['Untitled.mov-0.0000-46.0333.mov'] duplicates=0",
+      "    slide 4: unexpected=['Untitled.mov-0.0000-46.0333.mov', 'VID-20250608-WA0125.mp4-0.0000-45.1381.mp4'] duplicates=0"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {
+      "_argvGlReplay": "off",
+      "_displayLabel": "--core-variant stash-any"
+    },
+    "verdict": "MATCH"
+  },
+  "host-red--stripglReplay@2--gl-replayauto.json": {
+    "added": [],
+    "arm": "strip:glReplay@2",
+    "gateKind": "check_host_red",
+    "oldLines": [
+      "[HOST --strip glReplay@2 --gl-replay auto] strip:glReplay@2 status=pass exit=0 expectedCoreSha256=838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64 (want 838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64) unknown=[]",
+      "    expected red: ['b0to1:untitled.mov#1->untitled.mov#1:armed']",
+      "    observed red: ['b0to1:untitled.mov#1->untitled.mov#1:armed'] -> MATCH"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {
+      "_argvGlReplay": "auto",
+      "_displayLabel": "--strip glReplay@2 --gl-replay auto"
+    },
+    "verdict": "MATCH"
+  },
+  "host-redD3--strippin@4.json": {
+    "added": [],
+    "arm": "strip:pin@4",
+    "gateKind": "check_host_red",
+    "oldLines": [
+      "[HOST --strip pin@4] strip:pin@4 status=pass exit=0 expectedCoreSha256=838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64 (want 838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64) unknown=[]",
+      "    expected red: ['b1to2:counter-b.mov#1->counter-b.mov#1:carry', 'b2to3:counter-b.mov#1->counter-b.mov#1:carry', 'duplicate:slide3:counter-b.mov#1', 'stray:slide4:counter-b.mov']",
+      "    observed red: ['b1to2:counter-b.mov#1->counter-b.mov#1:carry', 'b2to3:counter-b.mov#1->counter-b.mov#1:carry', 'duplicate:slide3:counter-b.mov#1', 'stray:slide4:counter-b.mov'] -> MATCH",
+      "    slide 3: unexpected=[] duplicates=1",
+      "    slide 4: unexpected=['counter-b.mov-0.0000-55.0000.mov'] duplicates=0"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {
+      "_argvGlReplay": "off",
+      "_displayLabel": "--strip pin@4"
+    },
+    "verdict": "MATCH"
+  },
+  "host-redD5--core-variantno-pin-hold.json": {
+    "added": [],
+    "arm": "core:no-pin-hold",
+    "gateKind": "check_host_red",
+    "oldLines": [
+      "[HOST --core-variant no-pin-hold] core:no-pin-hold status=pass exit=0 expectedCoreSha256=59134e5e0a0f9ab61035507ccffc678a7ac7e0732b3560fc1ce0307c4323993e (want 59134e5e0a0f9ab61035507ccffc678a7ac7e0732b3560fc1ce0307c4323993e) unknown=[]",
+      "    expected red: ['b0to1:counter-a.mov#1->counter-a.mov#1:carry', 'b1to2:counter-a.mov#1->counter-a.mov#1:carry']",
+      "    observed red: ['b0to1:counter-a.mov#1->counter-a.mov#1:carry', 'b1to2:counter-a.mov#1->counter-a.mov#1:carry'] -> MATCH"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {
+      "_argvGlReplay": "off",
+      "_displayLabel": "--core-variant no-pin-hold"
+    },
+    "verdict": "MATCH"
+  },
+  "mm-feed-Alpha_DSK-after-feed.json": {
+    "added": [
+      "    MISMATCH: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold False != True",
+      "    MISMATCH: b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed"
+    ],
+    "arm": "after-feed",
+    "gateKind": "check_mm_feed",
+    "oldLines": [
+      "[MM-FEED Alpha_DSK after-feed] exit=1 records=4 status=fail",
+      "    MISMATCH: result.arms.A.feedVerdicts.b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold False != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.holdFrame None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.posterHold None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != True"
+    ],
+    "rc": 1,
+    "removed": [
+      "    MISMATCH: result.arms.A.feedVerdicts.b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold False != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.holdFrame None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.posterHold None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != True"
+    ],
+    "runtimeFields": {},
+    "verdict": "MISMATCH"
+  },
+  "mm-feed-Alpha_DSK-from-only.json": {
+    "added": [
+      "    REPORT: asset=untitled-h264.mov scene=4 visibleUndecodedDurationMs=17.2",
+      "    REPORT: asset=untitled-h264.mov scene=6 visibleUndecodedDurationMs=17.1",
+      "    REPORT: asset=untitled-h264.mov scene=8 visibleUndecodedDurationMs=15.8",
+      "    REPORT: asset=vid-20250608-wa0125.mp4 scene=8 visibleUndecodedDurationMs=15.8",
+      "    REPORT: asset=vid-20250608-wa0121.mp4 scene=12 visibleUndecodedDurationMs=28.9",
+      "    REPORT: asset=full_report_card_wall_dsk.001.01.h264.mov scene=16 visibleUndecodedDurationMs=32.8"
+    ],
+    "arm": "from-only",
+    "gateKind": "check_mm_feed",
+    "oldLines": [
+      "[MM-FEED Alpha_DSK from-only] exit=1 records=4 status=fail",
+      "    MISMATCH: result.arms.A.feedVerdicts.b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive[0.75] False != True"
+    ],
+    "rc": 1,
+    "removed": [
+      "    MISMATCH: result.arms.A.feedVerdicts.b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive[0.75] False != True"
+    ],
+    "runtimeFields": {},
+    "verdict": "MATCH"
+  },
+  "mm-feed-Alpha_DSK-mm-opacity-off.json": {
+    "added": [
+      "    N/A: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.labelsOverFeed explicitly notApplicable",
+      "    REPORT: asset=untitled-h264.mov scene=4 visibleUndecodedDurationMs=16.6",
+      "    REPORT: asset=untitled-h264.mov scene=6 visibleUndecodedDurationMs=18.2",
+      "    REPORT: asset=untitled-h264.mov scene=8 visibleUndecodedDurationMs=18.5",
+      "    REPORT: asset=vid-20250608-wa0125.mp4 scene=8 visibleUndecodedDurationMs=18.5",
+      "    REPORT: asset=vid-20250608-wa0121.mp4 scene=12 visibleUndecodedDurationMs=49.2",
+      "    REPORT: asset=full_report_card_wall_dsk.001.01.h264.mov scene=16 visibleUndecodedDurationMs=32.6"
+    ],
+    "arm": "mm-opacity-off",
+    "gateKind": "check_mm_feed",
+    "oldLines": [
+      "[MM-FEED Alpha_DSK mm-opacity-off] exit=1 records=4 status=fail",
+      "    MISMATCH: result.arms.A.feedVerdicts.b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.labelsOverFeed True != False"
+    ],
+    "rc": 1,
+    "removed": [
+      "    MISMATCH: result.arms.A.feedVerdicts.b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.labelsOverFeed True != False"
+    ],
+    "runtimeFields": {},
+    "verdict": "MATCH"
+  },
+  "mm-feed-Alpha_DSK-no-pause.json": {
+    "added": [
+      "[MM-FEED Alpha_DSK no-pause] exit=1 records=4 status=unregistered",
+      "    MISMATCH: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold missing or malformed",
+      "    MISMATCH: b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold missing or malformed",
+      "    MISMATCH: b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.posterHold missing or malformed",
+      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold missing or malformed"
+    ],
+    "arm": "no-pause",
+    "gateKind": "check_mm_feed",
+    "oldLines": [
+      "[MM-FEED Alpha_DSK no-pause] exit=1 records=1 status=unregistered",
+      "    MISMATCH: result.arm.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != False"
+    ],
+    "rc": 1,
+    "removed": [
+      "[MM-FEED Alpha_DSK no-pause] exit=1 records=1 status=unregistered",
+      "    MISMATCH: result.arm.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != False"
+    ],
+    "runtimeFields": {},
+    "verdict": "MISMATCH"
+  },
+  "mm-feed-Alpha_DSK-ordinal.json": {
+    "added": [
+      "    MISMATCH: b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame missing or malformed"
+    ],
+    "arm": "ordinal",
+    "gateKind": "check_mm_feed",
+    "oldLines": [
+      "[MM-FEED Alpha_DSK ordinal] exit=1 records=4 status=fail",
+      "    MISMATCH: result.arms.A.feedVerdicts.b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.posterHold None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != True"
+    ],
+    "rc": 1,
+    "removed": [
+      "    MISMATCH: result.arms.A.feedVerdicts.b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry.posterHold None != True",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.feedLive True != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.holdFrame None != False",
+      "    MISMATCH: result.arms.A.feedVerdicts.b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry.posterHold None != True"
+    ],
+    "runtimeFields": {},
+    "verdict": "MISMATCH"
+  },
+  "mm-feed-D7-attach-once.json": {
+    "added": [
+      "    REPORT: asset=counter-a.mov scene=0 visibleUndecodedDurationMs=0.0",
+      "    REPORT: asset=counter-b.mov scene=0 visibleUndecodedDurationMs=0.0"
+    ],
+    "arm": "attach-once",
+    "gateKind": "check_mm_feed",
+    "oldLines": [
+      "[MM-FEED D7 attach-once] exit=0 records=6 status=pass"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {},
+    "verdict": "MATCH"
+  },
+  "mm-feed-D7-feed-on-1920.json": {
+    "added": [
+      "    MISMATCH: b0to1:counter-a.mov#1->counter-a.mov#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b0to1:counter-b.mov#1->counter-b.mov#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b1to2:counter-a.mov#1->counter-a.mov#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b1to2:counter-b.mov#1->counter-b.mov#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b2to3:counter-a.mov#1->counter-a.mov#1:carry.holdFrame missing or malformed",
+      "    MISMATCH: b2to3:counter-b.mov#1->counter-b.mov#1:carry.holdFrame missing or malformed"
+    ],
+    "arm": "feed-on-1920",
+    "gateKind": "check_mm_feed",
+    "oldLines": [
+      "[MM-FEED D7 feed-on-1920] exit=0 records=6 status=pass"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {},
+    "verdict": "MISMATCH"
+  },
+  "paint-controlD5-6_ancestor-opacity_pin@2.json": {
+    "added": [],
+    "arm": "6:ancestor-opacity:pin@2",
+    "gateKind": "check_paint_control",
+    "oldLines": [
+      "[PAINT-CONTROL D5 6:ancestor-opacity:pin@2] control=6:ancestor-opacity:pin@2 status=pass exit=0 target=b0to1:counter-a.mov#1->counter-a.mov#1:carry fired=True hiddenTicks=6 (want 6)",
+      "    injected seqs: [198, 199, 200, 201, 202, 203]",
+      "    unpainted seqs on target: [198, 199, 200, 201, 202, 203]",
+      "    paint fail unpainted=6 partial=0 double=0 substitute=0; redSet=['b0to1:counter-a.mov#1->counter-a.mov#1:carry'] unknown=[]"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {},
+    "verdict": "MATCH"
+  },
+  "passG-D1.json": {
+    "added": [],
+    "arm": "D1",
+    "gateKind": "check_passg",
+    "oldLines": [
+      "[PASSG D1] status=pass exit=0"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {},
+    "verdict": "MATCH"
+  },
+  "passG-redD1--core-variantno-pin-hold.json": {
+    "added": [],
+    "arm": "core:no-pin-hold",
+    "gateKind": "check_passg_red",
+    "oldLines": [
+      "[PASSG-RED D1 --core-variant no-pin-hold] core:no-pin-hold status=pass exit=0 expectedCoreSha256=59134e5e0a0f9ab61035507ccffc678a7ac7e0732b3560fc1ce0307c4323993e (want 59134e5e0a0f9ab61035507ccffc678a7ac7e0732b3560fc1ce0307c4323993e) unknown=[]",
+      "    expected red: ['G1-3-4:b2to3:counter-a.mov#1->counter-a.mov#1:carry', 'G1-3-4:destination']",
+      "    observed red: ['G1-3-4:b2to3:counter-a.mov#1->counter-a.mov#1:carry', 'G1-3-4:destination']"
+    ],
+    "rc": 0,
+    "removed": [],
+    "runtimeFields": {},
+    "verdict": "MATCH"
+  }
+}

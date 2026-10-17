@@ -1,0 +1,32 @@
+{
+  "arm": {
+    "census": {
+      "4": {
+        "duplicateVideos": [],
+        "unexpectedVideos": []
+      }
+    },
+    "sampler": {
+      "schema": 2,
+      "selfCheck": {
+        "ok": true
+      }
+    }
+  },
+  "expectedCoreSha256": "838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64",
+  "expectedRedSet": [
+    "b0to1:untitled.mov#1->untitled.mov#1:armed"
+  ],
+  "glReplay": {
+    "requested": "auto"
+  },
+  "groundTruth": {
+    "planSha256": "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
+  },
+  "redArm": "strip:glReplay@2",
+  "redSet": [
+    "b0to1:untitled.mov#1->untitled.mov#1:armed"
+  ],
+  "status": "pass",
+  "unknown": []
+}

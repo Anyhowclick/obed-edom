@@ -1,0 +1,50 @@
+{
+  "arm": {
+    "census": {
+      "3": {
+        "duplicateVideos": [
+          {
+            "label": "counter-b.mov#1"
+          }
+        ],
+        "unexpectedVideos": []
+      },
+      "4": {
+        "duplicateVideos": [],
+        "unexpectedVideos": [
+          {
+            "src": "counter-b.mov-0.0000-55.0000.mov"
+          }
+        ]
+      }
+    },
+    "sampler": {
+      "schema": 2,
+      "selfCheck": {
+        "ok": true
+      }
+    }
+  },
+  "expectedCoreSha256": "838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64",
+  "expectedRedSet": [
+    "b1to2:counter-b.mov#1->counter-b.mov#1:carry",
+    "b2to3:counter-b.mov#1->counter-b.mov#1:carry",
+    "duplicate:slide3:counter-b.mov#1",
+    "stray:slide4:counter-b.mov"
+  ],
+  "glReplay": {
+    "requested": "off"
+  },
+  "groundTruth": {
+    "planSha256": "01b74c88f4622e5a0650d334d7721a247a2039a1767f232d792e823405a21b1b"
+  },
+  "redArm": "strip:pin@4",
+  "redSet": [
+    "b1to2:counter-b.mov#1->counter-b.mov#1:carry",
+    "b2to3:counter-b.mov#1->counter-b.mov#1:carry",
+    "duplicate:slide3:counter-b.mov#1",
+    "stray:slide4:counter-b.mov"
+  ],
+  "status": "pass",
+  "unknown": []
+}

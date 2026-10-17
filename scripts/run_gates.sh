@@ -46,7 +46,7 @@ if [[ $TIER == full ]]; then
 else
   HOST_RED_ARMS=()
 fi
-# S0 deck arms (plan §3.4 Q3): every (deck, arm) the probe's RED_ARM_EXPECTATIONS registers, run as host red arms at
+# S0 deck arms (plan §3.4 Q3): every (deck, arm) gate_checks.py's RED_ARM_EXPECTATIONS registers, run as host red arms at
 # 1920x1080 on the deck's own export (HOST_DECK). Full tier only. The `no-pin-hold` arms are the painted instrument's
 # red arms (S2 instrument plan §4/§5, §3.11; decision 11), registered 2026-10-12 (owner) with a paintFloor of 60
 # (decision 3): D2 b2to3 A (108), D3 b0to1 A (107), D5 b0to1 + b1to2 A (108 / 223); D4 reads no red and is not run.
@@ -68,18 +68,15 @@ DECK_ARMS=(
 PASSG_FIXTURES=(P2 D1 D2 D3 D4 D5 D6)
 [[ $TIER == full ]] || PASSG_FIXTURES=()
 # Pass G red (S2 instrument plan §3.9/§5, §3.11): "<deck> <probe args>", the advance legs scored per frame under a core
-# variant. Registered 2026-10-12 (owner; probe-owned PASSG_RED_EXPECTATIONS, paintFloor 60): D1 no-pin-hold reds
+# variant. Registered 2026-10-12 (owner; gate_checks.py's PASSG_RED_EXPECTATIONS, paintFloor 60): D1 no-pin-hold reds
 # exactly the (1,3,4) leg's b2to3 carry (longest unpainted run 229) and that leg's destination (the slide-4 rect stays
 # unpainted past arrival), and leaves (2,1,2) and (1,2,3) green. Source: main checkout
 # output/evidence/s2-dev/instr-v-277c720b/stage1/V3/D1-passG-red-npH.json. The pre-pin-hold core red runs once outside
 # this script (decision 7). Full tier only.
 PASSG_RED_ARMS=("D1 --core-variant no-pin-hold")
 [[ $TIER == full ]] || PASSG_RED_ARMS=()
-# Paint floor second guard (decision 3; the probe's red status functions are the first): a host or Pass G red arm of a
-# PAINT_RED_VARIANTS core variant must carry a paintFloor of at least PAINT_FLOOR_FRAMES, and any paintFloor an arm
-# carries must hold for every red carry's longest unpainted run.
-PAINT_RED_VARIANTS=no-pin-hold
-PAINT_FLOOR_FRAMES=60
+# Paint-floor registrations and enforcement live in gate_checks.py. Any paintFloor carried by an arm must hold for
+# every exact registered red carry.
 # Painted-instrument positive control (S2 instrument plan §3.10/§4/§5): "<deck> <N:VARIANT:PHASE@SCENE[:late]>". The
 # injected N-frame hide must read as exactly the injected seq set on the target carry and nowhere else; N=0 is the
 # injector's null (armed, nothing hidden, every count 0). The late timing makes the pre-paint phase load-bearing.
@@ -95,7 +92,7 @@ CARRY_COVER_ARMS=("P2 pass" "P2 fail --core-variant linear-bridge" "P2 fail --ca
                   "D1 pass" "D1 fail --core-variant no-gl-clock" "D1 fail --carry-cover-null")
 [[ $TIER == full ]] || CARRY_COVER_ARMS=()
 # Stage B texture-feed registrations (§5.3): "deck expectation-label probe args". Each ordinary/control capture selects
-# its relevant A or attach arm; core variants already run one red arm. Expectations live in probe data, so the
+# its relevant A or attach arm; core variants already run one red arm. Expectations live in gate_checks.py, so the
 # shell queue contains no duplicated verdict table. Alpha is repaired into this round's outdir before any timed run.
 MM_FEED_ARMS=(
   "D7 feed-on-2560 --mm-feed on --viewport 2560x1440 --skip-arms B,C,V,Voff,attach"
@@ -245,51 +242,7 @@ tally(){ case $1 in 0) ;; 3) PENDING=$((PENDING+1)); echo "    PENDING REGISTRAT
 # (--skip-freeze-bracket)" exactly when the arm passes that flag, else "skipped (bridge disabled)" under
 # --disable-bridge34, else "run". "RECORD" registers no set: it prints the observed sets and returns 3
 # only when those integrity checks hold with no inconclusive finding (exit 0 or 1).
-expect(){ $PY - "$@" <<'PYEOF'
-import hashlib,json,re,sys
-sys.path.insert(0,"scripts")
-from continuity_core_variants import variant_sha
-from obed_edom.live_continuity_js import js_sha256
-from obed_edom.p2_verdict import build_continuity_plan
-log,rc,spec,inc_spec,args=sys.argv[1],int(sys.argv[2]),sys.argv[3],sys.argv[4],sys.argv[5:]
-try: text=open(log,encoding="utf-8",errors="replace").read()
-except OSError as e: print(f"    no log ({e}) -> MISMATCH"); sys.exit(1)
-found=re.findall(r"^- ([A-Za-z0-9]+): \*\*(True|False)\*\*(?: \(([^)]*)\))?",text,re.M)
-inconclusive=sorted(n for n,_,verdict in found if verdict=="inconclusive")
-red={n for n,v,verdict in found if v=="False" and verdict!="inconclusive"}
-ids={n for n,_,_ in found}
-auto="--gl-replay" in args and args[args.index("--gl-replay")+1:][:1]==["auto"] or "--gl-replay=auto" in args
-slot_ok=("glReplayCarry1to2" in ids and "refusedCarry1to2" not in ids) if auto else ("refusedCarry1to2" in ids and "glReplayCarry1to2" not in ids)
-core=re.search(r"injected core sha256: ([0-9a-f]{64})",text)
-success=re.search(r"^success: \*\*(True|False)\*\*",text,re.M)
-unchanged=re.search(r"^Source unchanged: \*\*True\*\*",text,re.M)
-def arg(name): return next((a.split("=",1)[1] for a in args if a.startswith(name+"=")),None) or next((args[i+1] for i,a in enumerate(args[:-1]) if a==name),None)
-variant,strip=arg("--core-variant"),arg("--strip")
-head_core=re.search(r"^Core variant: (\S+) · injected core sha256: ",text,re.M)
-head_strip=re.search(r"^Strip: (\S+) · injected plan sha256: ([0-9a-f]{64})$",text,re.M)
-unstripped=hashlib.sha256(json.dumps(build_continuity_plan("--disable-bridge34" not in args)).encode()).hexdigest()
-head_freeze=re.search(r"^Freeze bracket: (.+)$",text,re.M)
-want_freeze="skipped (--skip-freeze-bracket)" if "--skip-freeze-bracket" in args else "skipped (bridge disabled)" if "--disable-bridge34" in args else "run"
-header_ok=(bool(head_core) and head_core.group(1)==(variant or "none") and bool(head_strip) and head_strip.group(1)==(strip or "none")
-           and (strip is None or head_strip.group(2)!=unstripped) and bool(head_freeze) and head_freeze.group(1)==want_freeze)
-want_sha=variant_sha(variant) if variant else js_sha256()
-sha_ok=bool(core) and core.group(1)==want_sha
-count_ok=len(found)==15 and len(ids)==15
-exit_ok=(rc==0)==(success is not None and success.group(1)=="True") and rc in (0,1)
-print(f"    core sha {core.group(1) if core else None} expected {want_sha} {'MATCH' if sha_ok else 'MISMATCH'}")
-print(f"    header core {head_core.group(1) if head_core else None} strip {head_strip.group(1) if head_strip else None} plan sha {head_strip.group(2) if head_strip else None} (unstripped {unstripped}) freeze bracket {head_freeze.group(1) if head_freeze else None!r} (want {want_freeze!r}) {'OK' if header_ok else 'WRONG'}")
-print(f"    exit {rc}; findings {len(found)}/15; source unchanged {bool(unchanged)}; success {success.group(1) if success else None}; 1->2 slot {'glReplayCarry1to2' if auto else 'refusedCarry1to2'} {'OK' if slot_ok else 'WRONG'}; inconclusive: {inconclusive or '{}'}; observed red: {sorted(red) or '{}'}")
-integrity=sha_ok and count_ok and bool(unchanged) and bool(success) and exit_ok and slot_ok and header_ok
-if spec=="RECORD":
-    recorded=integrity and not inconclusive
-    print(f"    expected red: (none registered) -> {'RECORDED' if recorded else 'MISMATCH'}")
-    sys.exit(3 if recorded else 1)
-want,want_inc=set(spec.split()),set(inc_spec.split())
-ok=integrity and red==want and set(inconclusive)==want_inc and rc==(1 if want or want_inc else 0)
-print(f"    expected red: {sorted(want) or '{}'}; expected inconclusive: {sorted(want_inc) or '{}'} -> {'MATCH' if ok else 'MISMATCH'}")
-sys.exit(0 if ok else 1)
-PYEOF
-}
+expect(){ $PY scripts/gate_checks.py expect "$1" "$2" AUTO "headless Chrome" "$3" "$4" "${@[5,-1]}"; }
 # Every run goes through one queue, GATE_JOBS at a time, refilled whenever any slot opens; the launch section below
 # starts the long groups first. Each run has its own process group and atomically writes <name>.rc as "<round
 # nonce> <exit>"; a missing .rc or one from another round fails its check. Checks run in their own order once every
@@ -344,16 +297,16 @@ QUAL_B_SOURCE=${QUAL_B_SOURCE:-"$HOME/Desktop/Convert wall to 16x9 CGs/Continuit
 if (( ${#MM_FEED_ARMS} )); then
   [[ -d $QUAL_B_SOURCE/D7-html && -d $QUAL_B_SOURCE/D7s-html ]] || {
     echo "D7/D7s qualification exports are missing under QUAL_B_SOURCE=$QUAL_B_SOURCE; no run launched" >&2; exit 2; }
-  $PY - "$QUAL_B_SOURCE" "$O" "$G/scripts/live_continuity_probe.py" <<'PYEOF' || { echo "D7/D7s qualification export staging FAILED; no run launched"; exit 2; }
+  $PY - "$QUAL_B_SOURCE" "$O" "$G/scripts/gate_checks.py" <<'PYEOF' || { echo "D7/D7s qualification export staging FAILED; no run launched"; exit 2; }
 import ast,hashlib,json,shutil,struct,sys
 from pathlib import Path
 from obed_edom import preview_textures
 from obed_edom.live_continuity import Unsupported,_referenced_movies,derive_plan,plan_signature
-source,out,probe_source=map(Path,sys.argv[1:])
+source,out,gate_source=map(Path,sys.argv[1:])
 names={"D7_PLAN_SHA256","D7S_PLAN_SHA256","D7_COUNTER_MDAT_SHA256"}
 pins={}
 identities={}
-for node in ast.parse(probe_source.read_text()).body:
+for node in ast.parse(gate_source.read_text()).body:
     if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and node.targets[0].id in names:
         pins[node.targets[0].id]=ast.literal_eval(node.value)
 def mdat_sha(path):
@@ -477,7 +430,7 @@ done
 echo "load average (1 min) at launch $LAUNCH_LOAD"
 check_host(){ rc=$(status_of $O/host-$1); [[ $rc == 0 ]] || fail "HOST $1 exit $rc"; summ $O/host-$1.json "HOST $1" "${HOST_SKIP[$1]}" || fail "HOST $1 status"
   paint_report $O/host-$1.json "HOST $1"; }
-# Host red arms (probe-owned pre-registered sets, keyed in the probe by the P2 off-plan sha). The artifact contract is
+# Host red arms (gate_checks.py pre-registered sets, keyed by plan sha, arm and GL mode). The artifact contract is
 # checked in full: every key present and typed, redArm equal to the label the CLI arguments imply, expectedCoreSha256
 # the arm's sha, `unknown` an empty list, the census stray/duplicate multiset reconciled with redSet, and the red and
 # expected multisets equal (Counter), and the paint floor second guard. A "record" arm returns 3 only when all of that
@@ -489,89 +442,14 @@ run_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); fix=$F/html-player; id
   queue $O/host-red$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --viewport 1920x1080 --artifact $O/host-red$n.json "$@"; }
 check_host_red(){ n=${HOST_DECK:-}$(echo "$*" | tr -d ' '); rc=$(status_of $O/host-red$n)
   [[ $rc == <-> ]] || { echo "[HOST ${HOST_DECK:+$HOST_DECK }$*] no fresh status ($rc) -> MISMATCH"; return 1; }
-  PAINT_RED_VARIANTS=$PAINT_RED_VARIANTS PAINT_FLOOR_FRAMES=$PAINT_FLOOR_FRAMES $PY - "$O/host-red$n.json" "$rc" "$@" <<'PYEOF'
-import json,os,sys
-from collections import Counter
-sys.path.insert(0,"scripts")
-from continuity_core_variants import parse_strip, strip_label, variant_sha
-from obed_edom.live_continuity_js import js_sha256
-path,rc,args=sys.argv[1],int(sys.argv[2]),sys.argv[3:]
-label=" ".join(args)
-try: d=json.load(open(path))
-except Exception as e: print(f"[HOST {label}] no artifact ({e}) -> MISMATCH"); sys.exit(1)
-problems=[]
-def strs(v): return isinstance(v,list) and all(isinstance(x,str) for x in v)
-variant=args[args.index("--core-variant")+1] if "--core-variant" in args else None
-strip=parse_strip(args[args.index("--strip")+1]) if "--strip" in args else None
-want_arm=f"core:{variant}" if variant else strip_label(*strip)
-want_sha=variant_sha(variant) if variant else js_sha256()
-status,arm_label,exp,got,unknown,sha=(d.get(k) for k in ("status","redArm","expectedRedSet","redSet","unknown","expectedCoreSha256"))
-arm=d.get("arm"); census=arm.get("census") if isinstance(arm,dict) else None
-for key in ("status","redArm","expectedRedSet","redSet","unknown","expectedCoreSha256"):
-    if key not in d: problems.append(f"missing {key}")
-if not isinstance(status,str): problems.append("status not a string")
-if arm_label!=want_arm: problems.append(f"redArm {arm_label!r} != {want_arm!r}")
-if sha!=want_sha: problems.append(f"expectedCoreSha256 {sha!r} != {want_sha}")
-if not strs(unknown): problems.append("unknown not a list of strings")
-elif unknown: problems.append(f"unknown {unknown}")
-if not strs(got): problems.append("redSet not a list of strings")
-if not (exp=="record" or strs(exp)): problems.append("expectedRedSet neither 'record' nor a list of strings")
-sampler=arm.get("sampler") if isinstance(arm,dict) else None
-if not (isinstance(sampler,dict) and sampler.get("schema")==2 and isinstance(sampler.get("selfCheck"),dict) and sampler["selfCheck"].get("ok") is True):
-    problems.append("arm.sampler is not schema 2 with selfCheck.ok")
-if not (isinstance(census,dict) and census and all(isinstance(c,dict) for c in census.values())): problems.append("arm.census missing or malformed")
-elif strs(got):
-    strays=[r for r in got if r.startswith("stray:")]; dups=[r for r in got if r.startswith("duplicate:")]
-    want_dups=[]; pool=list(strays)
-    for o,c in sorted(census.items()):
-        vids,dv=c.get("unexpectedVideos"),c.get("duplicateVideos")
-        if not (isinstance(vids,list) and isinstance(dv,list)): problems.append(f"census slide {o} lacks unexpectedVideos/duplicateVideos"); continue
-        want_dups+=[f"duplicate:slide{o}:{x.get('label') if isinstance(x,dict) else None}" for x in dv]
-        for v in vids:
-            src=str((v or {}).get("src") or "").lower()
-            hit=next((r for r in pool if r.startswith(f"stray:slide{o}:") and (r.split(":",2)[2]=="unknown" or r.split(":",2)[2] in src)),None)
-            if hit is None: problems.append(f"census stray on slide {o} ({src}) not in redSet")
-            else: pool.remove(hit)
-    if pool: problems.append(f"redSet strays with no census video: {pool}")
-    if Counter(dups)!=Counter(want_dups): problems.append(f"redSet duplicates {sorted(dups)} != census {sorted(want_dups)}")
-def frames(v): return isinstance(v,int) and not isinstance(v,bool)
-floor,want_floor=d.get("paintFloor"),int(os.environ["PAINT_FLOOR_FRAMES"])
-if floor is None and variant in os.environ.get("PAINT_RED_VARIANTS","").split(): problems.append(f"paintFloor missing (a {variant} red arm needs at least {want_floor} frames)")
-elif floor is not None and not (frames(floor) and floor>=want_floor): problems.append(f"paintFloor {floor!r} is not a frame count of at least {want_floor}")
-elif floor is not None:
-    for red in got if strs(got) else []:
-        v=arm.get(red) if isinstance(arm,dict) else None
-        run=v["paint"].get("longestRun") if isinstance(v,dict) and isinstance(v.get("paint"),dict) else None
-        if red.endswith(":carry") and not (frames(run) and run>=floor): problems.append(f"{red} longest unpainted run {run!r} below the {floor}-frame floor")
-if exp=="record":
-    ok=not problems and status=="recorded" and rc==0; verdict="RECORDED" if ok else "MISMATCH"
-else:
-    ok=not problems and status=="pass" and rc==0 and Counter(got)==Counter(exp); verdict="MATCH" if ok else "MISMATCH"
-print(f"[HOST {label}] {arm_label} status={status} exit={rc} expectedCoreSha256={sha} (want {want_sha}) unknown={unknown}")
-print(f"    expected red: {exp}\n    observed red: {got} -> {verdict}")
-for p in problems: print(f"    contract: {p}")
-for o,c in sorted((census or {}).items()):
-    if isinstance(c,dict) and (c.get("unexpectedVideos") or c.get("duplicateVideos")): print(f"    slide {o}: unexpected={[(v or {}).get('src') for v in c.get('unexpectedVideos') or []]} duplicates={len(c.get('duplicateVideos') or [])}")
-sys.exit((3 if exp=="record" else 0) if ok else 1)
-PYEOF
+  $PY scripts/gate_checks.py check_host_red "$O/host-red$n.json" "$rc" AUTO "headless Chrome" "$@"
   local r=$?; paint_report "$O/host-red$n.json" "HOST ${HOST_DECK:+$HOST_DECK }$*"; return $r; }
 # A Pass G run passes only with this round's exit 0 and a Pass G artifact whose top-level status is pass; anything else
 # (fail, inconclusive, error, no artifact, a missing or stale status) is FAILED, never pending.
 run_passg(){ fix=$F/html-player; idx=$F/html-unmodified/index.html
   if [[ $1 != P2 ]]; then fix=$Q/$1/html-unmodified; idx=$fix/index.html; fi
   queue $O/passG-$1 $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --pass G --artifact $O/passG-$1.json; }
-check_passg(){ $PY - "$O/passG-$1.json" "$1" "$(status_of $O/passG-$1)" <<'PYEOF' || fail "PASSG $1"
-import json,sys
-path,name,rc=sys.argv[1:]
-try: d=json.load(open(path))
-except Exception as e: print(f"[PASSG {name}] no artifact ({e}) exit={rc}"); sys.exit(1)
-d=d if isinstance(d,dict) else {}
-print(f"[PASSG {name}] status={d.get('status')} exit={rc}")
-if d.get("pass")!="G": print(f"    not a Pass G artifact (pass={d.get('pass')!r})")
-for r in d.get("reasons") or []: print(f"    {r}")
-if d.get("error"): print(f"    error: {d['error']}")
-sys.exit(0 if rc=="0" and d.get("pass")=="G" and d.get("status")=="pass" else 1)
-PYEOF
+check_passg(){ $PY scripts/gate_checks.py check_passg "$O/passG-$1.json" "$(status_of $O/passG-$1)" "$1" "headless Chrome" || fail "PASSG $1"
   paint_report "$O/passG-$1.json" "PASSG $1"; }
 # Painted-instrument report (S2 instrument plan §5), report only: per scored carry its unpainted/partial/double/substitute
 # frames and longest run, each sampler's schema and selfCheck, and every paint census entry, which is a finding whatever
@@ -616,56 +494,7 @@ PYEOF
 run_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' '); fix=$Q/$1/html-unmodified
   queue $O/passG-red$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html --pass G --artifact $O/passG-red$n.json "${@[2,-1]}"; }
 check_passg_red(){ n=$1$(echo "${@[2,-1]}" | tr -d ' ')
-  PAINT_RED_VARIANTS=$PAINT_RED_VARIANTS PAINT_FLOOR_FRAMES=$PAINT_FLOOR_FRAMES $PY - "$O/passG-red$n.json" "$(status_of $O/passG-red$n)" "$@" <<'PYEOF' || fail "PASSG-RED $*"
-import json,os,sys
-from collections import Counter
-sys.path.insert(0,"scripts")
-from continuity_core_variants import variant_sha
-path,rc,deck,args=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4:]
-label=" ".join([deck,*args])
-variant=args[args.index("--core-variant")+1] if "--core-variant" in args else None
-try: want_sha=variant_sha(variant)
-except Exception as e: print(f"[PASSG-RED {label}] no expected core sha ({e}) exit={rc}"); sys.exit(1)
-try: d=json.load(open(path))
-except Exception as e: print(f"[PASSG-RED {label}] no artifact ({e}) exit={rc}"); sys.exit(1)
-d=d if isinstance(d,dict) else {}
-def strs(v): return isinstance(v,list) and all(isinstance(x,str) for x in v)
-def sha_of(s): c=(d.get(s) or {}).get("continuity") if isinstance(d.get(s),dict) else None; return c.get("sha256") if isinstance(c,dict) else None
-exp,got,unknown,floor=d.get("expectedRedSet"),d.get("redSet"),d.get("unknown"),d.get("paintFloor")
-print(f"[PASSG-RED {label}] {d.get('redArm')} status={d.get('status')} exit={rc} expectedCoreSha256={d.get('expectedCoreSha256')} (want {want_sha}) unknown={unknown}")
-print(f"    expected red: {exp}\n    observed red: {got}")
-for r in d.get("statusReasons") or d.get("reasons") or []: print(f"    {r}")
-if d.get("error"): print(f"    error: {d['error']}")
-problems=[]
-if d.get("kind")!="live-continuity-probe-pass-g" or d.get("pass")!="G": problems.append(f"not a Pass G artifact (kind={d.get('kind')!r}, pass={d.get('pass')!r})")
-if d.get("redArm")!=f"core:{variant}": problems.append(f"redArm {d.get('redArm')!r} != {'core:'+str(variant)!r}")
-if d.get("expectedCoreSha256")!=want_sha: problems.append("expectedCoreSha256 is not the variant's")
-for s in ("armed","nullControl"):
-    if sha_of(s)!=want_sha: problems.append(f"{s} installed core sha {sha_of(s)!r} is not the variant's")
-if not strs(exp): problems.append("expectedRedSet is not a registered list of ids")
-if not strs(got): problems.append("redSet not a list of strings")
-elif strs(exp) and Counter(got)!=Counter(exp): problems.append(f"red set {sorted(got)} != registered {sorted(exp)}")
-if not strs(unknown): problems.append("unknown not a list of strings")
-elif unknown: problems.append(f"unknown {unknown}")
-if d.get("status")!="pass": problems.append(f"status {d.get('status')!r} != 'pass'")
-if rc!="0": problems.append(f"exit {rc} != 0")
-def frames(v): return isinstance(v,int) and not isinstance(v,bool)
-want_floor=int(os.environ["PAINT_FLOOR_FRAMES"])
-if floor is None and variant in os.environ.get("PAINT_RED_VARIANTS","").split(): problems.append(f"paintFloor missing (a {variant} red arm needs at least {want_floor} frames)")
-elif floor is not None and not (frames(floor) and floor>=want_floor): problems.append(f"paintFloor {floor!r} is not a frame count of at least {want_floor}")
-elif floor is not None:
-    runs={}
-    for dest in (d.get("armed") or {}).get("destinations") or [] if isinstance(d.get("armed"),dict) else []:
-        if not isinstance(dest,dict) or not isinstance(dest.get("advanceCarry"),dict): continue
-        case=f"G{dest.get('fromOrdinal')}-{dest.get('toOrdinal')}-{dest.get('advanceTo')}"
-        for vid,v in (dest["advanceCarry"].get("verdicts") or {}).items():
-            if isinstance(v,dict) and isinstance(v.get("paint"),dict): runs[f"{case}:{vid}"]=v["paint"].get("longestRun")
-    for red in got if strs(got) else []:
-        run=runs.get(red)
-        if red.endswith(":carry") and not (frames(run) and run>=floor): problems.append(f"{red} longest unpainted run {run!r} below the {floor}-frame floor")
-for p in problems: print(f"    MISMATCH: {p}")
-sys.exit(1 if problems else 0)
-PYEOF
+  $PY scripts/gate_checks.py check_passg_red "$O/passG-red$n.json" "$(status_of $O/passG-red$n)" AUTO "headless Chrome" "$1" "${@[2,-1]}" || fail "PASSG-RED $*"
   paint_report "$O/passG-red$n.json" "PASSG-RED $*"; }
 # A paint control run matches only with this round's exit 0 and a paint-control artifact whose control is the arm's,
 # whose core is today's, whose sampler is schema 2 with selfCheck ok, whose injector fired and hid exactly N ticks on a
@@ -677,56 +506,7 @@ PYEOF
 pc_name(){ print -r -- "$1-${2//:/_}"; }
 run_paint_control(){ n=$(pc_name $1 $2); fix=$Q/$1/html-unmodified
   queue $O/paint-control$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html --viewport 1920x1080 --paint-control $2 --artifact $O/paint-control$n.json; }
-check_paint_control(){ n=$(pc_name $1 $2); $PY - "$O/paint-control$n.json" "$(status_of $O/paint-control$n)" "$1" "$2" <<'PYEOF' || fail "PAINT-CONTROL $1 $2"
-import json,sys
-sys.path.insert(0,"scripts")
-from obed_edom.live_continuity_js import js_sha256
-import paint_instrument
-path,rc,deck,spec=sys.argv[1:]
-label=f"{deck} {spec}"
-parts=spec.split(":"); n=int(parts[0]); variant=parts[1]
-try: d=json.load(open(path))
-except Exception as e: print(f"[PAINT-CONTROL {label}] no artifact ({e}) exit={rc}"); sys.exit(1)
-d=d if isinstance(d,dict) else {}
-def ints(v): return isinstance(v,list) and all(isinstance(x,int) and not isinstance(x,bool) for x in v)
-rec=d.get("controlRecord") if isinstance(d.get("controlRecord"),dict) else {}
-arm=d.get("arm") if isinstance(d.get("arm"),dict) else {}
-target=d.get("targetVerdictId")
-tv=arm.get(target) if isinstance(target,str) and isinstance(arm.get(target),dict) else {}
-paint=tv.get("paint") if isinstance(tv.get("paint"),dict) else {}
-sampler=arm.get("sampler") if isinstance(arm.get("sampler"),dict) else {}
-self_ok=isinstance(sampler.get("selfCheck"),dict) and sampler["selfCheck"].get("ok") is True
-hidden=rec.get("hiddenSeqs")
-half=variant=="ancestor-half"
-seen,other=(paint.get("partialSeqs"),"unpaintedFrames") if half else (paint.get("unpaintedSeqs"),"partialFrames")
-print(f"[PAINT-CONTROL {label}] control={d.get('control')} status={d.get('status')} exit={rc} target={target} fired={rec.get('fired')} hiddenTicks={rec.get('hiddenTicks')} (want {n})")
-print(f"    injected seqs: {hidden}\n    {'partial' if half else 'unpainted'} seqs on target: {seen}")
-print(f"    paint {paint.get('status')} unpainted={paint.get('unpaintedFrames')} partial={paint.get('partialFrames')} double={paint.get('doubleFrames')} substitute={paint.get('substituteFrames')}; redSet={d.get('redSet')} unknown={d.get('unknown')}")
-for r in d.get("statusReasons") or []: print(f"    {r}")
-if d.get("error"): print(f"    error: {d['error']}")
-problems=[]
-if d.get("kind")!="live-continuity-probe-paint-control": problems.append(f"not a paint-control artifact (kind={d.get('kind')!r})")
-if d.get("control")!=spec: problems.append(f"control {d.get('control')!r} != {spec!r}")
-if d.get("expectedCoreSha256")!=js_sha256(): problems.append("expectedCoreSha256 is not today's core")
-if sampler.get("schema")!=2 or not self_ok: problems.append("arm.sampler is not schema 2 with selfCheck.ok")
-rec_problem=paint_instrument.control_record_problem(d.get("controlRecord"))
-if rec_problem: problems.append(f"controlRecord unreadable: {rec_problem}")
-paint_problem=paint_instrument.schema_problem(tv.get("paint"),paint_instrument.PAINT_SCORE_FIELDS)
-if paint_problem: problems.append(f"target paint score unreadable: {paint_problem}")
-if rec.get("fired") is not True: problems.append("injector never fired")
-if rec.get("hiddenTicks")!=n: problems.append(f"hiddenTicks {rec.get('hiddenTicks')!r} != {n}")
-if not (ints(hidden) and len(hidden)==n and hidden==list(range(hidden[0],hidden[0]+n)) if n else hidden==[]): problems.append(f"injected seqs {hidden!r} are not {n} consecutive ticks")
-if not ints(seen) or seen!=hidden: problems.append(f"target seq set {seen!r} != injected {hidden!r}")
-for k in (other,"doubleFrames","substituteFrames"):
-    if paint.get(k)!=0: problems.append(f"target {k} {paint.get(k)!r} != 0")
-if d.get("redSet")!=([target] if n else []): problems.append(f"redSet {d.get('redSet')!r} != {[target] if n else []!r}")
-if d.get("unknown")!=[]: problems.append(f"unknown {d.get('unknown')!r} not an empty list")
-if d.get("status")!="pass": problems.append(f"status {d.get('status')!r} != 'pass'")
-if rc!="0": problems.append(f"exit {rc} != 0")
-for p in problems: print(f"    MISMATCH: {p}")
-sys.exit(1 if problems else 0)
-PYEOF
-}
+check_paint_control(){ n=$(pc_name $1 $2); $PY scripts/gate_checks.py check_paint_control "$O/paint-control$n.json" "$(status_of $O/paint-control$n)" "$2" "headless Chrome" "$1" || fail "PAINT-CONTROL $1 $2"; }
 # A carry-cover run matches only with this round's exit (0 for pass, 1 for fail), a carry-cover artifact whose status is
 # the expected one, whose fixture is its deck's, whose control and core variant are the ones its arguments imply, whose
 # installed continuity core sha is that variant's (else today's), and, but on the null arm, whose bridges are non-empty
@@ -737,43 +517,7 @@ cc_fixture(){ fix=$F/html-player; idx=$F/html-unmodified/index.html
 run_cc(){ cc_fixture $1; n=${1:#P2}$(echo "${@[3,-1]}" | tr -d ' ')
   queue $O/carry-cover$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $idx --viewport 1920x1080 --carry-cover --artifact $O/carry-cover$n.json "${@[3,-1]}"; }
 check_cc(){ cc_fixture $1; label=${(j: :)@[3,-1]}; n=${1:#P2}${label// /}; label=${${1:#P2}:+$1 }${label:-green}
-  $PY - "$O/carry-cover$n.json" "$(status_of $O/carry-cover$n)" "$fix" "$label" "${@[2,-1]}" <<'PYEOF' || fail "CARRY-COVER $label"
-import json,sys
-sys.path.insert(0,"scripts")
-from continuity_core_variants import variant_sha
-from obed_edom.live_continuity_js import js_sha256
-path,rc,fixture,label,want,args=sys.argv[1],sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5],sys.argv[6:]
-variant=args[args.index("--core-variant")+1] if "--core-variant" in args else None
-control="null" if "--carry-cover-null" in args else "red" if variant else "green"
-try: want_sha=variant_sha(variant) if variant else js_sha256()
-except Exception as e: print(f"[CARRY-COVER {label}] no expected core sha ({e}) exit={rc}"); sys.exit(1)
-try: d=json.load(open(path))
-except Exception as e: print(f"[CARRY-COVER {label}] no artifact ({e}) exit={rc}"); sys.exit(1)
-d=d if isinstance(d,dict) else {}
-sha=(d.get("continuity") or {}).get("sha256") if isinstance(d.get("continuity"),dict) else None
-print(f"[CARRY-COVER {label}] control={d.get('control')} status={d.get('status')} (want {want}) exit={rc} core sha {sha} (want {want_sha})")
-for r in d.get("reasons") or []: print(f"    {r}")
-if d.get("error"): print(f"    error: {d['error']}")
-bridges=[b if isinstance(b,dict) else {} for b in d.get("bridges")] if isinstance(d.get("bridges"),list) else []
-clocks=[b.get("clock") if isinstance(b.get("clock"),dict) else {} for b in bridges]
-for b,c in zip(bridges,clocks):
-    r=b.get("result") if isinstance(b.get("result"),dict) else {}
-    print(f"    {b.get('boundary')}: verdict={r.get('verdict')} maxStripPx={r.get('maxStripPx')} cleanShare={r.get('cleanShare')} undecidedFrames={r.get('undecidedFrames')} clock={c.get('via')} lagMs={c.get('lagMs')}")
-problems=[]
-if d.get("kind")!="live-continuity-probe-carry-cover": problems.append(f"not a carry-cover artifact (kind={d.get('kind')!r})")
-if d.get("fixture")!=fixture: problems.append(f"fixture {d.get('fixture')!r} != {fixture!r}")
-if d.get("control")!=control: problems.append(f"control {d.get('control')!r} != {control!r}")
-if d.get("coreVariant")!=variant: problems.append(f"coreVariant {d.get('coreVariant')!r} != {variant!r}")
-if sha!=want_sha or d.get("coreSha256")!=want_sha: problems.append("installed core sha is not the arm's")
-want_via="fallback" if variant=="no-gl-clock" else "gl"
-if control!="null" and (not bridges or any(c.get("via")!=want_via for c in clocks)):
-    problems.append(f"bridge clocks {[c.get('via') for c in clocks]!r} are not all {want_via!r}")
-if d.get("status")!=want: problems.append(f"status {d.get('status')!r} != {want!r}")
-if rc!=("0" if want=="pass" else "1"): problems.append(f"exit {rc} does not agree with {want}")
-for p in problems: print(f"    MISMATCH: {p}")
-sys.exit(1 if problems else 0)
-PYEOF
-}
+  $PY scripts/gate_checks.py check_cc "$O/carry-cover$n.json" "$(status_of $O/carry-cover$n)" AUTO "headless Chrome" "$label" "$2" "$fix" AUTO "${@[3,-1]}" || fail "CARRY-COVER $label"; }
 # Texture-feed gates accept the probe's normal 0/1 exit only when every registered per-verdict expectation matches.
 # `from-only` is entry-sensitive: a crossfade (`feed.to` non-null) must red feedLive, while a single-texture entry stays
 # green. The artifact keeps the complete producer and scorer records for exact-frame review.
@@ -783,65 +527,7 @@ run_mm_feed(){ local deck=$1 label=$2; shift 2; mm_feed_fixture $deck
   queue $O/mm-feed-$n $PY -u scripts/live_continuity_probe.py --fixture $fix --original-index $fix/index.html \
     --viewport 1920x1080 --artifact $O/mm-feed-$n.json "$@"; }
 check_mm_feed(){ local deck=$1 label=$2; shift 2; local n=$deck-$label rc=$(status_of $O/mm-feed-$deck-$label)
-  $PY - "$O/mm-feed-$n.json" "$rc" "$deck" "$label" <<'PYEOF' || fail "MM-FEED $deck $label"
-import json,sys
-sys.path.insert(0,"scripts")
-from live_continuity_probe import (MM_FEED_GATE_EXPECTATIONS, MM_FEED_READ_EXPECTATIONS,
-                                   MM_FEED_STRIP_EXPECTATIONS, mm_feed_control_aggregate_problems)
-path,rc,deck,label=sys.argv[1:]
-try: artifact=json.load(open(path))
-except Exception as exc: print(f"[MM-FEED {deck} {label}] no artifact ({exc}) exit={rc}"); sys.exit(1)
-if label=="strip-bridge14-movie2":
-    ground=artifact.get("groundTruth") or {}
-    key=(ground.get("planSha256"),artifact.get("redArm"),"off")
-    wanted=MM_FEED_STRIP_EXPECTATIONS.get(key)
-    got=artifact.get("redSet")
-    problems=[]
-    if artifact.get("status")!="pass": problems.append(f"status {artifact.get('status')!r} != 'pass'")
-    if got!=list(wanted or ()): problems.append(f"redSet {got!r} != {list(wanted or ())!r}")
-    if artifact.get("unknown")!=[]: problems.append(f"unknown {artifact.get('unknown')!r} != []")
-    print(f"[MM-FEED {deck} {label}] exit={rc} redSet={got}")
-    for problem in problems: print("    MISMATCH:",problem)
-    sys.exit(1 if rc!="0" or problems else 0)
-rows=[]
-def walk(value,path="result"):
-    if isinstance(value,dict):
-        under=value.get("underArtwork")
-        if isinstance(under,dict) and "verdict" in under: rows.append((path,under))
-        for key,child in value.items(): walk(child,f"{path}.{key}")
-    elif isinstance(value,list):
-        for index,child in enumerate(value): walk(child,f"{path}[{index}]")
-walk(artifact)
-unique={json.dumps(row,sort_keys=True,default=str):(path,row) for path,row in rows}
-rows=list(unique.values())
-problems=[]
-if not rows: problems.append("no under-artwork verdict records")
-problems.extend(mm_feed_control_aggregate_problems(label,[row for _,row in rows]))
-facts=[value for value in (artifact.get("groundTruth") or {}).get("verdicts") or [] if isinstance(value,dict)]
-first_feed_scene=min((value.get("atScene") for value in facts if isinstance(value.get("feed"),dict)),default=None)
-for path,row in rows:
-    expectation="feed-off" if label.startswith("feed-off-") else "feed-on" if label.startswith("feed-on-") else label
-    if label=="from-only":
-        record=None
-        for value in facts:
-            if isinstance(value,dict) and value.get("id") in path:
-                record=value; break
-        crossfade=isinstance((record or {}).get("feed"),dict) and (record["feed"].get("to") is not None)
-        expectation="from-only-crossfade" if crossfade else "from-only-single"
-        read_key=(deck,"first-crossfade") if deck=="Alpha_DSK" and (record or {}).get("atScene")==first_feed_scene else (deck,"crossfade")
-        want_reads=MM_FEED_READ_EXPECTATIONS.get(read_key) if crossfade else None
-        if want_reads:
-            checks={(check.get("progress")):check.get("ok") for check in (row.get("feedLive") or {}).get("checks") or []}
-            for progress,want in want_reads.items():
-                if checks.get(progress) is not want: problems.append(f"{path}.feedLive[{progress}] {checks.get(progress)!r} != {want!r}")
-    wanted=MM_FEED_GATE_EXPECTATIONS[expectation]
-    for name,want in wanted.items():
-        actual=(row.get(name) or {}).get("verdict") if isinstance(row.get(name),dict) else None
-        if actual is not want: problems.append(f"{path}.{name} {actual!r} != {want!r}")
-print(f"[MM-FEED {deck} {label}] exit={rc} records={len(rows)} status={artifact.get('status')}")
-for problem in problems: print("    MISMATCH:",problem)
-sys.exit(1 if rc not in ("0","1") or problems else 0)
-PYEOF
+  $PY scripts/gate_checks.py check_mm_feed "$O/mm-feed-$n.json" "$rc" "$label" "headless Chrome" "$deck" || fail "MM-FEED $deck $label"
   paint_report "$O/mm-feed-$n.json" "MM-FEED $deck $label"; }
 # Each P2 arm runs in its own --out-dir.
 run_p2(){ shift 2; n=$(echo "$*" | tr -d ' ')

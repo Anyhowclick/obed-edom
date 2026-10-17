@@ -1,0 +1,295 @@
+{
+  "arms": {
+    "A": {
+      "b3to4:untitled-h264.mov#1->untitled-h264.mov#1:carry": {},
+      "b4to5:untitled-h264.mov#1->untitled-h264.mov#1:restart": {},
+      "b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry": {
+        "underArtwork": {
+          "artworkAbove": {
+            "verdict": true
+          },
+          "feedLive": {
+            "verdict": false
+          },
+          "handbackContinuity": {
+            "verdict": null
+          },
+          "holdFrame": {
+            "verdict": null
+          },
+          "mode": "standDown",
+          "noRiderAboveCanvas": {
+            "verdict": true
+          },
+          "posterHold": {
+            "verdict": true
+          },
+          "verdict": null
+        }
+      },
+      "b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry": {
+        "underArtwork": {
+          "artworkAbove": {
+            "verdict": true
+          },
+          "feedLive": {
+            "checks": [
+              {
+                "ok": true,
+                "progress": 0.25
+              },
+              {
+                "ok": true,
+                "progress": 0.5
+              },
+              {
+                "ok": true,
+                "progress": 0.75
+              }
+            ],
+            "verdict": true
+          },
+          "handbackContinuity": {
+            "verdict": true
+          },
+          "labelsOverFeed": {
+            "verdict": true
+          },
+          "mode": "continuous",
+          "noRiderAboveCanvas": {
+            "verdict": true
+          },
+          "verdict": true
+        }
+      },
+      "b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry": {
+        "underArtwork": {
+          "artworkAbove": {
+            "verdict": true
+          },
+          "feedLive": {
+            "checks": [
+              {
+                "ok": true,
+                "progress": 0.25
+              },
+              {
+                "ok": true,
+                "progress": 0.5
+              },
+              {
+                "ok": true,
+                "progress": 0.75
+              }
+            ],
+            "verdict": true
+          },
+          "handbackContinuity": {
+            "verdict": true
+          },
+          "labelsOverFeed": {
+            "verdict": true
+          },
+          "mode": "continuous",
+          "noRiderAboveCanvas": {
+            "verdict": true
+          },
+          "verdict": true
+        }
+      },
+      "b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry": {
+        "underArtwork": {
+          "artworkAbove": {
+            "verdict": true
+          },
+          "feedLive": {
+            "checks": [
+              {
+                "ok": true,
+                "progress": 0.25
+              },
+              {
+                "ok": true,
+                "progress": 0.5
+              },
+              {
+                "ok": true,
+                "progress": 0.75
+              }
+            ],
+            "verdict": true
+          },
+          "handbackContinuity": {
+            "verdict": true
+          },
+          "labelsOverFeed": {
+            "verdict": true
+          },
+          "mode": "continuous",
+          "noRiderAboveCanvas": {
+            "verdict": true
+          },
+          "verdict": true
+        }
+      },
+      "b8to9:vid-20250608-wa0121.mp4#1->end:retire": {},
+      "b8to9:vid-20250608-wa0125.mp4#1->end:retire": {},
+      "entryColdStart": {
+        "1": {
+          "asset": "untitled-h264.mov",
+          "scene": 4,
+          "visibleUndecodedDurationMs": 16.3
+        },
+        "2": {
+          "asset": "untitled-h264.mov",
+          "scene": 6,
+          "visibleUndecodedDurationMs": 15.4
+        },
+        "3": {
+          "asset": "untitled-h264.mov",
+          "scene": 8,
+          "visibleUndecodedDurationMs": 16.7
+        },
+        "4": {
+          "asset": "vid-20250608-wa0125.mp4",
+          "scene": 8,
+          "visibleUndecodedDurationMs": 34.1
+        },
+        "5": {
+          "asset": "vid-20250608-wa0121.mp4",
+          "scene": 12,
+          "visibleUndecodedDurationMs": 27.6
+        },
+        "6": {
+          "asset": "full_report_card_wall_dsk.001.01.h264.mov",
+          "scene": 16,
+          "visibleUndecodedDurationMs": 33.4
+        }
+      },
+      "verdicts": {
+        "b3to4:untitled-h264.mov#1->untitled-h264.mov#1:carry": {},
+        "b4to5:untitled-h264.mov#1->untitled-h264.mov#1:restart": {},
+        "b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry": {},
+        "b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry": {},
+        "b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry": {},
+        "b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry": {},
+        "b8to9:vid-20250608-wa0121.mp4#1->end:retire": {},
+        "b8to9:vid-20250608-wa0125.mp4#1->end:retire": {}
+      }
+    }
+  },
+  "groundTruth": {
+    "planSha256": "c9e546551300e44ff1765147def49257916f14f1c139fcee704d9accad7411d6",
+    "verdicts": [
+      {
+        "atScene": 6,
+        "id": "b3to4:untitled-h264.mov#1->untitled-h264.mov#1:carry"
+      },
+      {
+        "atScene": 8,
+        "id": "b4to5:untitled-h264.mov#1->untitled-h264.mov#1:restart"
+      },
+      {
+        "atScene": 10,
+        "feed": {
+          "draw": 3,
+          "drawCount": 5,
+          "from": {
+            "size": [
+              484,
+              272
+            ],
+            "upload": 4
+          },
+          "to": {
+            "size": [
+              824,
+              463
+            ],
+            "upload": 5
+          }
+        },
+        "id": "b5to6:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 12,
+        "feed": {
+          "draw": 4,
+          "drawCount": 9,
+          "from": {
+            "size": [
+              824,
+              463
+            ],
+            "upload": 5
+          },
+          "to": {
+            "size": [
+              714,
+              402
+            ],
+            "upload": 6
+          }
+        },
+        "id": "b6to7:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 14,
+        "feed": {
+          "draw": 2,
+          "drawCount": 12,
+          "from": {
+            "size": [
+              715,
+              402
+            ],
+            "upload": 3
+          },
+          "to": {
+            "size": [
+              582,
+              327
+            ],
+            "upload": 4
+          }
+        },
+        "id": "b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 14,
+        "feed": {
+          "draw": 4,
+          "drawCount": 12,
+          "from": {
+            "size": [
+              714,
+              402
+            ],
+            "upload": 6
+          },
+          "to": {
+            "size": [
+              582,
+              327
+            ],
+            "upload": 7
+          }
+        },
+        "id": "b7to8:vid-20250608-wa0125.mp4#1->vid-20250608-wa0125.mp4#1:carry",
+        "underArtwork": true
+      },
+      {
+        "atScene": 16,
+        "id": "b8to9:vid-20250608-wa0121.mp4#1->end:retire"
+      },
+      {
+        "atScene": 16,
+        "id": "b8to9:vid-20250608-wa0125.mp4#1->end:retire"
+      }
+    ]
+  },
+  "status": "fail"
+}

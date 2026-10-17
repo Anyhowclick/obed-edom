@@ -52,6 +52,7 @@ def _load_probe_module():
 
 
 probe = _load_probe_module()
+import gate_checks as checks  # noqa: E402
 from obed_edom import devtools_port  # noqa: E402
 from obed_edom.devtools_port import DevToolsEndpoint  # noqa: E402
 
@@ -8533,12 +8534,12 @@ STRIP_CASCADE = {
 class TestRedArmRegistration:
     def test_the_deck_shas_are_the_committed_exports_plans(self) -> None:
         shas = {name: probe.plan_signature(_deck_plan(name).to_runtime()) for name in REGISTERED_DECKS}
-        assert shas["P2"] == probe.P2_OFF_PLAN_SHA256
-        assert {name: sha for name, sha in shas.items() if name != "P2"} == probe.DECK_PLAN_SHA256
+        assert shas["P2"] == checks.P2_OFF_PLAN_SHA256
+        assert {name: sha for name, sha in shas.items() if name != "P2"} == checks.DECK_PLAN_SHA256
 
     def test_every_registered_id_is_a_verdict_or_a_stray_on_its_decks_slide(self) -> None:
         plans = {probe.plan_signature(_deck_plan(name).to_runtime()): name for name in REGISTERED_DECKS}
-        for key in [*probe.RED_ARM_EXPECTATIONS, *probe.RED_ARM_REQUIRED]:
+        for key in [*checks.RED_ARM_EXPECTATIONS, *checks.RED_ARM_REQUIRED]:
             sha, label, gl = key
             deck = plans[sha]
             plan = _deck_plan(deck)
@@ -8546,8 +8547,8 @@ class TestRedArmRegistration:
             if gl == "auto":
                 ids |= {spec["id"] for spec in probe.verdict_specs(_p2_plan(True))}
             assets = {asset.lower() for per in plan.slide_instances.values() for asset in per}
-            expected = probe.RED_ARM_EXPECTATIONS.get(key)
-            registered = [*(() if expected in (None, probe.RECORD) else expected), *probe.RED_ARM_REQUIRED.get(key, ())]
+            expected = checks.RED_ARM_EXPECTATIONS.get(key)
+            registered = [*(() if expected in (None, checks.RECORD) else expected), *checks.RED_ARM_REQUIRED.get(key, ())]
             assert gl in ("off", "auto") and (gl == "off" or deck == "P2"), key
             labels = {f"{asset}#{i}" for per in plan.slide_instances.values() for asset, rects in per.items() for i in range(1, len(rects) + 1)}
             for red_id in registered:
@@ -8568,7 +8569,7 @@ class TestRedArmRegistration:
         plans = {probe.plan_signature(_deck_plan(name).to_runtime()): (name, _deck_plan(name)) for name in REGISTERED_DECKS}
         beyond = {}
         for (sha, label, _), expected in expectations.items():
-            if not label.startswith("strip:") or expected == probe.RECORD:
+            if not label.startswith("strip:") or expected == checks.RECORD:
                 continue
             name, plan = plans[sha]
             scene = probe.parse_strip(label.removeprefix("strip:"))[1]
@@ -8582,27 +8583,27 @@ class TestRedArmRegistration:
         """Plan §4 (owner option (a), 2026-10-09): a strip arm is red on its own boundary, plus the
         documented cascade of that chain (`STRIP_CASCADE`, exact per arm). The post-hoc chain arms are
         checked like every other strip arm, not skipped."""
-        assert self._reds_beyond_own_boundary(probe.RED_ARM_EXPECTATIONS) == STRIP_CASCADE
+        assert self._reds_beyond_own_boundary(checks.RED_ARM_EXPECTATIONS) == STRIP_CASCADE
 
     @pytest.mark.parametrize("extra", [
         "b0to1:counter-a.mov#1->counter-a.mov#1:carry", "duplicate:slide2:counter-a.mov#1", "stray:slide2:counter-a.mov",
     ])
     def test_known_bad_an_undocumented_red_beyond_the_boundary_fails(self, extra: str) -> None:
         """D2 `strip:bridge@8` reds only b3to4; any other boundary, duplicate or stray must be documented."""
-        key = (probe.DECK_PLAN_SHA256["D2"], "strip:bridge@8", "off")
-        assert self._reds_beyond_own_boundary(probe.RED_ARM_EXPECTATIONS).get(("D2", "strip:bridge@8")) is None
-        widened = {**probe.RED_ARM_EXPECTATIONS, key: (*probe.RED_ARM_EXPECTATIONS[key], extra)}
+        key = (checks.DECK_PLAN_SHA256["D2"], "strip:bridge@8", "off")
+        assert self._reds_beyond_own_boundary(checks.RED_ARM_EXPECTATIONS).get(("D2", "strip:bridge@8")) is None
+        widened = {**checks.RED_ARM_EXPECTATIONS, key: (*checks.RED_ARM_EXPECTATIONS[key], extra)}
         assert self._reds_beyond_own_boundary(widened) != STRIP_CASCADE
 
     def test_known_bad_a_documented_cascade_that_no_longer_reds_fails(self) -> None:
-        key = (probe.DECK_PLAN_SHA256["D3"], "strip:pin@4", "off")
-        narrowed = {**probe.RED_ARM_EXPECTATIONS, key: probe.RED_ARM_EXPECTATIONS[key][:1]}
+        key = (checks.DECK_PLAN_SHA256["D3"], "strip:pin@4", "off")
+        narrowed = {**checks.RED_ARM_EXPECTATIONS, key: checks.RED_ARM_EXPECTATIONS[key][:1]}
         assert self._reds_beyond_own_boundary(narrowed) != STRIP_CASCADE
 
     def test_the_p2_sets_are_the_plans(self) -> None:
         """Plan §3.4 Q2/Q3: stash-any must red the slide-4 WA0125 stray; each strip only its boundary."""
-        p2 = {label: value for (sha, label, _), value in probe.RED_ARM_EXPECTATIONS.items() if sha == probe.P2_OFF_PLAN_SHA256}
-        assert probe.RED_ARM_REQUIRED[(probe.P2_OFF_PLAN_SHA256, "core:stash-any", "off")] == (
+        p2 = {label: value for (sha, label, _), value in checks.RED_ARM_EXPECTATIONS.items() if sha == checks.P2_OFF_PLAN_SHA256}
+        assert checks.RED_ARM_REQUIRED[(checks.P2_OFF_PLAN_SHA256, "core:stash-any", "off")] == (
             "stray:slide4:vid-20250608-wa0125.mp4",
         )
         assert p2["strip:bridge@8"] == (P2_CARRY34,)
@@ -8612,46 +8613,46 @@ class TestRedArmRegistration:
 
     def test_d4_wrong_instance_must_red_the_far_copys_carry(self) -> None:
         """Plan §4 identity red: the carried clock is A-near's, not A-far's."""
-        key = (probe.DECK_PLAN_SHA256["D4"], "core:wrong-instance", "off")
-        (carry,) = probe.RED_ARM_REQUIRED[key]
+        key = (checks.DECK_PLAN_SHA256["D4"], "core:wrong-instance", "off")
+        (carry,) = checks.RED_ARM_REQUIRED[key]
         spec = next(s for s in probe.verdict_specs(_deck_plan("D4")) if s["id"] == carry)
         assert spec["kind"] == "carry" and spec["action"] == "bridge" and spec["srcInstance"] == "counter-a.mov#2"
 
     def test_every_registered_set_contains_its_required_reds(self) -> None:
-        for key, required in probe.RED_ARM_REQUIRED.items():
-            expected = probe.RED_ARM_EXPECTATIONS[key]
-            assert expected != probe.RECORD and set(required) <= set(expected), key
+        for key, required in checks.RED_ARM_REQUIRED.items():
+            expected = checks.RED_ARM_EXPECTATIONS[key]
+            assert expected != checks.RECORD and set(required) <= set(expected), key
 
     def test_the_post_hoc_sets_are_g1hs_observed_sets(self) -> None:
         """Discovery g1h-089a0393: every RECORD arm registered with exactly its observed multiset."""
         shas = {name: probe.plan_signature(_deck_plan(name).to_runtime()) for name in REGISTERED_DECKS}
-        registered = {(name, label) for name, label in POST_HOC_G1H if (shas[name], label, "off") in probe.RED_ARM_EXPECTATIONS}
+        registered = {(name, label) for name, label in POST_HOC_G1H if (shas[name], label, "off") in checks.RED_ARM_EXPECTATIONS}
         assert registered == POST_HOC_G1H
-        assert not [key for key, value in probe.RED_ARM_EXPECTATIONS.items() if value == probe.RECORD]
-        assert probe.RED_ARM_EXPECTATIONS[(shas["D4"], "core:wrong-instance", "off")] == (
+        assert not [key for key, value in checks.RED_ARM_EXPECTATIONS.items() if value == checks.RECORD]
+        assert checks.RED_ARM_EXPECTATIONS[(shas["D4"], "core:wrong-instance", "off")] == (
             "b0to1:counter-a.mov#2->counter-a.mov#1:carry", "b1to2:counter-a.mov#1->counter-a.mov#1:carry",
             "duplicate:slide2:counter-a.mov#1", "duplicate:slide3:counter-a.mov#1",
         )
 
     @pytest.mark.parametrize(("deck", "label"), sorted(MEASURED_277C720B))
     def test_the_v3_v4_sets_are_the_measured_sets(self, deck: str, label: str) -> None:
-        key = (probe.DECK_PLAN_SHA256[deck], label, "off")
-        assert probe.RED_ARM_EXPECTATIONS[key] == MEASURED_277C720B[(deck, label)]
-        assert probe.RED_ARM_PAINT_FLOOR.get(key) == (60 if label in probe.PAINT_RED_ARMS else None)
+        key = (checks.DECK_PLAN_SHA256[deck], label, "off")
+        assert checks.RED_ARM_EXPECTATIONS[key] == MEASURED_277C720B[(deck, label)]
+        assert checks.RED_ARM_PAINT_FLOOR.get(key) == (60 if label in checks.PAINT_RED_ARMS else None)
 
     def test_the_pass_g_red_set_is_v3s_measured_set(self) -> None:
         """V3 (D1-passG-red-npH.json): the (1,3,4) leg's carry and its unpainted destination, floored at 60."""
-        key = (probe.DECK_PLAN_SHA256["D1"], "core:no-pin-hold")
-        assert probe.PASSG_RED_EXPECTATIONS == {key: (f"G1-3-4:b2to3:{_A1}:carry", "G1-3-4:destination")}
-        assert probe.PASSG_RED_PAINT_FLOOR == {key: 60}
+        key = (checks.DECK_PLAN_SHA256["D1"], "core:no-pin-hold")
+        assert checks.PASSG_RED_EXPECTATIONS == {key: (f"G1-3-4:b2to3:{_A1}:carry", "G1-3-4:destination")}
+        assert checks.PASSG_RED_PAINT_FLOOR == {key: 60}
         assert f"b2to3:{_A1}:carry" in {spec["id"] for spec in probe.verdict_specs(_deck_plan("D1"))}
 
     def test_every_action_type_has_a_pre_registered_strip_arm(self) -> None:
         """Plan §3.4 Q3: one --strip arm per action type (pin, bridge, restart, retire, glReplay)."""
         registered = {
             probe.parse_strip(label.removeprefix("strip:"))[0]
-            for (_, label, _), value in probe.RED_ARM_EXPECTATIONS.items()
-            if label.startswith("strip:") and value != probe.RECORD
+            for (_, label, _), value in checks.RED_ARM_EXPECTATIONS.items()
+            if label.startswith("strip:") and value != checks.RECORD
         }
         assert registered == {"pin", "bridge", "restart", "retire", "glReplay"}
 
@@ -8664,8 +8665,8 @@ class TestRedArmRegistration:
             deck, args = item
             parts = args.split()
             label = f"core:{parts[1]}" if parts[0] == "--core-variant" else probe.strip_label(*probe.parse_strip(parts[1]))
-            listed.add((probe.DECK_PLAN_SHA256[deck], label, "off"))
-        registered = {key for key in probe.RED_ARM_EXPECTATIONS if key[0] in probe.DECK_PLAN_SHA256.values()}
+            listed.add((checks.DECK_PLAN_SHA256[deck], label, "off"))
+        registered = {key for key in checks.RED_ARM_EXPECTATIONS if key[0] in checks.DECK_PLAN_SHA256.values()}
         assert listed == registered
 
     @pytest.mark.parametrize(("core", "strip", "label"), [
@@ -8707,11 +8708,11 @@ class TestRedArmStatus:
         assert probe.red_arm_status(_red_result(red, expected=expected)) == ("fail", [reason])
 
     def test_record_and_unregistered_never_pass(self) -> None:
-        assert probe.red_arm_status(_red_result([], expected=probe.RECORD))[0] == "recorded"
+        assert probe.red_arm_status(_red_result([], expected=checks.RECORD))[0] == "recorded"
         assert probe.red_arm_status(_red_result([], expected=None))[0] == "unregistered"
 
     def test_a_record_arm_missing_a_required_red_fails(self) -> None:
-        result = _red_result([P2_CARRY34], expected=probe.RECORD)
+        result = _red_result([P2_CARRY34], expected=checks.RECORD)
         result["requiredRed"] = [STRAY4]
         assert probe.red_arm_status(result) == ("fail", [f"required red but green: {STRAY4}"])
         result["redSet"] = sorted([P2_CARRY34, STRAY4])
@@ -8765,8 +8766,8 @@ class TestRedArmStatus:
         if floor is not None:
             result["paintFloor"] = floor
         assert status_of(result)[0] == status
-        assert set(probe.RED_ARM_PAINT_FLOOR) == {k for k in probe.RED_ARM_EXPECTATIONS if k[1] in probe.PAINT_RED_ARMS}
-        assert set(probe.PASSG_RED_PAINT_FLOOR) == {k for k in probe.PASSG_RED_EXPECTATIONS if k[1] in probe.PAINT_RED_ARMS}
+        assert set(checks.RED_ARM_PAINT_FLOOR) == {k for k in checks.RED_ARM_EXPECTATIONS if k[1] in checks.PAINT_RED_ARMS}
+        assert set(checks.PASSG_RED_PAINT_FLOOR) == {k for k in checks.PASSG_RED_EXPECTATIONS if k[1] in checks.PAINT_RED_ARMS}
 
 
 class TestStrayCensus:
@@ -12931,8 +12932,8 @@ def test_feed_ordinal_tamper_is_limited_to_the_requested_scene() -> None:
 
 
 @pytest.mark.parametrize(("plan_sha", "offset"), [
-    (probe.D7_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
-    (probe.D7S_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
+    (checks.D7_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
+    (checks.D7S_PLAN_SHA256, probe.binary_counter_movie.SECOND_STRIP_X),
     ("0" * 64, 0),
 ])
 def test_feed_instrument_is_registered_before_navigation(plan_sha: str, offset: int) -> None:
@@ -13097,7 +13098,7 @@ def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() ->
         "from-only-crossfade", "from-only-single", "overlay-ride", "settle-on-stage",
         "no-pause", "mm-opacity-off", "no-linger", "interim-delay", "startup-moved-decoder",
     }
-    assert set(probe.MM_FEED_GATE_EXPECTATIONS) == expected
+    assert set(checks.MM_FEED_GATE_EXPECTATIONS) == expected
     text = (REPO / "scripts" / "run_gates.sh").read_text()
     block = text.split("MM_FEED_ARMS=(", 1)[1].split("\n)", 1)[0]
     for label in expected - {"feed-on", "feed-off", "attach-once", "from-only-crossfade", "from-only-single"}:
@@ -13108,13 +13109,13 @@ def test_feed_gate_registrations_are_data_and_run_gates_names_every_control() ->
     assert "--feed-variant from-only" in block
     assert "ordinal --feed-tamper ordinal --feed-tamper-scene 10" in block
     assert "strip-bridge14-movie2 --strip bridge@14:movie2" in block
-    assert probe.MM_FEED_STRIP_EXPECTATIONS[(
-        probe.ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off",
+    assert checks.MM_FEED_STRIP_EXPECTATIONS[(
+        checks.ALPHA_DSK_PLAN_SHA256, "strip:bridge@14:movie2", "off",
     )] == ("b7to8:vid-20250608-wa0121.mp4#1->vid-20250608-wa0121.mp4#1:carry",)
-    assert probe.MM_FEED_READ_EXPECTATIONS[("D7", "crossfade")] == {0.25: True, 0.5: False, 0.75: False}
-    assert probe.MM_FEED_READ_EXPECTATIONS[("Alpha_DSK", "first-crossfade")] == {0.5: False, 0.75: True}
-    assert probe.D7_PLAN_SHA256 == "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
-    assert probe.D7S_PLAN_SHA256 == "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
+    assert checks.MM_FEED_READ_EXPECTATIONS[("D7", "crossfade")] == {0.25: True, 0.5: False, 0.75: False}
+    assert checks.MM_FEED_READ_EXPECTATIONS[("Alpha_DSK", "first-crossfade")] == {0.5: False, 0.75: False}
+    assert checks.D7_PLAN_SHA256 == "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
+    assert checks.D7S_PLAN_SHA256 == "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
 
 
 def test_repaired_full_alpha_runtime_plan_is_pinned() -> None:

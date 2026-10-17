@@ -1,0 +1,63 @@
+{
+  "arm": {
+    "census": {
+      "2": {
+        "duplicateVideos": [],
+        "unexpectedVideos": [
+          {
+            "src": "Untitled.mov-0.0000-46.0333.mov"
+          }
+        ]
+      },
+      "3": {
+        "duplicateVideos": [],
+        "unexpectedVideos": [
+          {
+            "src": "Untitled.mov-0.0000-46.0333.mov"
+          }
+        ]
+      },
+      "4": {
+        "duplicateVideos": [],
+        "unexpectedVideos": [
+          {
+            "src": "Untitled.mov-0.0000-46.0333.mov"
+          },
+          {
+            "src": "VID-20250608-WA0125.mp4-0.0000-45.1381.mp4"
+          }
+        ]
+      }
+    },
+    "sampler": {
+      "schema": 2,
+      "selfCheck": {
+        "ok": true
+      }
+    }
+  },
+  "expectedCoreSha256": "2b730098a4963bc5c8a9f6ff7fd6cd047fb21339a4f7435a122f8d1643bda811",
+  "expectedRedSet": [
+    "b0to1:untitled.mov#1->untitled.mov#1:retire",
+    "stray:slide2:untitled.mov",
+    "stray:slide3:untitled.mov",
+    "stray:slide4:untitled.mov",
+    "stray:slide4:vid-20250608-wa0125.mp4"
+  ],
+  "glReplay": {
+    "requested": "off"
+  },
+  "groundTruth": {
+    "planSha256": "283f5eecd18c3412172e28a40bc716c69173a7c72bcd37379dcd3d7d6a96dd4e"
+  },
+  "redArm": "core:stash-any",
+  "redSet": [
+    "b0to1:untitled.mov#1->untitled.mov#1:retire",
+    "stray:slide2:untitled.mov",
+    "stray:slide3:untitled.mov",
+    "stray:slide4:untitled.mov",
+    "stray:slide4:vid-20250608-wa0125.mp4"
+  ],
+  "status": "pass",
+  "unknown": []
+}

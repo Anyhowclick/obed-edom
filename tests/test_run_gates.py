@@ -79,7 +79,6 @@ import shutil
 import signal
 import subprocess
 import time
-from collections import Counter
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -92,6 +91,10 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "run_gates.sh"
 PY = Path("/Users/anyhowclick/Desktop/work/obed-edom/.venv/bin/python")
 VIEWPORTS = ("2560x1440", "1600x1000", "1920x1080")
+D7_COUNTER_MDAT_SHA256 = {
+    "counter-a.mov": "71659a979a15ee609da711f5bfeddc61ff2fc420fae8dafed11aca820791a218",
+    "counter-b.mov": "b37ffd93027cfd3e692818e0f52ce109a0febec5a6a3aae16bb84207b450db39",
+}
 
 pytestmark = pytest.mark.skipif(not PY.exists(), reason=f"run_gates.sh runs its runs with {PY}")
 
@@ -140,9 +143,19 @@ finally: marker.unlink(missing_ok=True)
 '''
 
 PROBE_STUB = _STUB_COMMON + r'''
-D7_PLAN_SHA256 = "0e2570925a56dc69204657fc5d1001e87ad4407eb3fed62e271f1d7c94b5b584"
-D7S_PLAN_SHA256 = "3d1a0bd159e0e2dc91e2533d167cc5cdacd6aa5412891bd1661c6114a12a8577"
-D7_COUNTER_MDAT_SHA256 = {"counter-a.mov": "__COUNTER_A_MDAT_SHA256__", "counter-b.mov": "__COUNTER_B_MDAT_SHA256__"}
+sys.path.insert(0, "scripts")
+from gate_checks import ALPHA_DSK_PLAN_SHA256, D7_PLAN_SHA256, D7S_PLAN_SHA256, DECK_PLAN_SHA256, P2_OFF_PLAN_SHA256
+
+def gate_meta():
+    fixture = str(arg("--fixture") or "")
+    plan = ALPHA_DSK_PLAN_SHA256 if "alpha-dsk" in fixture else D7S_PLAN_SHA256 if "D7s" in fixture else D7_PLAN_SHA256 if "D7" in fixture else next(
+        (sha for deck, sha in DECK_PLAN_SHA256.items() if f"/{deck}/" in fixture), P2_OFF_PLAN_SHA256,
+    )
+    return {"groundTruth": {"planSha256": plan, "verdicts": []}}
+
+def validity():
+    return {"runValidity": {"ok": True, "reasons": [], "policy": {"hostKind": "headless Chrome"}}}
+
 artifact = Path(arg("--artifact"))
 stem = artifact.stem
 event(f"probe {stem} viewport={arg('--viewport')} skip={arg('--skip-arms')} start")
@@ -156,9 +169,10 @@ if arg("--pass") == "G" and arg("--core-variant"):
     sys.path.insert(0, "scripts")
     from continuity_core_variants import variant_sha
     sha = variant_sha(arg("--core-variant"))
-    red = ["G1-3-4:b2to3:carry"]
-    leg = {"advanceCarry": {"verdicts": {"b2to3:carry": {"verdict": False, "paint": PAINT}}, "sampler": SAMPLER}}
-    d = {"kind": "live-continuity-probe-pass-g", "pass": "G", "status": "pass", "redArm": f"core:{arg('--core-variant')}",
+    carry = "b2to3:counter-a.mov#1->counter-a.mov#1:carry"
+    red = [f"G1-3-4:{carry}", "G1-3-4:destination"]
+    leg = {"advanceCarry": {"verdicts": {carry: {"verdict": False, "paint": PAINT}}, "sampler": SAMPLER}}
+    d = {**gate_meta(), **validity(), "kind": "live-continuity-probe-pass-g", "pass": "G", "status": "pass", "redArm": f"core:{arg('--core-variant')}",
          "expectedCoreSha256": sha, "expectedRedSet": red, "redSet": red + (["G2-1-2:b0to1:carry"] if mode == "gr-extra" else []),
          "unknown": ["G1-2-3:b1to2:carry"] if mode == "gr-unknown" else [],
          "armed": {"continuity": {"sha256": sha}, "destinations": [{"fromOrdinal": 1, "toOrdinal": 3, "advanceTo": 4, **leg}]},
@@ -186,7 +200,7 @@ if arg("--paint-control"):
               "onSeq": 300, "offSeq": 300 + ticks, "hiddenTicks": ticks, "hiddenSeqs": hidden, "lateSeqs": [], "target": None}
     if mode.startswith("pc-no-"):
         del record[mode[len("pc-no-"):]]
-    d = {"kind": "live-continuity-probe-paint-control", "status": "pass", "statusReasons": [],
+    d = {**gate_meta(), **validity(), "kind": "live-continuity-probe-paint-control", "status": "pass", "statusReasons": [],
          "control": "1:ancestor-half:pin@2" if mode == "pc-control" else spec,
          "controlRecord": record,
          "targetVerdictId": target, "arm": {"sampler": SAMPLER, target: {"verdict": not n, "paint": paint}},
@@ -196,10 +210,13 @@ if arg("--paint-control"):
 if mode in ("red-ok", "red-noself", "red-floor", "red-nofloor"):
     sys.path.insert(0, "scripts")
     from continuity_core_variants import variant_sha
-    red = ["b0to1:A:carry"]
-    d = {"status": "pass", "redArm": f"core:{arg('--core-variant')}", "expectedRedSet": red, "redSet": red, "unknown": [],
+    red = ["b0to1:counter-a.mov#1->counter-a.mov#1:carry", "b1to2:counter-a.mov#1->counter-a.mov#1:carry"]
+    meta = gate_meta()
+    meta["groundTruth"]["verdicts"] = [{"id": red_id, "kind": "carry"} for red_id in red]
+    d = {**meta, **validity(), "glReplay": {"requested": "off"}, "status": "pass", "redArm": f"core:{arg('--core-variant')}", "expectedRedSet": red, "redSet": red, "unknown": [],
          "expectedCoreSha256": variant_sha(arg("--core-variant")),
-         "arm": {"census": {"1": {"unexpectedVideos": [], "duplicateVideos": []}}, "b0to1:A:carry": {"paint": PAINT},
+         "arm": {"census": {"1": {"unexpectedVideos": [], "duplicateVideos": []}},
+                 **{red_id: {"paint": PAINT} for red_id in red},
                  "sampler": {"schema": 2} if mode == "red-noself" else SAMPLER,
                  "paintCensus": {"findings": [{"class": "endOfShow", "element": "counter-a.mov#1", "frames": 14}]}}}
     floor = {"red-floor": 109, "red-nofloor": None}.get(mode, 60)
@@ -209,7 +226,7 @@ if mode in ("red-ok", "red-noself", "red-floor", "red-nofloor"):
     sys.exit(0)
 if arg("--pass") == "G":
     statuses = {"g-fail": "fail", "g-inconclusive": "inconclusive", "g-error": "error"}
-    g = {"kind": "live-continuity-probe-pass-g", "pass": "G", "status": statuses.get(mode, "pass"),
+    g = {**validity(), "kind": "live-continuity-probe-pass-g", "pass": "G", "status": statuses.get(mode, "pass"),
          "reasons": [f"stub {mode}"] if mode in statuses else []}
     if mode == "g-full":
         g = {"kind": "live-continuity-probe", "status": "pass"}
@@ -232,7 +249,7 @@ if "--carry-cover" in sys.argv:
     via = "fallback" if variant == "no-gl-clock" else "gl"
     if mode == "cc-clock":
         via = {"gl": "fallback", "fallback": "gl"}[via]
-    d = {"kind": "live-continuity-probe-carry-cover", "status": status,
+    d = {**validity(), "kind": "live-continuity-probe-carry-cover", "status": status,
          "control": "green" if mode == "cc-control" else control, "coreVariant": variant, "coreSha256": sha,
          "fixture": "elsewhere" if mode == "cc-fixture" else arg("--fixture"),
          "bridges": [{"boundary": "b1to2", "result": {"verdict": status, "maxStripPx": 1, "cleanShare": 1.0,
@@ -244,6 +261,7 @@ if "--carry-cover" in sys.argv:
 given = (arg("--skip-arms") or "").split(",")
 skip = [] if mode == "ignore-skip" else [n for n in ("A", "B", "C", "V", "Voff", "attach") if n in given]
 d = {
+    **gate_meta(),
     "status": "pass", "skippedArms": skip,
     "arms": {n: {} for n in ("A", "B", "C") if n not in skip and not (mode == "lose-A" and n == "A")},
     "visible": {n: {} for n in ("V", "Voff") if n not in skip},
@@ -337,6 +355,8 @@ def _make_gates(root: Path) -> dict[str, object]:
     g = root / "gate"
     (g / "scripts").mkdir(parents=True)
     (g / "src").symlink_to(REPO / "src")
+    (g / "scripts" / "gate_checks.py").symlink_to(REPO / "scripts" / "gate_checks.py")
+    (g / "scripts" / "live_run_validity.py").symlink_to(REPO / "scripts" / "live_run_validity.py")
     (g / "scripts" / "continuity_core_variants.py").symlink_to(REPO / "scripts" / "continuity_core_variants.py")
     (g / "scripts" / "paint_instrument.py").symlink_to(REPO / "scripts" / "paint_instrument.py")
     (g / "scripts" / "p2_recovery_html_adversarial.py").write_text(P2_STUB)
@@ -350,17 +370,17 @@ def _make_gates(root: Path) -> dict[str, object]:
         export = qual_b_source / f"{deck}-html"
         shutil.copytree(REPO / "tests" / "fixtures" / "live_continuity" / "qual_decks" / deck, export)
         (export / "index.html").write_text(f"{deck}-html")
-    def atom(kind: bytes, payload: bytes) -> bytes:
-        return (len(payload) + 8).to_bytes(4, "big") + kind + payload
-    counter_payloads = {"counter-a.mov": b"counter-a", "counter-b.mov": b"counter-b"}
-    counter_movie_bytes = {
-        "counter-a.mov": atom(b"ftyp", b"isom-a") + atom(b"mdat", counter_payloads["counter-a.mov"])
-        + atom(b"moov", b"movie-a"),
-        "counter-b.mov": atom(b"ftyp", b"isom-b") + (1).to_bytes(4, "big") + b"mdat"
-        + (16 + len(counter_payloads["counter-b.mov"])).to_bytes(8, "big") + counter_payloads["counter-b.mov"]
-        + atom(b"moov", b"movie-b"),
-    }
-    counter_mdat_shas = {name: hashlib.sha256(payload).hexdigest() for name, payload in counter_payloads.items()}
+    strip2 = Path.home() / "Desktop/Convert wall to 16x9 CGs/Continuity/strip2/D7-html"
+    if not strip2.exists():
+        pytest.skip(f"strip2 fixture is absent: {strip2}")
+    source_uuids = json.loads((strip2 / "assets/header.json").read_text())["slideList"]
+    source_slides = [
+        {"originalOrdinal": i + 1, "playerIndex": i, "exportedUuid": uuid, "skipped": False}
+        for i, uuid in enumerate(source_uuids)
+    ]
+    source_movies = _referenced_movies(strip2, source_slides, resolver=lambda base, relative: base / relative)
+    counter_movie_sources = {name: paths[0] for name, paths in source_movies.items()}
+    counter_mdat_shas = dict(D7_COUNTER_MDAT_SHA256)
     counter_movies = {}
     for deck in ("D7", "D7s"):
         export = qual_b_source / f"{deck}-html"
@@ -368,17 +388,15 @@ def _make_gates(root: Path) -> dict[str, object]:
         slides = [{"originalOrdinal": i + 1, "playerIndex": i, "exportedUuid": uuid, "skipped": False}
                   for i, uuid in enumerate(slide_uuids)]
         referenced = _referenced_movies(export, slides, resolver=lambda base, relative: base / relative)
-        assert set(referenced) == set(counter_payloads)
+        assert set(referenced) == set(D7_COUNTER_MDAT_SHA256)
         for name, paths in referenced.items():
             assert paths and all(path is not None for path in paths)
             for movie in paths:
                 movie.parent.mkdir(parents=True, exist_ok=True)
-                movie.write_bytes(counter_movie_bytes[name])
+                movie.unlink(missing_ok=True)
+                movie.symlink_to(counter_movie_sources[name])
             counter_movies[(deck, name)] = paths
-    probe_stub = PROBE_STUB
-    for name, sha in counter_mdat_shas.items():
-        probe_stub = probe_stub.replace(f"__{name.removesuffix('.mov').upper().replace('-', '_')}_MDAT_SHA256__", sha)
-    (g / "scripts" / "live_continuity_probe.py").write_text(probe_stub)
+    (g / "scripts" / "live_continuity_probe.py").write_text(PROBE_STUB)
     unrepaired = qual_b_source / "q7-fixtures" / "D7-unrepaired" / "html-player"
     shutil.copytree(qual_b_source / "D7-html", unrepaired)
     alpha_source = fixture("alpha-dsk-textures")
@@ -472,7 +490,7 @@ def _make_gates(root: Path) -> dict[str, object]:
         "sleeps": sleeps_list, "survivors": survivors, "patched": patched, "tmp": root, "qual_b_source": qual_b_source,
         "alpha_source": alpha_source, "alpha_donor": alpha_donor, "alpha_relative": alpha_relative,
         "alpha_relative_bytes": alpha_relative_bytes, "counter_mdat_shas": counter_mdat_shas,
-        "counter_movie_bytes": counter_movie_bytes, "counter_movies": counter_movies,
+        "counter_movie_sources": counter_movie_sources, "counter_movies": counter_movies,
     }
 
 
@@ -612,7 +630,8 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
     assert not list((gates["alpha_source"] / "html-unmodified").rglob("*.mp4"))
 
     counter_a = gates["counter_movies"][("D7s", "counter-a.mov")][0]
-    counter_a.write_bytes(gates["counter_movie_bytes"]["counter-b.mov"])
+    counter_a.unlink()
+    counter_a.symlink_to(gates["counter_movie_sources"]["counter-b.mov"])
     before = len(gates["events"]())
     counter_mismatch = gates["run"](outdir=gates["tmp"] / "counter-mismatch")
     relative = counter_a.relative_to(gates["qual_b_source"] / "D7s-html").as_posix()
@@ -622,7 +641,8 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
         "(QUAL_B_SOURCE must hold the strip2 two-strip exports); no run launched"
     ) in counter_mismatch.stderr
     assert gates["events"]()[before:] == ["prewarm html-unmodified", "prewarm html-unmodified"]
-    counter_a.write_bytes(gates["counter_movie_bytes"]["counter-a.mov"])
+    counter_a.unlink()
+    counter_a.symlink_to(gates["counter_movie_sources"]["counter-a.mov"])
 
     counter_b = gates["counter_movies"][("D7s", "counter-b.mov")][0]
     counter_b.unlink()
@@ -632,7 +652,7 @@ def test_positive_control_an_existing_empty_outdir_is_accepted(gates) -> None:
     assert counter_missing.returncode == 2
     assert f"D7s referenced counter movie {relative} is missing; no run launched" in counter_missing.stderr
     assert gates["events"]()[before:] == ["prewarm html-unmodified", "prewarm html-unmodified"]
-    counter_b.write_bytes(gates["counter_movie_bytes"]["counter-b.mov"])
+    counter_b.symlink_to(gates["counter_movie_sources"]["counter-b.mov"])
 
     slide_path = (
         gates["qual_b_source"]
@@ -1090,43 +1110,9 @@ def test_pass_g_runs_on_p2_and_every_deck_through_the_queue_in_order(gates) -> N
     assert len(set(artifacts)) == len(PASSG_FIXTURES)
     checks = [line for line in done.stdout.splitlines() if line.startswith("[PASSG ")]
     assert checks == [f"[PASSG {name}] status=pass exit=0" for name in PASSG_FIXTURES], done.stdout
-    assert "GATE FAILED: PASSG" not in done.stdout
+    assert "GATE FAILED: PASSG " not in done.stdout
     assert done.stdout.index("GATE FAILED: HOST red D6 --strip retire@8") < done.stdout.index("[PASSG P2]")
     assert done.stdout.index("[PASSG D6]") < done.stdout.index("[P2 --wait-profile fast]")
-
-
-def test_known_bad_every_non_pass_pass_g_outcome_fails_the_round_and_is_counted(gates) -> None:
-    """Fail closed: fail, inconclusive, no artifact, a non-zero exit, a missing status, a status from another
-    round, and an artifact that is not a Pass G one each count as one GATE FAILED -- never pending."""
-    modes = {
-        "P2": "g-full", "D1": "g-fail", "D2": "g-inconclusive", "D3": "g-none", "D4": "g-exit1", "D5": "die",
-        "D6": "foreign",
-    }
-    done = gates["run"](STUB_MODES=json.dumps({f"passG-{name}": mode for name, mode in modes.items()}))
-    out = done.stdout
-    assert "[PASSG P2] status=pass exit=0" in out and "    not a Pass G artifact (pass=None)" in out, out
-    assert "[PASSG D1] status=fail exit=0" in out and "    stub g-fail" in out
-    assert "[PASSG D2] status=inconclusive exit=0" in out and "    stub g-inconclusive" in out
-    assert re.search(r"^\[PASSG D3\] no artifact \(.+\) exit=0$", out, re.M)
-    assert "[PASSG D4] status=pass exit=1" in out
-    assert re.search(r"^\[PASSG D5\] no artifact \(.+\) exit=missing$", out, re.M)
-    assert re.search(r"^\[PASSG D6\] no artifact \(.+\) exit=stale\(1-2-3 0\)$", out, re.M)
-    failed = [line for line in out.splitlines() if line.startswith("    GATE FAILED: PASSG ")]
-    assert failed == [f"    GATE FAILED: PASSG {name}" for name in PASSG_FIXTURES]
-    summary = re.search(r"^DONE tier=full failed=(\d+) pending=(\d+) findings=0$", out, re.M)
-    assert summary, out
-    assert int(summary.group(1)) == len([line for line in out.splitlines() if line.startswith("    GATE FAILED: ")])
-    assert summary.group(2) == "0"
-    assert "PENDING REGISTRATION: PASSG" not in out
-    assert done.returncode == 1
-
-
-def test_known_bad_one_errored_pass_g_adds_exactly_one_failure_to_the_summary(gates) -> None:
-    """R2 (every Pass G run passing) is the positive control; D3's error adds exactly `GATE FAILED: PASSG D3`
-    to its multi-fault round's failure multiset."""
-    good, block = _multi_fault_round(gates, "passG-D3", "g-error")
-    assert "GATE FAILED: PASSG" not in good.stdout
-    assert "[PASSG D3] status=error exit=0" in block and "    stub g-error" in block
 
 
 def test_the_full_round_p2_arm_list(gates) -> None:
@@ -1257,116 +1243,6 @@ CC_LABELS = ["green", "--core-variant linear-bridge", "--carry-cover-null",
              "D1 green", "D1 --core-variant no-gl-clock", "D1 --carry-cover-null"]
 CC_EXTRA = [[], ["--core-variant", "linear-bridge"], ["--carry-cover-null"],
             [], ["--core-variant", "no-gl-clock"], ["--carry-cover-null"]]
-CARRY_COVER_BAD_CASES = [
-    ("carry-cover", "cc-fail", "status 'fail' != 'pass'"),
-    ("carry-cover", "cc-inconclusive", "status 'inconclusive' != 'pass'"),
-    ("carry-cover", "cc-error", "status 'error' != 'pass'"),
-    ("carry-cover", "cc-sha", "installed core sha is not the arm's"),
-    ("carry-cover", "cc-none", None),
-    ("carry-cover", "die", None),
-    ("carry-cover", "foreign", None),
-    ("carry-cover--core-variantlinear-bridge", "cc-pass", "status 'pass' != 'fail'"),
-    ("carry-cover--core-variantlinear-bridge", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
-    ("carry-cover--core-variantlinear-bridge", "cc-control", "control 'green' != 'red'"),
-    ("carry-cover--carry-cover-null", "cc-pass", "status 'pass' != 'fail'"),
-    ("carry-cover--carry-cover-null", "cc-inconclusive", "status 'inconclusive' != 'fail'"),
-    ("carry-coverD1", "cc-clock", "bridge clocks ['fallback'] are not all 'gl'"),
-    ("carry-coverD1--core-variantno-gl-clock", "cc-clock", "bridge clocks ['gl'] are not all 'fallback'"),
-    ("carry-coverD1", "cc-fixture", "fixture 'elsewhere' != "),
-]
-_RED = "PASSG-RED D1 --core-variant no-pin-hold"
-INSTRUMENT_BAD_CASES = [
-    (PASSG_RED_STEM, "gr-sha", _RED, "nullControl installed core sha"),
-    (PASSG_RED_STEM, "gr-extra", _RED, "red set ['G1-3-4:b2to3:carry', 'G2-1-2:b0to1:carry'] != registered"),
-    (PASSG_RED_STEM, "gr-unknown", _RED, "unknown ['G1-2-3:b1to2:carry']"),
-    (PASSG_RED_STEM, "gr-floor", _RED, "G1-3-4:b2to3:carry longest unpainted run 108 below the 109-frame floor"),
-    (PASSG_RED_STEM, "gr-nofloor", _RED, "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
-    (PASSG_RED_STEM, "die", _RED, None),
-    (PC_STEMS[0], "pc-plus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "hiddenTicks 7 != 6"),
-    (PC_STEMS[1], "pc-minus", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}", "hiddenTicks 5 != 6"),
-    (PC_STEMS[1], "pc-shift", f"PAINT-CONTROL D5 {PAINT_CONTROLS[1]}",
-     "target seq set [301, 302, 303, 304, 305, 306] != injected"),
-    (PC_STEMS[2], "pc-unfired", f"PAINT-CONTROL D5 {PAINT_CONTROLS[2]}", "injector never fired"),
-    (PC_STEMS[0], "pc-control", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}", "control '1:ancestor-half:pin@2' != "),
-    *((PC_STEMS[0], f"pc-no-{key}", f"PAINT-CONTROL D5 {PAINT_CONTROLS[0]}",
-       f"controlRecord unreadable: {key} missing") for key in ("aborted", "events", "errors")),
-    ("host-redD5--core-variantno-pin-hold", "red-noself", "HOST red D5 --core-variant no-pin-hold",
-     "arm.sampler is not schema 2 with selfCheck.ok"),
-    ("host-redD5--core-variantno-pin-hold", "red-floor", "HOST red D5 --core-variant no-pin-hold",
-     "b0to1:A:carry longest unpainted run 108 below the 109-frame floor"),
-    ("host-redD5--core-variantno-pin-hold", "red-nofloor", "HOST red D5 --core-variant no-pin-hold",
-     "paintFloor missing (a no-pin-hold red arm needs at least 60 frames)"),
-]
-
-MULTI_FAULT_FAILURES = {
-    **{(stem, mode): f"CARRY-COVER {CC_LABELS[CC_STEMS.index(stem)]}" for stem, mode, _ in CARRY_COVER_BAD_CASES},
-    **{(stem, mode): failed for stem, mode, failed, _ in INSTRUMENT_BAD_CASES},
-    ("passG-D3", "g-error"): "PASSG D3",
-}
-
-
-def _multi_fault_rounds() -> tuple[dict[str, str], ...]:
-    rounds: list[dict[str, str]] = []
-    counts: Counter[str] = Counter()
-    for stem, mode in MULTI_FAULT_FAILURES:
-        slot = counts[stem]
-        counts[stem] += 1
-        if slot == len(rounds):
-            rounds.append({})
-        rounds[slot][stem] = mode
-    assert len(rounds) == 7 and sum(map(len, rounds)) == 33
-    return tuple(rounds)
-
-
-MULTI_FAULT_ROUNDS = _multi_fault_rounds()
-MULTI_FAULT_SLOTS = {
-    (stem, mode): slot
-    for slot, modes in enumerate(MULTI_FAULT_ROUNDS)
-    for stem, mode in modes.items()
-}
-
-
-def _gate_failed(stdout: str) -> Counter[str]:
-    return Counter(line for line in stdout.splitlines() if line.startswith("    GATE FAILED: "))
-
-
-def _fault_block(stdout: str, failure: str) -> str:
-    lines = stdout.splitlines()
-    failed = f"    GATE FAILED: {failure}"
-    positions = [i for i, line in enumerate(lines) if line == failed]
-    assert len(positions) == 1, stdout
-    end = positions[0]
-    start = max(i for i, line in enumerate(lines[:end + 1]) if line.startswith("["))
-    block = lines[start:end + 1]
-    assert [line for line in block if line.startswith("    GATE FAILED: ")] == [failed], block
-    return "\n".join(block)
-
-
-def _multi_fault_round(gates, stem: str, mode: str) -> tuple[subprocess.CompletedProcess[str], str]:
-    slot = MULTI_FAULT_SLOTS[(stem, mode)]
-    modes = MULTI_FAULT_ROUNDS[slot]
-    good = gates["shared"]("--tier", "full")
-    good_summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=0$", good.stdout, re.M)
-    assert good_summary and int(good_summary.group(1)) == sum(_gate_failed(good.stdout).values()), good.stdout
-    bad = gates["shared"](STUB_MODES=json.dumps(modes, sort_keys=True))
-    expected = _gate_failed(good.stdout)
-    if "host-redD5--core-variantno-pin-hold" in modes:
-        baseline = "    GATE FAILED: HOST red D5 --core-variant no-pin-hold"
-        expected[baseline] -= 1
-    expected.update(f"    GATE FAILED: {MULTI_FAULT_FAILURES[case]}" for case in modes.items())
-    actual = _gate_failed(bad.stdout)
-    assert actual == expected, bad.stdout
-    findings = sum(case_stem.startswith("host-redD5") and case_mode.startswith("red-")
-                   for case_stem, case_mode in modes.items())
-    summary = re.search(r"^DONE tier=full failed=(\d+) pending=(\d+) findings=(\d+)$", bad.stdout, re.M)
-    assert summary, bad.stdout
-    assert tuple(map(int, summary.groups())) == (sum(actual.values()), 0, findings), bad.stdout
-    assert "PENDING REGISTRATION:" not in bad.stdout
-    assert bad.returncode == 1
-    failure = MULTI_FAULT_FAILURES[(stem, mode)]
-    return good, _fault_block(bad.stdout, failure)
-
-
 MM_FEED_STEMS = [
     "mm-feed-{}-{}".format(*arm.split()[:2])
     for arm in re.findall(r'^  "([^"]+)"$', SCRIPT.read_text().split("MM_FEED_ARMS=(", 1)[1].split("\n)", 1)[0], re.M)
@@ -1424,7 +1300,7 @@ def test_carry_cover_runs_its_three_controls_on_p2_and_d1_through_the_queue_in_o
     assert lines[lines.index(checks[3]) + 2] == (
         "    b1to2: verdict=pass maxStripPx=1 cleanShare=1.0 undecidedFrames=0 clock=gl lagMs=7.0"), done.stdout
     assert lines[lines.index(checks[4]) + 2].endswith(" clock=fallback lagMs=7.0"), done.stdout
-    assert "GATE FAILED: CARRY-COVER" not in done.stdout and "MISMATCH: " not in done.stdout
+    assert "GATE FAILED: CARRY-COVER" not in done.stdout
     assert done.stdout.index("[HOST --strip glReplay@2 --gl-replay auto]") < done.stdout.index("[CARRY-COVER green]")
     assert done.stdout.index("[PASSG D6]") < done.stdout.index("[CARRY-COVER green]")
     assert done.stdout.index("[CARRY-COVER D1 --carry-cover-null]") < done.stdout.index("[P2 --wait-profile fast]")
@@ -1434,20 +1310,6 @@ def test_the_dev_tier_runs_no_carry_cover_pass_g_red_paint_control_or_pin_hold_r
     done = gates["run"]("--tier", "dev")
     assert not [e for e in gates["events"]() if any(k in e for k in ("carry-cover", "passG-red", "paint-control", "no-pin-hold"))]
     assert "[PASSG-RED" not in done.stdout and "[PAINT-CONTROL" not in done.stdout
-
-
-@pytest.mark.parametrize(("stem", "mode", "why"), CARRY_COVER_BAD_CASES)
-def test_known_bad_every_unexpected_carry_cover_outcome_fails_the_round(gates, stem: str, mode: str, why: str | None) -> None:
-    """Fail closed: a green that does not pass, a red or null control that passes (the instrument is blind) or is
-    inconclusive, a foreign core sha, fixture or control, a bridge on the wrong clock (a green on the fallback, the D1
-    red on the GL clock), no artifact, and a missing or stale status each count as exactly one GATE FAILED -- never
-    pending."""
-    _, block = _multi_fault_round(gates, stem, mode)
-    label = CC_LABELS[CC_STEMS.index(stem)]
-    if why is not None:
-        assert f"    MISMATCH: {why}" in block, block
-    else:
-        assert re.search(rf"^\[CARRY-COVER {re.escape(label)}\] no artifact \(.+\) exit=", block, re.M), block
 
 
 # --------------------------------------------------------------------------
@@ -1476,29 +1338,12 @@ def test_pass_g_red_and_the_paint_controls_run_in_order_and_match_a_well_formed_
                         "--artifact", f"{out}/{stem}.json"]
     stdout = done.stdout
     assert "GATE FAILED: PASSG-RED" not in stdout and "GATE FAILED: PAINT-CONTROL" not in stdout, stdout
-    assert ("    [PASSG-RED D1 --core-variant no-pin-hold] armed leg G1-3-4 b2to3:carry paint fail unpainted=108 "
+    assert ("    [PASSG-RED D1 --core-variant no-pin-hold] armed leg G1-3-4 "
+            "b2to3:counter-a.mov#1->counter-a.mov#1:carry paint fail unpainted=108 "
             "partial=0 double=0 substitute=0 longestRun=108") in stdout
     order = ["[PASSG D6]", "[PASSG-RED D1 --core-variant no-pin-hold]", *[f"[PAINT-CONTROL D5 {s}]" for s in PAINT_CONTROLS],
              "[CARRY-COVER green]"]
     assert [stdout.index(o) for o in order] == sorted(stdout.index(o) for o in order)
-
-
-@pytest.mark.parametrize(("stem", "mode", "failed", "why"), INSTRUMENT_BAD_CASES)
-def test_known_bad_every_broken_instrument_artifact_fails_exactly_its_own_check(
-    gates, stem: str, mode: str, failed: str, why: str | None,
-) -> None:
-    """Fail closed: a foreign core sha, an extra red, an unreadable leg, a red run below the registered floor, no
-    status; N+1 / N-1 hidden ticks, a set shifted one tick (what a rAF-phase reader sees under `late`), a control that
-    never fired, another control's artifact; a host red artifact with no selfCheck. Each is exactly one GATE FAILED
-    among the instrument checks (the default host red stub artifact for D5 no-pin-hold already fails, so a round that
-    injects a D5 fault replaces that failure rather than adding one)."""
-    _, block = _multi_fault_round(gates, stem, mode)
-    if failed.startswith("HOST") and mode in ("red-noself", "red-nofloor"):
-        assert "    observed red: ['b0to1:A:carry'] -> MISMATCH" in block, block
-    if why is not None:
-        assert why in block, block
-    else:
-        assert f"[{_RED}] no artifact (" in block
 
 
 def test_paint_census_entries_are_findings_that_never_change_the_verdict_or_the_exit(gates) -> None:
@@ -1506,8 +1351,10 @@ def test_paint_census_entries_are_findings_that_never_change_the_verdict_or_the_
     written to <outdir>/paint-findings.txt and counted on the DONE line, and FAIL counts only the GATE FAILED lines."""
     done = gates["run"](STUB_MODES=json.dumps({"host-redD5--core-variantno-pin-hold": "red-ok"}))
     out = done.stdout
-    assert "    observed red: ['b0to1:A:carry'] -> MATCH" in out and "GATE FAILED: HOST red D5 --core-variant no-pin-hold" not in out, out
-    assert "    [HOST D5 --core-variant no-pin-hold] arm b0to1:A:carry paint fail unpainted=108 " in out
+    exact = "b0to1:counter-a.mov#1->counter-a.mov#1:carry"
+    assert f"    observed red: ['{exact}', 'b1to2:counter-a.mov#1->counter-a.mov#1:carry'] -> MATCH" in out
+    assert "GATE FAILED: HOST red D5 --core-variant no-pin-hold" not in out, out
+    assert f"    [HOST D5 --core-variant no-pin-hold] arm {exact} paint fail unpainted=108 " in out
     assert "    FINDING HOST D5 --core-variant no-pin-hold | arm | endOfShow | " in out
     assert (gates["out"] / "paint-findings.txt").read_text().count("\n") == 1
     assert "paint census findings by class (report only): endOfShow=1 " in out
@@ -1515,3 +1362,19 @@ def test_paint_census_entries_are_findings_that_never_change_the_verdict_or_the_
     assert summary, out
     assert int(summary.group(1)) == len([line for line in out.splitlines() if line.startswith("    GATE FAILED: ")])
     assert done.returncode == 1, "the stub's other red arms cannot match"
+
+
+def test_one_multi_fault_round_counts_each_migrated_gate_once(gates) -> None:
+    modes = {
+        "passG-D1": "g-exit1",
+        PASSG_RED_STEM: "gr-extra",
+        PC_STEMS[0]: "pc-minus",
+        CC_STEMS[0]: "cc-inconclusive",
+    }
+    done = gates["run"](STUB_MODES=json.dumps(modes))
+    failures = [line.strip() for line in done.stdout.splitlines() if line.startswith("    GATE FAILED: ")]
+    for prefix in ("GATE FAILED: PASSG D1", "GATE FAILED: PASSG-RED ",
+                   "GATE FAILED: PAINT-CONTROL ", "GATE FAILED: CARRY-COVER green"):
+        assert sum(line.startswith(prefix) for line in failures) == 1, done.stdout
+    summary = re.search(r"^DONE tier=full failed=(\d+) pending=0 findings=", done.stdout, re.M)
+    assert summary and int(summary.group(1)) == len(failures)

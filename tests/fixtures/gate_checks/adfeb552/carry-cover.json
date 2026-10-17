@@ -1,0 +1,25 @@
+{
+  "bridges": [
+    {
+      "boundary": "b3to4",
+      "clock": {
+        "lagMs": 5,
+        "via": "gl"
+      },
+      "result": {
+        "cleanShare": 1.0,
+        "maxStripPx": 0,
+        "undecidedFrames": 0,
+        "verdict": "pass"
+      }
+    }
+  ],
+  "continuity": {
+    "sha256": "838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64"
+  },
+  "control": "green",
+  "coreSha256": "838eeedfbc6324e13e563c13d635bee3104b4930b08e655e97c3241404575c64",
+  "fixture": "/Users/anyhowclick/Desktop/work/obed-edom/output/fixtures/p2-recovery/html-adversarial/html-player",
+  "kind": "live-continuity-probe-carry-cover",
+  "status": "pass"
+}
