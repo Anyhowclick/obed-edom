@@ -87,6 +87,9 @@ trashing any): `stage-b-coord` (merges), `funny-pasteur-751a72` (coordinator, `c
   - Saves about 35 s of wall time per round.
 
 ## Owner decisions (2026-10-15/16/17)
+- 2026-10-17: C5 host-feed rows: (1) feed-on `holdFrame` must be an explicit present verdict record of `None` — a missing
+  field is MISMATCH (P emits it at C4 integration); (2) REPORT-only observations (`entryColdStart`, the one-frame resume skip)
+  never change an arm's class: the arm stays MATCH and the observations print as `REPORT:` lines.
 - 2026-10-17: gate 4 decisions 2–4 (`gate4-historical-impact.md` §Decided): inventory accepted after the re-count under the
   155.x rule (1,075 / 299 / 0); cost gate `> 8`; wrf rule narrowed as applied. Decision 5 (Q2) waits for gate 3 data; lean
   per-visit median > 2P, p95/max report-only.
