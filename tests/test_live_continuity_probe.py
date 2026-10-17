@@ -12283,15 +12283,29 @@ def _hold_frame(mode: str = "departure") -> dict[str, Any]:
     return record
 
 
-@pytest.mark.parametrize(("mutate", "expected"), [
-    (lambda r: None, True),
-    (lambda r: r["reads"][1].update(dVideo=12.0), False),
-    (lambda r: r["reads"][1].update(dSep=2.0), None),
+@pytest.mark.parametrize(("mutate", "expected", "checks"), [
+    (lambda r: None, True, None),
+    (lambda r: r["reads"][1].update(dVideo=12.0), False, None),
+    (lambda r: r["reads"][1].update(dSep=2.0), None, None),
+    (lambda r: (r.update(crossfade=True), r["reads"][1].update(
+        kind="counter", counter=None, referenceCounter=7, counterReason="ambiguous",
+    )), False, [True, False, True]),
+    (lambda r: (r.update(crossfade=True), r["reads"][1].update(
+        kind="counter", counter=None, referenceCounter=7, counterReason="marker",
+    )), None, None),
+    (lambda r: r["reads"][1].update(
+        kind="counter", counter=None, referenceCounter=7, counterReason="ambiguous",
+    ), None, None),
 ])
-def test_feed_live_pass_fail_inconclusive(mutate: Any, expected: bool | None) -> None:
+def test_feed_live_pass_fail_inconclusive(
+    mutate: Any, expected: bool | None, checks: list[bool] | None,
+) -> None:
     record = _feed_live()
     mutate(record)
-    assert probe.score_feed_live(record)["verdict"] is expected
+    verdict = probe.score_feed_live(record)
+    assert verdict["verdict"] is expected
+    if checks is not None:
+        assert [check["ok"] for check in verdict["checks"]] == checks
 
 
 def test_feed_live_needs_two_decoder_reads_and_distinguishes_a_frozen_decoder() -> None:
@@ -12756,6 +12770,11 @@ def test_report_shaped_feed_evidence_scores_each_leaf_and_feed_off_red() -> None
     arm = probe.score_arm(capture, {"verdicts": [spec]}, {})
     record = arm["feedEvidence"]["verdicts"][entry["id"]]
     scored = arm[entry["id"]]["underArtwork"]
+    assert record["feed"]["crossfade"] is False
+    assert probe.mm_feed_instrument.verdict_records(
+        report, [{**entry, "feed": {**entry["feed"], "to": {"upload": 2, "size": [640, 360]}}}],
+        continuous_expected=True,
+    )[entry["id"]]["feed"]["crossfade"] is True
     assert scored["verdict"] is True
     assert all(scored[name]["verdict"] is not None for name in (
         "feedLive", "noRiderAboveCanvas", "labelsOverFeed", "artworkAbove",
